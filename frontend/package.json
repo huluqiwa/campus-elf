@@ -1,0 +1,16 @@
+{
+  "name": "campus-elf-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.28.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test:e2e": "pnpm build && playwright test",
+    "dev:admin": "pnpm --filter admin dev",
+    "dev:campus": "pnpm --filter campus dev"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0"
+  }
+}

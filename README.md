@@ -16,7 +16,9 @@
 - **M0-B：Docker Compose core/rag 依赖栈**——PostgreSQL 16、Redis 7.4、MinIO（源码构建固定 RELEASE）、MailHog、ClamAV、Qdrant 1.19.2、TEI 1.9.4 embed/rerank 全部 healthy；TEI 返回 1024 维向量与重排分数。
 - **M0-C：Harness 骨架**——契约、能力/工具注册表、工具执行器（租户/权限/只读/可用性/数据范围/schema/超时）、trace 脱敏、HMAC 审计链、版本化 Prompt 注册表；48 个测试全绿，两轮独立审查 Major 已修复。
 
-待完成：前端脚手架、MinerU/Langfuse/Arq 兼容性验证、CPU 嵌入/重排基准、M0 验收报告。
+- **M0-D：前端脚手架**——pnpm workspace、apps/admin（Element Plus）、apps/campus（Vant 4）、packages/api-client/ui/config；`pnpm build`/`typecheck` 通过，Playwright 冒烟 2 passed。
+
+待完成：MinerU/Langfuse/Arq 兼容性验证、CPU 嵌入/重排基准、M0 验收报告。
 
 ## 技术栈（已锁定）
 

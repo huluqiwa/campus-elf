@@ -9,6 +9,7 @@
 | M0-A 后端最小骨架 | 2026-10-19 | feature/M0-foundation | 独立 Explore review agent | 0 | 1 | 12 | Major 已修复；低成本 Minor 已修；其余记录 | 已提交 |
 | M0-B Compose 依赖栈 | 2026-10-19 | feature/M0-foundation | 独立 Explore review agent | 1 | 3 | 14 | Blocker/Major 已修；关键 Minor 已修；MinerU 留 M0-E | 已提交 |
 | M0-C Harness 骨架 | 2026-10-19 | feature/M0-foundation | 两轮独立审查（第二轮补做） | 0 | 8+1 | 20 | 两轮 Major 已修；关键 Minor 已修；其余记录 | 已提交 |
+| M0-D 前端脚手架 | 2026-10-19 | feature/M0-foundation | 独立 Explore review agent | 0 | 1 | 7 | Major 已修；关键 Minor 已修；其余记录 | 可提交 |
 
 ### M0-A 后端最小骨架
 
@@ -101,6 +102,22 @@
   - `uv run ruff check .`：通过
   - `uv run mypy app tests`：通过
 - 结论：两轮审查的 Major 均已修复，可提交；进入 M0-D 时把剩余 Minor 纳入技术债清单。
+
+### M0-D 前端脚手架
+
+- 日期：2026-10-19
+- 范围：`frontend/**`（pnpm workspace、apps/admin、apps/campus、packages/api-client/ui/config、Playwright 配置与 e2e）、根 `.env.example` 前端段
+- 审查发现：
+  - **Major**：前端直连 `127.0.0.1:8000/health/live`，而后端无 CORS、Vite 代理只含 `/api`，浏览器下健康检查必然失败。已修复：Vite 代理增加 `/health`；前端默认 `VITE_API_BASE_URL` 留空走同源相对路径；新增 `frontend/.env.example`；根 `.env.example` 说明 Vite 不读根 `.env`。
+  - **Minor 已修**：api-client 规范化尾斜杠 + 5s 超时；Element Plus 配置 zh-CN locale；Playwright `reuseExistingServer` 改为 `!CI`；README 代理/环境变量说明。
+  - **Minor 记录/后续**：缺 ESLint/Prettier/lint 脚本；缺 Vitest；Element Plus 全量引入导致 admin JS 1.03MB、CSS 361KB；Vant 全量 CSS；e2e 只有静态渲染断言、无失败态/接口 mock；`playwright.config.ts`/`e2e` 未纳入 tsconfig；未跑 pnpm audit。
+- 复测：
+  - `pnpm install`：成功（esbuild 构建已批准）
+  - `pnpm build`：admin/campus 均成功
+  - `pnpm typecheck`：通过
+  - `pnpm test:e2e`：2 passed（admin + campus，系统 Chrome + vite preview）
+  - 代理行为：`/health` 转发到 127.0.0.1:8000；后端未启动时页面显示“后端未连接”，冒烟不受影响
+- 结论：Major 已修，可提交；剩余 Minor 记入 M0-F/M1 技术债。
 
 ## 高风险功能复审记录
 
