@@ -46,6 +46,7 @@
   - E2E：
   - AI 评估：
 - 复审：
+- 更好做法与 TD 处置：TD-xxx（已采纳/已延后/已拒绝/已完成）
 - 结论：可提交 / 阻塞
 ```
 
@@ -101,6 +102,7 @@
   - `uv run pytest`：48 passed
   - `uv run ruff check .`：通过
   - `uv run mypy app tests`：通过
+- 更好做法与 TD 处置：TD-015~TD-028 已登记 `docs/tech-debt.md`，其中 TD-027/028 已完成，TD-016/018/025/026 已采纳，TD-021 已拒绝（理由见台账），其余延后。
 - 结论：两轮审查的 Major 均已修复，可提交；进入 M0-D 时把剩余 Minor 纳入技术债清单。
 
 ### M0-D 前端脚手架
@@ -117,6 +119,7 @@
   - `pnpm typecheck`：通过
   - `pnpm test:e2e`：2 passed（admin + campus，系统 Chrome + vite preview）
   - 代理行为：`/health` 转发到 127.0.0.1:8000；后端未启动时页面显示“后端未连接”，冒烟不受影响
+- 更好做法与 TD 处置：TD-029~TD-038 已登记 `docs/tech-debt.md`，其中 TD-037/038 已完成，TD-029~031/033~036 已采纳，TD-032 延后。
 - 结论：Major 已修，可提交；剩余 Minor 记入 M0-F/M1 技术债。
 
 ## 高风险功能复审记录

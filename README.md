@@ -48,6 +48,7 @@
 | `docs/deployment.md` | 环境、Compose、Nginx、HTTPS、备份、Langfuse 独立主机 |
 | `docs/code-review-checklist.md` | 代码审查清单与分级 |
 | `docs/review-log.md` | 功能点审查记录模板 |
+| `docs/tech-debt.md` | 更好做法/技术债台账与闭环处置 |
 | `evals/` | LLM 评估集、rubric、runner 设计 |
 | `benchmarks/` | k6/locust 压测脚本与报告规范 |
 
