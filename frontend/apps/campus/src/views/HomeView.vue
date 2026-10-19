@@ -31,7 +31,11 @@ onMounted(async () => {
 <style scoped>
 .page {
   padding: 24px 16px;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 }
 h1 {
   font-size: 20px;

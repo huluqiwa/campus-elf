@@ -149,6 +149,31 @@
 - 更好做法与 TD 处置：TD-041（证据更正，延后 M3）、TD-042（完成）、TD-043（完成：自定义镜像 + 三档实测）、TD-044（已缓解，M6 收口）、TD-045（已采纳，M3 固定传递依赖）、TD-046（完成：健康检查≠可用）、TD-047（已采纳，M0-F CI）、TD-048/049（已采纳/延后，M6）；新增 TD-050（已拒绝）、TD-051（已采纳，M1 功能探针）、TD-052（延后 M0-F）、TD-053（延后 M3，镜像体积）。
 - 结论：两轮审查的 Blocker/Major 均已修复并复测通过，可提交；剩余 Minor 已登记 TD。
 
+### M0-F 测试基础设施与 M0 收口
+
+- 日期：2026-10-20
+- 范围：`backend/app/{api,core,harness}`（`/health/ready` 探活、structlog 统一 JSON、空壳 Loop SSE、配置校验、sink 容量）、`backend/tests/**`（测试栈/Fixtures/业务场景 BS-M0-01）、`scripts/{ci.sh,test-stack.sh,check_eval_cases.py}`、`.github/workflows/**`、`.gitleaks.toml`、`frontend/**`（ESLint/Prettier/Vitest/按需引入/e2e mock/tsconfig）、`benchmarks/**`、`deploy/{docker-compose.test.yml,tei/prefetch.py}`、`docs/m0-acceptance.md` 等
+- 审查方式：两个独立审查 agent（① 后端/CI；② 前端/脚本与基准），第一轮 + 复审两轮；审查者对关键结论均实机复现（含反例）
+- 第一轮（①）1 Blocker + 4 Major：
+  - **Blocker**：production 下 `DEV_SKELETON_LOOP_ENABLED=true` 曾被放行 → 未鉴权的空壳入口可上线。修复：`Settings` 生产校验新增 fail-fast（`test_production_rejects_skeleton_loop_switch`）。
+  - **Major**：`/health/ready` 遇非法 Redis DSN 抛 500 而非 503（`from_url` 在 try 外）；生产启动报错回显 `REDIS_URL`（含口令）→ 启用 `hide_input_in_errors=True` 并补测试；空壳 Loop 在客户端断开/生成失败时不落 trace、不发 `error` 事件 → 生成器三分支收尾（`CLIENT_CANCELLED` / `STREAM_ERROR` / 正常），并补中断路径测试；评估用例集门禁口径弱于 README（PI/CT 对抗未按 20 校验、缺类别不报错）→ 固定类别清单与逐类下限。
+  - **Minor 已修**：验收报告数字/台账错列、日志入口顺序约束写进 backend README、`_trace_sink` 缺失改为显式失败、内存 sink 加容量上限、业务场景复用一次性 DB 护栏、`ci.sh` 与 CI 步骤对齐（`uv sync --frozen`、`--with-e2e`、去掉重复 `-q`）、`.env.example` 补开关、gitleaks 白名单收窄、SSE 字段对齐 `design.md` §5.8。
+- 第一轮（②）2 Major：
+  - **Major**：`scripts/test-stack.sh` 的 `wait_healthy` 会把 `compose ps` 报错/空输出判成 healthy（假绿）；**复审发现该修复实际未落地**（脚本化替换静默未匹配），已重新实现并用两个负例复测：期望容器数不足 9 → 超时失败；compose 文件不存在 → 60 次重试提示 + 失败。
+  - **Major**：Prettier 门禁未接入且当时红灯（与 TD-029「已完成」矛盾）→ `.prettierrc` 改 `endOfLine: auto`、生成物入 `.prettierignore`、全量格式化、`format:check` 进 `frontend.yml` 与 `ci.sh`。
+  - **Minor 已修**：测试栈 redis 改 tmpfs + 关闭持久化（不再产生匿名卷）、提示走 stderr、`print_env` 读取实际 user/db、`up-all` 前置镜像检查、单实例约束文档化、删除冗余 `preview.proxy`（Vite 7 继承 `server.proxy`）、e2e 失败产物路径改 `test-results/`、prefetch 本地模式改 `cache_dir`、基准文档措辞收敛、e2e 悬挂用例窗口 15s→20s、`vite.config` 注释注明测量条件。
+- 第二轮（①）：**通过**。剩余 Minor 已处理：验收报告 TD 表按台账重排（TD-043 → 已采纳、补 TD-044/048）、台账评审行纳入 TD-061~063、`conversation_id` 在 meta 与 trace 间改为同一解析值（非 UUID 由服务端另分配）、sink 容量补单测、keep-alive 头加语义注释、`ci.sh` 差异说明补 `pnpm install`、本日志补记。
+- 第二轮（②）：**有条件通过**（唯一 Major 即上面的 `wait_healthy` 实际未修），修复后复测通过。
+- 复测证据（最终）：
+  - `cd backend && uv run ruff check app tests`、`uv run mypy app tests`（44 文件）全绿；
+  - `eval "$(bash scripts/test-stack.sh env)"` 后 `uv run pytest` → **86 passed**（单元 82 + 业务场景 3 + 集成 1；连续三轮稳定）；
+  - 反例：production + 开关 → ValidationError；错误文本不含口令；`REDIS_URL=127.0.0.1:56379` → 503 + `detail=ValueError`；DB 0/无 DB 段/5 → 护栏拒绝；
+  - 空壳 Loop：契约字段（meta/step/done/error）与中断、错误、缺失 sink 三条路径均有实测；
+  - `bash scripts/ci.sh --with-e2e` → 除本机未装 gitleaks（SKIP）外全部 PASS（含 bandit/pip-audit 双项目、Prettier、Vitest、Playwright 5 passed）；
+  - 前端：`pnpm lint/format:check/typecheck/test:unit/test:e2e` 全绿；admin JS 1.03MB→112KB、CSS 361KB→8.94KB。
+- 更好做法与 TD 处置：TD-002/005/010/029~035/047/052/058 已完成；新增 TD-056（CPU 重排延迟，M3/M4）、TD-057（CI 待远端生效，M1）、TD-059（空壳 Loop 认证，M4）、TD-060（ragas/diskcache 无修复版本，监控）、TD-061（生产未强制关 /docs，M6）、TD-062（ready 探活连接池化，M1）、TD-063（Accept 校验与可注入超时，M4）。
+- 结论：两轮审查的 Blocker/Major 全部修复并复测通过，可提交；M0 验收见 `docs/m0-acceptance.md`。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

@@ -1,0 +1,21 @@
+# gitleaks 配置：在默认规则基础上放行测试假值与配置样板，避免安全扫描被误报淹没（TD-052）。
+#
+# 注意：只放行「明确的假值/占位符文件」，不做整目录豁免——
+# 测试目录与文档同样可能误粘真实凭证，必须继续被扫描。
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "测试假值与配置样板（均非真实凭证）"
+
+paths = [
+  "backend/tests/support/fakes.py",
+  "\\.env\\.example",
+  "\\.env\\.test\\.example",
+]
+
+regexes = [
+  "FAKE_[A-Z_]+",
+  "change-me",
+]

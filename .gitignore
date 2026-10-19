@@ -10,6 +10,8 @@ vendor/
 .env
 .env.*
 !.env.example
+!.env.*.example
+deploy/.env.test
 *.pem
 *.key
 *.p12

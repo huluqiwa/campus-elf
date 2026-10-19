@@ -1,0 +1,66 @@
+name: security
+
+# 安全扫描：机密泄漏（gitleaks）、Python 依赖漏洞（pip-audit）、静态安全分析（bandit）、
+# 前端依赖审计（pnpm audit）。CI 中使用的口令均为一次性容器内的哑值（非凭证）。
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  secrets-and-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks 需要完整历史
+
+      - name: gitleaks（机密扫描）
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: pip-audit（后端依赖漏洞）
+        working-directory: backend
+        run: |
+          uv sync --frozen
+          uv run --with pip-audit pip-audit --skip-editable
+        continue-on-error: false
+
+      - name: pip-audit（evals 依赖漏洞）
+        working-directory: evals
+        # 忽略项见 TD-060：ragas/diskcache 当前为上游最新版且无修复版本（evals 为隔离的
+        # 本地评估项目，不进生产镜像）；上游发布修复后必须移除忽略并升级。
+        run: |
+          uv sync --frozen
+          uv run --with pip-audit pip-audit --skip-editable \
+            --ignore-vuln PYSEC-2026-2447 \
+            --ignore-vuln PYSEC-2026-3046
+        continue-on-error: false
+
+      - name: bandit（后端静态安全分析）
+        working-directory: backend
+        run: uv run --with bandit bandit -q -r app -x tests
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: pnpm audit（前端依赖漏洞）
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm audit --audit-level high

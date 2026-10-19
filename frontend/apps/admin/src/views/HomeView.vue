@@ -34,7 +34,11 @@ onMounted(async () => {
   max-width: 960px;
   margin: 0 auto;
   padding: 48px 24px;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 }
 h1 {
   font-size: 24px;

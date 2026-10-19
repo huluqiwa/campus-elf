@@ -2,6 +2,8 @@
 
 from uuid import uuid4
 
+import pytest
+
 from app.harness.contracts import StopReason, TraceRecord, TraceSpan
 from app.harness.trace import InMemoryTraceSink, TraceRecorder
 
@@ -52,3 +54,27 @@ def test_trace_recorder_writes_turn_and_span() -> None:
     assert sink.turns[0].trace_id == "trace-1"
     assert sink.turns[0].spans[0].attributes["token"] == "***"
     assert sink.turns[0].spans[0].attributes["email"] == "***"
+
+def test_in_memory_sink_capacity_trims_oldest() -> None:
+    """容量满后按 FIFO 丢弃最旧记录（避免长驻进程无界增长）。"""
+
+    sink = InMemoryTraceSink(capacity=2)
+    for index in range(3):
+        sink.write_span(
+            TraceSpan(
+                trace_id=f"t{index}",
+                span_type="stage",
+                name=f"s{index}",
+                start_ms=0,
+                duration_ms=0,
+            )
+        )
+
+    assert [span.trace_id for span in sink.spans] == ["t1", "t2"]
+
+
+def test_in_memory_sink_rejects_non_positive_capacity() -> None:
+    """非法容量直接报错，避免静默退化为无界。"""
+
+    with pytest.raises(ValueError, match="capacity must be positive"):
+        InMemoryTraceSink(capacity=0)

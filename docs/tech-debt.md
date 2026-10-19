@@ -30,15 +30,15 @@
 | ID | 来源 | 更好做法 | 处置 | 目标 | 证据/理由 |
 |---|---|---|---|---|---|
 | TD-001 | M0-A | 用 `create_app()` 工厂 + lifespan，避免导入即配置副作用 | 已延后 | M1 | 当前单进程入口可接受；接 DB/Redis 生命周期时统一改造 |
-| TD-002 | M0-A | 统一 uvicorn/stdlib 日志为 JSON（structlog ProcessorFormatter） | 已延后 | M0-F | 当前应用日志 JSON，uvicorn/httpx 仍文本 |
+| TD-002 | M0-A | 统一 uvicorn/stdlib 日志为 JSON（structlog ProcessorFormatter） | 已完成 | M0-F | `configure_logging` 用 ProcessorFormatter 接管 stdlib 并清空 uvicorn handler；`tests/test_logging.py` 断言单行 JSON |
 | TD-003 | M0-A | 版本号单一来源（importlib.metadata） | 已延后 | M1 | pyproject 与 Settings 重复 `0.1.0` |
 | TD-004 | M0-A | 生产可关闭 `/docs`、`/redoc` | 已完成 | M0-A | `docs_enabled` 配置已落地（c3e53bb） |
-| TD-005 | M0-A | `/health/ready` 检查 DB/Redis/Qdrant 依赖 | 已采纳 | M0-F | M0-B 起依赖已可探活；接 backend 后补 |
+| TD-005 | M0-A | `/health/ready` 检查 DB/Redis/Qdrant 依赖 | 已完成 | M0-F | 逐项探活（ok/not_configured/error）+ 失败 503，只回显异常类型不回显凭证；单元/业务场景覆盖 |
 | TD-006 | M0-A | 收紧 mypy `ignore_missing_imports` | 已延后 | M1 | 先保证全绿；第三方 stub 稳定后再收紧 |
 | TD-007 | M0-B | MinIO 运行时改用最小镜像（非 Go 全量镜像） | 已延后 | M6 | 已非 root；镜像体积 553MB 偏大 |
 | TD-008 | M0-B | Redis 密码改用 config/secret，避免 argv 可见 | 已延后 | M1 | 当前仅 loopback；接生产前必须改 |
 | TD-009 | M0-B | Postgres 显式 shared_buffers/max_connections 调优 | 已延后 | M1 | 当前仅 `shm_size` |
-| TD-010 | M0-B | TEI 模型离线预置/支持 ETag 的镜像源 | 已延后 | M0-F | 直连下载 ~4.5GB；已固定 revision |
+| TD-010 | M0-B | TEI 模型离线预置/支持 ETag 的镜像源 | 已完成 | M0-F | `deploy/tei/prefetch.py`（按固定 revision 预取到卷/目录，支持 HF_ENDPOINT）；生产镜像烘焙并入 TD-054（M6） |
 | TD-011 | M0-B | ClamAV 固定精确版本 tag，而非 `stable` digest | 已延后 | M6 | 已用 digest 固定内容；tag 语义浮动 |
 | TD-012 | M0-B | MinerU 4.0.12 镜像构建 + V1 API + 6GB 档位降级验证 | 已完成 | M0-E | 自定义 torch 镜像构建成功；standard/basic/flash 三档真实解析通过，显存 <500MiB 未降级 |
 | TD-013 | M0-B | 默认只启 core，rag/parser 分开；文档与 compose 对齐 | 已完成 | M0-B | bbc2bfd 已修文档与 profile 口径 |
@@ -57,13 +57,13 @@
 | TD-026 | M0-C | 审计/trace 落 PostgreSQL 仅追加表 + WORM 导出 | 已采纳 | M1/M6 | 当前内存实现不承担生产审计 |
 | TD-027 | M0-C | 注册期 `check_schema` + 运行期 schema 异常降级 | 已完成 | M0-C | b15beff 已修并测试 |
 | TD-028 | M0-C | `write_turn` 嵌套 spans 脱敏 | 已完成 | M0-C | b15beff 已修并测试 |
-| TD-029 | M0-D | 补齐 ESLint/Prettier/lint 脚本并纳入门禁 | 已采纳 | M0-F | 当前只有 vue-tsc/tsc |
-| TD-030 | M0-D | 为 api-client 增加 Vitest 单测 | 已采纳 | M0-F | 当前只有 Playwright 冒烟 |
-| TD-031 | M0-D | Element Plus 按需引入 + manualChunks，降低 admin 1MB 包体 | 已采纳 | M0-F/M6 | build 警告 chunk >500KB |
+| TD-029 | M0-D | 补齐 ESLint/Prettier/lint 脚本并纳入门禁 | 已完成 | M0-F | 扁平配置 `eslint.config.mjs` + `.prettierrc.json`；`pnpm lint/format:check` 进 CI 与 `scripts/ci.sh` |
+| TD-030 | M0-D | 为 api-client 增加 Vitest 单测 | 已完成 | M0-F | `packages/api-client/src/index.test.ts` 5 用例（尾斜杠归一、同源路径、非 2xx、超时中断、网络错误） |
+| TD-031 | M0-D | Element Plus 按需引入 + manualChunks，降低 admin 1MB 包体 | 已完成 | M0-F | 按需引入生效：admin JS 1.03MB→112KB、CSS 361KB→8.94KB；实测 manualChunks 会让入口再导出无法摇树（914KB），已移除并记录 |
 | TD-032 | M0-D | Vant 按组件引样式，降低 H5 CSS 体积 | 已延后 | M6 | 当前全量 199KB CSS |
-| TD-033 | M0-D | e2e 增加失败态/接口 mock；CI 下不复用已有服务 | 已采纳 | M0-F | CI flag 已改；mock/失败态待补 |
-| TD-034 | M0-D | `playwright.config.ts`/`e2e` 纳入 tsconfig 检查 | 已采纳 | M0-F | 当前 typecheck 不覆盖 |
-| TD-035 | M0-D | CI 增加 `pnpm audit` 依赖漏洞扫描 | 已采纳 | M0-F | 当前未跑 |
+| TD-033 | M0-D | e2e 增加失败态/接口 mock；CI 下不复用已有服务 | 已完成 | M0-F | 新增 `admin-health.spec.ts`（mock 200/503/悬挂超时三种分支）；`reuseExistingServer: !CI`；vite preview 补 proxy 与 dev 一致 |
+| TD-034 | M0-D | `playwright.config.ts`/`e2e` 纳入 tsconfig 检查 | 已完成 | M0-F | 新增根 `tsconfig.json`（含 playwright.config.ts 与 e2e），`pnpm typecheck` 串行执行 |
+| TD-035 | M0-D | CI 增加 `pnpm audit` 依赖漏洞扫描 | 已完成 | M0-F | security workflow + `scripts/ci.sh`；官方源实测 No known vulnerabilities found（本地镜像源不支持 audit endpoint，脚本自动切换） |
 | TD-036 | M0-D | 用 OpenAPI 生成客户端替换手写 api-client | 已采纳 | M1 | 后端 OpenAPI 就绪后生成 |
 | TD-037 | M0-D | 前端环境变量放到 `frontend/.env`，根 `.env` 不生效 | 已完成 | M0-D | c4d4dfa 新增 frontend/.env.example |
 | TD-038 | M0-D | `/health` 与 `/api` 同源代理，避免 CORS | 已完成 | M0-D | c4d4dfa 已修 Major |
@@ -75,15 +75,23 @@
 | TD-044 | M0-E | Langfuse 官方 compose 的 DATABASE_URL 默认值不随 POSTGRES_PASSWORD 变化 | 已缓解 | M6 | M0-E 已改为由 `POSTGRES_*` 拼装 `DATABASE_URL` 并 fail-fast；生产观测主机部署时再收口 |
 | TD-045 | M0-E | MinerU 镜像内 `mineru[torch]` 的传递依赖（torch/transformers 等）未固定版本 | 已采纳 | M3 | 实测 `docker images` 10.5GB、容器内 site-packages 6.2GB（nvidia 3.2GB + torch 1.2GB）；建议预装固定 torch 版本（指定 index）并加 PyPI 镜像 |
 | TD-046 | M0-E | MinerU `/v1/health` 只声明能力，不校验模型是否可用 | 已完成 | M0-E | 确认该行为；E3 验收链路补真实 `/v1/file_parse` 冒烟，健康检查不作为可用性证据 |
-| TD-047 | M0-E | 缺 CI 导致 Arq 集成用例默认 skip，真实执行证据不自动复现 | 已采纳 | M0-F | CI 加 Redis service 并设 `TEST_REDIS_URL=...:6379/15`（配合一次性 DB 护栏） |
+| TD-047 | M0-E | 缺 CI 导致 Arq 集成用例默认 skip，真实执行证据不自动复现 | 已完成 | M0-F | 4 个工作流（backend/frontend/evals/security）复用 `deploy/docker-compose.test.yml` 起独立测试栈并导出 TEST_*；本地等效 `scripts/ci.sh` 已跑通（远端生效待 TD-057） |
 | TD-048 | M0-E | 观测栈镜像仅按 tag 固定，未 pin digest（与 core/rag 策略不一致） | 已采纳 | M6 | 生产观测主机部署时统一 pin digest |
 | TD-049 | M0-E | Langfuse 复用 MinIO root 凭据（同一凭据既是 S3 access key） | 已延后 | M6 | 生产观测主机部署时改用专用用户 + 最小权限策略 |
 | TD-050 | M0-E | 是否把 langgraph/langchain-core/openai 移入 optional 依赖组 | 已拒绝 | — | M0-E 简报已批准在 M0 验证 agent 组兼容性；M4 立即使用，拆组会扩大改动面 |
 | TD-051 | M0-E | 依赖测试只断言导入与版本，不覆盖运行时 API 漂移 | 已采纳 | M1 | 接 LangGraph/OpenAI 客户端时补最小功能探针（两节点 StateGraph、实例化 AsyncOpenAI 不发网） |
-| TD-052 | M0-E | 测试中的假密钥常量易被 secret 扫描误报 | 已延后 | M0-F | 建 CI 时集中到 conftest 并统一命名（`FAKE_*`），配合 bandit/pip-audit/secret 扫描 |
+| TD-052 | M0-E | 测试中的假密钥常量易被 secret 扫描误报 | 已完成 | M0-F | `tests/support/fakes.py` 集中 `FAKE_*`；`.gitleaks.toml` 白名单；security workflow 跑 gitleaks/bandit/pip-audit/pnpm audit |
 | TD-053 | M0-E | MinerU 镜像 10.5GB（`mineru[torch]` 拉入 6GB+ CUDA 运行库） | 已延后 | M3 | 若 GPU 小模型加速收益低于体积成本，改 CPU-only torch 或改用官方 slim 变体 |
 | TD-054 | M0-E | MinerU 生产分发形态：镜像推私有 registry + 模型离线预置 | 已采纳 | M6 | 生产不从公网重建镜像：push 到私有 registry 并预置模型（modelscope 可达）到卷/镜像，避免上线时拉 PyPI/HF |
 | TD-055 | M0-E | 自建镜像 vs 官方 vLLM 路径的解析质量对照未做 | 已采纳 | M3 | 同软件同模型，但 VLM 走 CPU llama-cpp + GGUF(Q8_0) 与官方 GPU vLLM 全精度不同；M3 用真实校园文档（表格/公式/扫描/多栏）做质量对照与回归，必要时升精度或换后端；已有夹具 `backend/tests/fixtures/mineru_table_cn.pdf` |
+| TD-056 | M0-F | CPU 重排延迟无法进入快路径预算（8 候选 p50≈11.7s vs 首 token P95≤3s） | 已采纳 | M3/M4 | 实测见 `docs/benchmarks-m0.md`；需在 M3/M4 从「减少候选 / 提高 CPU 配额 / 换更快模型 / GPU TEI / 仅 ReAct 路径重排」中决策并用评估与压测验证 |
+| TD-057 | M0-F | CI 工作流尚无远端仓库，未真实执行 | 已采纳 | M1 | 本地 `scripts/ci.sh` 已等价跑通；仓库推送 GitHub 后自动生效并回填首次执行证据 |
+| TD-058 | M0-F | 本地 npm 镜像不支持 audit endpoint | 已完成 | M0-F | `scripts/ci.sh` 检测后自动切 registry.npmjs.org；CI 默认官方源 |
+| TD-059 | M0-F | 空壳 Loop 无认证/无真实 LLM，仅骨架 | 已采纳 | M4 | 由 M4 真实 Loop 替换并移除 `DEV_SKELETON_LOOP_ENABLED`；生产默认关闭（404） |
+| TD-060 | M0-F | `ragas`/`diskcache` 存在无修复版本的上游漏洞（PYSEC-2026-3046/2447） | 已延后 | 监控 | 两者均为上游最新版（ragas 0.4.3、diskcache 5.6.3）；evals 为隔离的本地评估项目、不进生产镜像；CI pip-audit 已显式 ignore 并在上游发版后移除 |
+| TD-061 | M0-F | production 未强制关闭 `/docs`（OpenAPI 文档） | 已采纳 | M6 | 生产部署检查项加入 `DOCS_ENABLED=false`；当前仅可关闭，未做强制校验 |
+| TD-062 | M0-F | `/health/ready` 每次探活新建连接（无池化） | 已采纳 | M1 | 接 SQLAlchemy/Redis 连接池后改为复用，避免高频探针连接 churn |
+| TD-063 | M0-F | 空壳 Loop 忽略 `Accept: text/event-stream`；api-client 超时不可注入 | 已采纳 | M4 | 真实 Loop 落地时按契约返回 406 或文档化；e2e 悬挂用例改用可注入超时，去掉时序依赖 |
 
 ---
 
@@ -96,7 +104,7 @@
 | M0-C | TD-015~028 | TD-027/028 | TD-016/018/025/026 | TD-015/017/019~024 | TD-021 | 通过 |
 | M0-D | TD-029~038 | TD-037/038 | TD-029~031/033~036 | TD-032 | 无 | 通过 |
 | M0-E | TD-041~053 | TD-012/042/046 | TD-045/047/048/051 | TD-041/049/052/053 | TD-050 | 通过（两轮审查，Blocker/Major 全部修复） |
-| M0-F | 待评审 | — | — | — | — | 待做 |
+| M0-F | TD-002/005/010/029~031/033~035/047/052 + TD-056~063 | TD-002/005/010/029~035/047/052/058 | TD-051/054~057/059 | TD-041/049/053/060 | TD-050 | 通过（M0 收口，见 docs/m0-acceptance.md） |
 
 > M0-E 开始前先处理 `已采纳/目标 M0-E` 的条目：TD-012（MinerU）——已完成（自定义镜像 + 三档实测）。
-> M0-F 开始前处理 TD-002/005/010/029/030/031/033/034/035，以及 M0-E 新登记的 TD-047/052。
+> M0-F 已完成（TD-002/005/010/029~031/033~035/047/052 全部收口）。M1 开始前处理：TD-016/018/025/026/036/051/057。

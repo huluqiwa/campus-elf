@@ -5,8 +5,9 @@ from uuid import uuid4
 import pytest
 
 from app.harness.audit import AuditEvent, InMemoryAuditSink, redact_mapping
+from tests.support.fakes import FAKE_AUDIT_SECRET
 
-SECRET = "test-secret-key-123456"
+SECRET = FAKE_AUDIT_SECRET
 
 
 def event(metadata: dict[str, object] | None = None) -> AuditEvent:

@@ -1,0 +1,40 @@
+name: evals
+
+# 评估作业（独立 uv 项目）：依赖导入断言 + 静态检查。
+# 真实评估跑批（Ragas + 真实 LLM）不进入快速门禁，见 evals/README.md §5。
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: evals
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync --frozen
+
+      - name: 依赖锁校验
+        run: uv lock --check
+
+      - name: 静态检查
+        run: uv run ruff check src tests scripts
+
+      - name: 测试
+        run: uv run pytest
+
+      - name: 用例集完整性（每类 ≥20 条、对抗 ≥3 条）
+        run: uv run python ../../scripts/check_eval_cases.py

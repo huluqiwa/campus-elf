@@ -20,7 +20,9 @@
 
 - **M0-E：兼容性与外部组件验证**——分组依赖（web/db、rag、agent、auth）导入与版本断言通过；Ragas/Langfuse 隔离到独立 `evals/` uv 项目（`langchain-community<0.4`）；Arq 0.28 在真实 Redis 上执行任务通过；Langfuse 4.63.0 自托管栈健康并可用 `evals/scripts/langfuse_smoke.py` 复现 trace 证据；MinerU 4.0.12 自定义镜像（非 root、模型源 `auto`、VLM llama-cpp）standard/basic/flash 三档真实解析通过，6GB 显存占用 <500MiB 未降级。
 
-待完成：CPU 嵌入/重排基准、CI/测试基础设施、M0 验收报告。
+- **M0-F：测试基础设施与 M0 收口**——`/health/ready` 逐项探活（PG/Redis/Qdrant，失败 503）、structlog/uvicorn 统一单行 JSON、空壳 Loop SSE（`meta/step/done` + `stop_reason` + 本地 trace 必发，生产默认关）；独立测试栈（`deploy/docker-compose.test.yml` + `scripts/test-stack.sh`）与业务场景骨架 BS-M0-01；4 个 GitHub Actions 工作流 + 本地等效 `scripts/ci.sh`；CPU 嵌入/重排基准（`docs/benchmarks-m0.md`，暴露重排延迟风险 TD-056）；前端 ESLint/Prettier/Vitest（5 passed）/Element Plus 按需（admin JS 1.03MB→112KB、CSS 361KB→8.94KB）/e2e mock 失败态（5 passed）；后端 84 passed；依赖安全审计清零（cryptography 50.0.2、pytest 9.1.1、aiosmtplib 5.1.3）。**M0 验收报告：`docs/m0-acceptance.md`。**
+
+待完成：M1 租户与身份（下一里程碑）。
 
 ## 技术栈（已锁定）
 

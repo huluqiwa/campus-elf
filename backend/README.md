@@ -51,3 +51,11 @@ app/harness/
 ```bash
 uv run pytest tests/harness
 ```
+
+## 日志与入口约束
+
+- `app/main.py` 在模块导入时调用 `configure_logging`，把 structlog/标准库/uvicorn 统一为单行 JSON。
+- 该顺序依赖 uvicorn 的自带 handler 被清空，因此：
+  - 推荐入口：`uv run uvicorn app.main:app`（uvicorn 在导入后初始化日志，JSON 生效）；
+  - 程序化入口：若先 `from app.main import app` 再 `uvicorn.run(app, ...)`，必须传 `log_config=None`，
+    否则 uvicorn 会重新挂上自己的文本 handler（唯一已知退化路径）。

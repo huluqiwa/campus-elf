@@ -10,8 +10,9 @@ from app.harness.contracts import TenantContext, ToolCall, ToolResult, ToolSpec
 from app.harness.registry import ToolRegistry
 from app.harness.tools import ToolExecutor
 from app.harness.trace import InMemoryTraceSink, TraceRecorder
+from tests.support.fakes import FAKE_AUDIT_SECRET
 
-SECRET = "test-secret-key-123456"
+SECRET = FAKE_AUDIT_SECRET
 
 
 def tenant(

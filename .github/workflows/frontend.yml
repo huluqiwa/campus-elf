@@ -1,0 +1,91 @@
+name: frontend
+
+# 前端质量门禁：ESLint / vue-tsc / Vitest / 构建 / Playwright / 依赖审计。
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 依赖漏洞审计
+        run: pnpm audit --audit-level high
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: 格式检查（Prettier）
+        run: pnpm format:check
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: 单元测试（Vitest）
+        run: pnpm test:unit
+
+      - name: 构建
+        run: pnpm build
+
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 配置使用系统 Chrome 通道（与本地一致）；CI 需显式安装。
+      - name: 安装 Playwright 浏览器
+        run: pnpm exec playwright install --with-deps chrome
+
+      - name: 构建并运行 E2E
+        run: pnpm test:e2e
+
+      - name: 上传失败产物
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: frontend/test-results/
+          retention-days: 7

@@ -1,0 +1,58 @@
+name: backend
+
+# 后端质量门禁：ruff / mypy / pytest（含真实 Redis 集成与业务场景）。
+# 集成与业务场景使用仓库自带的独立测试栈定义（deploy/docker-compose.test.yml），
+# 与本地 `scripts/test-stack.sh up` 完全一致；测试栈凭据由脚本在运行时随机生成（一次性容器，非真实凭证）。
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+        shell: bash
+    env:
+      # 单元测试默认值（测试栈会覆盖）：
+      REDIS_URL: redis://127.0.0.1:56379/15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 启动独立测试栈（PostgreSQL/Redis/Qdrant）
+        working-directory: .
+        # 静默 up：避免把随机生成的一次性测试凭据写进 CI 日志（日志中只保留连接串导出）。
+        run: bash scripts/test-stack.sh up >/dev/null
+
+      - name: 导出测试栈连接串
+        working-directory: .
+        # test-stack.sh 输出 `export K=V` 形式的行；GITHUB_ENV 需要 `K=V`。
+        run: bash scripts/test-stack.sh env | sed -E 's/^export //' >> "$GITHUB_ENV"
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync --frozen
+
+      - name: 依赖锁校验
+        run: uv lock --check
+
+      - name: 静态检查
+        run: |
+          uv run ruff check app tests
+          uv run mypy app tests
+
+      - name: 测试（单元 + 集成 + 业务场景）
+        run: uv run pytest
+
+      - name: 测试栈日志（失败时）
+        if: failure()
+        working-directory: .
+        run: docker compose --env-file deploy/.env.test -f deploy/docker-compose.test.yml logs --tail=200

@@ -1,0 +1,10 @@
+dist/
+node_modules/
+pnpm-lock.yaml
+playwright-report/
+test-results/
+.vite/
+*.md
+# unplugin 生成的类型声明
+auto-imports.d.ts
+components.d.ts

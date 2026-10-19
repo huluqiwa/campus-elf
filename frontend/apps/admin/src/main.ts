@@ -1,14 +1,9 @@
-import ElementPlus from "element-plus";
-import zhCn from "element-plus/es/locale/lang/zh-cn";
-import "element-plus/dist/index.css";
 import { createPinia } from "pinia";
 import { createApp } from "vue";
 
 import App from "./App.vue";
 import { router } from "./router";
 
-createApp(App)
-  .use(createPinia())
-  .use(router)
-  .use(ElementPlus, { locale: zhCn })
-  .mount("#app");
+// Element Plus 组件与样式由 unplugin-vue-components 按需注入（见 vite.config.ts）；
+// 脚手架阶段不再全量注册，中文语言包在接入 ConfigProvider 时按需引入。
+createApp(App).use(createPinia()).use(router).mount("#app");

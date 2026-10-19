@@ -12,7 +12,7 @@ export default defineConfig({
   projects: [
     {
       name: "admin",
-      testMatch: /admin\.spec\.ts/,
+      testMatch: /admin.*\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         channel: "chrome",
