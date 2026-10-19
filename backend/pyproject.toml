@@ -9,6 +9,8 @@ dependencies = [
   "pydantic>=2.8,<3",
   "pydantic-settings>=2.4,<3",
   "structlog>=24,<26",
+  "jinja2>=3.1,<4",
+  "jsonschema>=4.23,<5",
 ]
 
 [dependency-groups]
@@ -33,7 +35,7 @@ src = ["app", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # 项目要求中文 docstring/注释，保留全角标点。
-ignore = ["E501", "RUF002", "RUF003"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
