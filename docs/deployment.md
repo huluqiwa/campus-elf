@@ -128,6 +128,27 @@ location /api/v1/school/kb/build-jobs/ {
 - 健康检查 `/v1/health` 只声明能力（版本/输出格式/来源），**不代表模型可用**；上线验证必须带一次真实 `/v1/file_parse`（TD-046）。
 - 6GB 显存实测：standard/basic/flash 三档均可用（热态 1.9s / 2.0s / 0.9s），未触发降级；降级链 Standard→Basic→Flash 由 M3 执行器实现并验证。
 
+### 6.1 后端切换：自建（llama-cpp/CPU）↔ 官方 vLLM/GPU
+
+两者是**同一软件同一模型**（官方 `mineru` 包 + 官方权重），只是镜像基座与 VLM 推理后端不同，API 契约一致。切换只需改部署配置，**不改应用代码**：
+
+| 需要改 | 位置 | 说明 |
+|---|---|---|
+| 镜像与启动命令 | `deploy/docker-compose.yml` / `deploy/mineru/Dockerfile` | 官方路径：entrypoint `mineru-kit` + `command: api-server ...`；我们的路径：完整 argv |
+| 环境变量 | compose `environment` | 官方用 `MINERU_MODEL_SOURCE=local`（模型已打进镜像）+ `MINERU_MODEL_VLM_ENGINE=vllm`；我们用 `auto` + `auto→llama-cpp` |
+| 模型与卷 | compose `volumes` | 官方镜像模型在镜像内；我们挂在 `mineru_data:/data`（`MINERU_HOME`/`HF_HOME`） |
+| 资源 | compose `deploy.resources` / `mem_limit` | 官方 vLLM 需 **8GB+ 显存**；并发可上调（我们固定 `--concurrency 1`） |
+| 安全姿态 | Dockerfile | 官方镜像以 root 运行；若要保持非 root 需自行加用户层 |
+| 文档 | TD-043/TD-055、本文件 | 记录偏离与质量对照结论 |
+
+应用侧只需满足三条（M3 落地时的实现约束，避免切换时改代码）：
+
+1. 解析客户端只依赖 V1 HTTP API（`/v1/file_parse`、`/v1/tiers`、`/v1/health`），**base URL 走配置**（AI Gateway/环境变量），不硬编码容器名或端口。
+2. **tier 从 `/v1/tiers` 读取**（或至少兼容 `advanced`），不把可用档位写死为 flash/basic/standard。
+3. 超时、并发、重试与降级顺序都是配置项；降级链（Standard→Basic→Flash）由执行器按"实际可用档位 + 失败原因"决定，不假设特定后端。
+
+> 反向切换同理：若生产为 CPU-only 或 6GB 档，直接用当前已验证的自建镜像，无需改动任何应用代码。
+
 ---
 
 ## 6.5 MinIO 与 TEI 的实际处理
