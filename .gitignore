@@ -1,0 +1,114 @@
+# ============================================================
+# 校园陪伴精灵 .gitignore
+# 原则：密钥、产物、缓存、IDE 配置、测试临时数据一律不入库
+# ============================================================
+
+# 环境与密钥（绝对不入库）
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.sqlite3
+*.db
+
+# uv / pip
+.uv/
+uv.lock.bak
+
+# Node / 前端
+node_modules/
+.pnpm-store/
+dist/
+dist-ssr/
+.vite/
+*.local
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# 日志与临时文件
+*.log
+logs/
+tmp/
+temp/
+.cache/
+uploads/
+storage/
+data/
+test-data/
+test-output/
+
+# 对象存储 / 本地数据卷
+minio-data/
+postgres-data/
+redis-data/
+qdrant-data/
+mineru-data/
+clamav-data/
+langfuse-data/
+
+# 模型与权重
+models/
+*.gguf
+*.safetensors
+*.bin
+*.onnx
+
+# 测试/评估产物
+benchmarks/results/
+evals/reports/*
+!evals/reports/README.md
+evals/tmp/
+*.prof
+
+# ZCode 内部计划/会话文件（不随项目入库）
+.zcode/
+
+# Docker
+docker-compose.override.yml
+
+# 系统
+desktop.ini
+
+# 其他
+*.bak
+*.orig
+*.rej

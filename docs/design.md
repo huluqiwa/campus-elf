@@ -1,0 +1,727 @@
+# 校园陪伴精灵 — 技术设计（design.md）
+
+| 项 | 内容 |
+|---|---|
+| 版本 | v1.0 |
+| 日期 | 2026-10-19 |
+| 状态 | 待用户确认；确认前不进入 M0 |
+| 上游 | `docs/spec.md`、`docs/requirements.md` |
+| 相关 | `docs/state-machines.md`、`docs/rbac-matrix.md`、`docs/tenant-isolation.md`、`docs/observability-langfuse.md`、`docs/deployment.md` |
+
+---
+
+## 1. 架构总览
+
+### 1.1 形态
+
+**模块化单体 + 独立 Worker + AI Gateway 模块**。
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ Nginx (HTTPS, SSE no-buffer, rate limit)                    │
+└───────────────┬───────────────────────────────┬─────────────┘
+                │                               │
+        ┌───────▼────────┐              ┌───────▼────────┐
+        │ apps/admin      │              │ apps/campus     │
+        │ Vue3+Element    │              │ Vue3+Vant H5    │
+        └───────┬────────┘              └───────┬────────┘
+                │ REST/SSE                      │ REST/SSE
+        ┌───────▼───────────────────────────────▼────────┐
+        │ FastAPI 主服务                                  │
+        │ auth / tenant / rbac / org / kb / ai / approval │
+        │ message / audit / dashboard / config            │
+        │ Harness + LangGraph + AI Gateway                │
+        └───────┬───────────────┬───────────────┬────────┘
+                │               │               │
+        ┌───────▼──────┐ ┌──────▼──────┐ ┌──────▼──────┐
+        │ PostgreSQL16 │ │ Redis 7.4   │ │ MinIO       │
+        │ + RLS        │ │ 缓存/限流    │ │ 对象存储     │
+        └──────────────┘ │ 队列(Arq)    │ └─────────────┘
+                         └──────┬───────┘
+                                │
+                    ┌───────────▼───────────┐
+                    │ Worker               │
+                    │ 构建/解析/嵌入/邮件   │
+                    └───────┬───────┬───────┘
+                            │       │
+                    ┌───────▼───┐ ┌─▼──────────────┐
+                    │ Qdrant    │ │ MinerU 4.0.12  │
+                    │ 向量库     │ │ V1 API (GPU)   │
+                    └───────────┘ └────────────────┘
+                            │
+                    ┌───────▼──────────┐
+                    │ TEI CPU          │
+                    │ embed + rerank   │
+                    └──────────────────┘
+
+观测：本地 trace 表/JSONL（必选）→ Langfuse（生产独立主机，可选/异步）
+```
+
+### 1.2 模块边界
+
+| 模块 | 职责 | 不负责 |
+|---|---|---|
+| auth | 登录、令牌、密码、MFA、锁定、重置 | 业务权限判断 |
+| tenant | 租户生命周期、学校编号、注册审核 | 平台配置 |
+| rbac | 角色、权限、数据范围、审批分权 | 业务状态机 |
+| org | 教师/学生/班级/课程/关系、导入 | 登录凭据 |
+| kb | 上传、审批门禁、构建、测试、发布、分块、检索测试 | LLM 生成 |
+| ai | Harness、Loop、RAG 编排、SSE、引用、反馈 | 业务审批 |
+| approval | 通用审批引擎、类型注册、待办/超时 | 业务动作执行 |
+| message | 站内信、邮件、outbox、重试、通道隔离 | 平台配置 |
+| audit | 仅追加审计、哈希链、WORM | 调试 trace |
+| dashboard | 校方统计、反馈查看/答复 | 词频/高级 BI |
+| config | 全局/租户/用户配置、密钥加密、变更审批 | DB 连接 UI |
+| observability | 本地 trace、Langfuse 导出、Ragas | 合规审计 |
+| parser adapter | MinerU V1 API、tier 降级、LibreOffice | 业务逻辑 |
+
+### 1.3 部署拓扑
+
+- **应用主机**：Nginx、admin/campus 静态资源、FastAPI、Worker、PostgreSQL、Redis、MinIO、Qdrant、ClamAV、TEI、MinerU（GPU）。
+- **观测主机**：Langfuse（Web/Worker + Postgres + ClickHouse + Redis + S3/MinIO）；生产独立，不与应用主机共用 16GB。
+- **资源约束**：开发机 16GB/6GB；MinerU GPU 单并发；嵌入/重排 CPU；Langfuse 默认不启。
+- 详细见 `docs/deployment.md`。
+
+---
+
+## 2. 工程结构
+
+```text
+LLM-05-CampusCompanionElf/
+├─ README.md
+├─ AGENTS.md
+├─ .gitignore
+├─ .env.example
+├─ docs/
+│  ├─ requirements.md
+│  ├─ spec.md
+│  ├─ design.md
+│  ├─ milestone.md
+│  ├─ test-plan.md
+│  ├─ state-machines.md
+│  ├─ rbac-matrix.md
+│  ├─ tenant-isolation.md
+│  ├─ compliance.md
+│  ├─ observability-langfuse.md
+│  ├─ deployment.md
+│  ├─ code-review-checklist.md
+│  └─ review-log.md
+├─ evals/
+│  ├─ README.md
+│  ├─ rubric.md
+│  ├─ cases/
+│  └─ reports/
+├─ benchmarks/
+│  ├─ README.md
+│  ├─ k6/
+│  └─ results/
+├─ backend/
+│  ├─ pyproject.toml
+│  ├─ uv.lock
+│  ├─ .python-version          # 3.13
+│  ├─ alembic.ini
+│  ├─ app/
+│  │  ├─ main.py
+│  │  ├─ config.py
+│  │  ├─ api/
+│  │  ├─ core/                 # security, tenant, errors, logging, idempotency
+│  │  ├─ db/
+│  │  ├─ models/
+│  │  ├─ schemas/
+│  │  ├─ services/
+│  │  ├─ harness/
+│  │  ├─ agents/
+│  │  ├─ rag/
+│  │  ├─ ai_gateway/
+│  │  ├─ workers/
+│  │  ├─ integrations/
+│  │  ├─ prompts/
+│  │  └─ tests/
+│  ├─ alembic/
+│  └─ prompts/
+├─ frontend/
+│  ├─ pnpm-workspace.yaml
+│  ├─ package.json
+│  ├─ apps/admin/
+│  ├─ apps/campus/
+│  └─ packages/{api-client,ui,config}/
+├─ deploy/
+│  ├─ docker-compose.yml
+│  ├─ nginx/
+│  ├─ initdb/
+│  ├─ backup/
+│  └─ mineru/
+└─ scripts/
+```
+
+---
+
+## 3. 技术栈与版本
+
+见 `docs/requirements.md` 第 4 节。锁定：
+
+- Python 3.13.x，`requires-python = ">=3.13,<3.14"`，`.python-version`=3.13。
+- Node 24.x LTS，pnpm 11.x。
+- PostgreSQL 16、Redis 7.4、Qdrant 固定具体版本、MinIO 固定 tag。
+- MinerU 4.0.12，`mineru[torch]`，GPU 单并发。
+- Langfuse **Server 4.63.0 + Python SDK 5.0.2**，独立主机；锁定 tag，不跟 `latest`。
+- Docker 镜像固定 tag/digest；`uv.lock`、`pnpm-lock.yaml` 入库。
+
+---
+
+## 4. 数据模型
+
+> 所有业务表默认含：`id UUID PK`、`tenant_id UUID NOT NULL`（平台级表除外）、`created_at`、`updated_at`、`created_by`、`updated_by`、`deleted_at`（软删，按需）、`version`（乐观锁，按需）。
+
+### 4.1 租户与平台
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `tenants` | id, school_code, name, status, address, email, leadership, qualification_ref, activated_at | 学校=租户；status: pending/active/suspended/rejected/deleted |
+| `tenant_registration_requests` | id, school_name, address, leadership, email, qualification_object_key, status, submitted_at | 资质凭证存 MinIO |
+| `school_review_records` | id, tenant_id, reviewer_id, result, reason, snapshot_object_key, reviewed_at | 审核记录/凭证快照 |
+| `platform_users` | id, account, password_hash, status, mfa_secret_enc, must_change_password | SaaS 账号；不开放注册 |
+| `platform_roles` / `platform_user_roles` | id, code/name; user_id, role_id | 平台角色 |
+| `configs` | id, scope(global/tenant/user), tenant_id, user_id, key, value_json, is_secret, version, status | 配置中心 |
+| `config_change_requests` | id, config_id, before_json, after_json, requester, approver, reason, status | 变更审批/双人确认 |
+| `model_configs` | id, provider, model_type, base_url, api_key_enc, model_name, tenant_id, status | 密钥信封加密 |
+| `tenant_quotas` | tenant_id, daily_requests, daily_tokens, concurrent_streams, storage_bytes | 配额 |
+| `usage_logs` | id, tenant_id, user_id, model, input_tokens, output_tokens, latency_ms, cost_estimate, request_id | 用量 |
+| `feature_flags` | key, scope, tenant_id, enabled | 生产放行/功能开关 |
+
+### 4.2 用户、权限、组织
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `users` | id, tenant_id, user_type(student/teacher), login_id, password_hash, status, must_change_password, mfa_secret_enc, last_login_at, token_version | C 端/B 端共用身份；login_id=学号/工号；token_version 用于权限/状态变更时使现有会话失效 |
+| `roles` | id, tenant_id, code, name, is_system | 校方角色 |
+| `permissions` | id, code, module, action | 权限点 |
+| `role_permissions` | role_id, permission_id | 角色-权限 |
+| `user_roles` | user_id, role_id | 多角色 |
+| `data_scopes` | id, tenant_id, role_id/user_id, scope_type(school/class/course/self), scope_id | 数据范围 |
+| `teachers` | id, tenant_id, user_id, employee_no, name, age, gender, position, id_card_enc, id_card_hmac, id_card_mask | 身份证加密/掩码 |
+| `students` | id, tenant_id, user_id, student_no, name, class_id, gender, head_teacher_id, counselor_id, id_card_enc, id_card_hmac, id_card_mask | 档案 |
+| `classes` | id, tenant_id, grade, name, head_teacher_id, counselor_id | 班级 |
+| `courses` | id, tenant_id, code, name | 课程 |
+| `teacher_class_courses` | teacher_id, class_id, course_id, term | 任教关系 |
+| `import_jobs` | id, tenant_id, type, file_object_key, status, total_rows, success_rows, failed_rows, error_report_key, retry_count | 导入 |
+| `import_row_errors` | job_id, row_no, field, error_code, message | 错误行 |
+
+### 4.3 知识库
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `kb_documents` | id, tenant_id, title, tags, description, status, current_version_id, created_by | 文档 |
+| `kb_document_versions` | id, tenant_id, document_id, version_no, source_object_key, source_hash, mime, size, status, approval_request_id, created_by | 版本；status: DRAFT/UPLOADED/SCAN_FAILED/PENDING_APPROVAL/REJECTED/APPROVED/BUILDING/READY/FAILED/PUBLISHED/OFFLINE/DELETED |
+| `kb_build_jobs` | id, tenant_id, document_version_id, status, stage, progress, processed_units, total_units, tier, fallback_reason, retry_count, error_code, message, started_at, updated_at, finished_at | 构建任务；同版本仅一个活跃任务 |
+| `kb_build_events` | id, job_id, seq, event_type, payload_json, created_at | SSE 事件持久化，支持 Last-Event-ID/since |
+| `kb_chunks` | id, tenant_id, document_version_id, parent_id, chunk_type(parent/child), chunk_index, text, text_markdown, section_path, page_start, page_end, token_count, char_count, overlap_prev, overlap_next, chunk_hash, metadata_json, embedding_status | 分块 |
+| `kb_index_versions` | id, tenant_id, kb_id/document_version_id, qdrant_collection, status, published_at, retired_at | 版本化索引 |
+| `kb_publish_aliases` | tenant_id, kb_id, alias, collection, version_id, updated_at | alias 指针 |
+| `kb_test_sets` | id, tenant_id, document_version_id, name, file_object_key, status, created_by | 测试集 |
+| `kb_test_cases` | id, test_set_id, question, expected_answer, expected_points, expected_chunk_ids, category, is_adversarial, row_no | 测试用例 |
+| `kb_test_runs` | id, tenant_id, test_set_id, document_version_id, status, metrics_json, report_object_key, started_at, finished_at | 测试报告 |
+| `kb_retrieval_tests` | id, tenant_id, document_version_id, query, top_k, result_json, created_by | 检索测试 |
+
+### 4.4 AI、会话、反馈
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `conversations` | id, tenant_id, user_id, title, status, pinned_kb_version_id, created_at, last_message_at | 会话 |
+| `conversation_messages` | id, tenant_id, conversation_id, role(user/assistant/system), content, reasoning_summary, citations_json, token_usage, trace_id, status(streaming/completed/partial/failed), created_at | 消息 |
+| `conversation_summaries` | id, tenant_id, conversation_id, summary, covered_message_ids, created_at | 滚动摘要 |
+| `ai_feedback` | id, tenant_id, user_id, conversation_id, message_id, trace_id, rating, reason_tags, comment, content_snapshot_enc, consent_at, status, handled_by, handled_at | 反馈 |
+| `ai_feedback_replies` | id, feedback_id, sender_id, message_id, content, created_at | 反馈答复 |
+| `chat_traces` | id, tenant_id, user_id, conversation_id, turn_id, intents_json, route_path, model, prompt_name, prompt_version, prompt_hash, tokens_in, tokens_out, first_token_ms, latency_ms, stop_reason, error_code, created_at | 本地 trace |
+| `chat_trace_spans` | id, trace_id, span_type(route/retrieve/rerank/tool/guard/generate/verify), name, start_ms, duration_ms, attributes_json, status | span |
+| `guard_events` | id, tenant_id, trace_id, direction(input/output), rule, severity, action, excerpt_redacted, created_at | 护栏事件 |
+| `llm_usage` | id, tenant_id, trace_id, provider, model, tokens_in, tokens_out, latency_ms, cost_estimate, created_at | LLM 用量 |
+| `eval_runs` | id, tenant_id, eval_type(kb_test/customization/regression), dataset_ref, status, metrics_json, report_object_key, started_at, finished_at | 评估 |
+| `eval_cases` / `eval_results` | id, run_id, case_ref, input, expected, actual, scores_json, passed | 评估结果 |
+
+### 4.5 审批、请假、消息、删除、审计
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `approval_types` | id, code, name, schema_json, enabled | 类型注册 |
+| `approval_requests` | id, tenant_id, type, submitter_id, status, current_step, title, payload_json, result, reject_reason, created_at, completed_at | 审批单 |
+| `approval_steps` | id, request_id, step_no, approver_role/approver_id, status, acted_at, comment | 步骤 |
+| `approval_actions` | id, request_id, step_id, actor_id, action, reason, created_at | 动作审计 |
+| `approval_attachments` | id, request_id, object_key, filename, mime, size, checksum | 附件 |
+| `leave_requests` | id, tenant_id, student_id, approver_id, reason, days, start_date, end_date, status, submitted_at, decided_at | 请假 |
+| `leave_status_history` | id, leave_id, from_status, to_status, actor_id, reason, created_at | 状态历史 |
+| `message_threads` | id, tenant_id, channel(PLATFORM/TENANT), subject, created_by, created_at | 会话 |
+| `messages` | id, tenant_id, thread_id, sender_id, receiver_id, content, read_at, created_at | 站内信 |
+| `message_templates` | id, code, channel, subject, body, version | 模板 |
+| `message_deliveries` | id, message_id, channel, status, attempts, next_retry_at, last_error, provider_message_id | 邮件/重试 |
+| `outbox_events` | id, tenant_id, event_type, payload_json, status, attempts, next_retry_at, created_at | outbox |
+| `account_termination_requests` | id, tenant_id, subject_user_id, initiator_type(SELF/ADMIN), requested_by, status, approved_by, retention_start_at, retention_end_at, freeze_started_at, freeze_reason, deletion_scope_json, proof_id | 双入口 |
+| `account_termination_events` | id, request_id, event_type, actor_id, reason, created_at | 状态历史 |
+| `deletion_proofs` | id, tenant_id, request_id, scope_hash, backup_expiry_at, generated_at, evidence_object_key | 删除证明 |
+| `audit_logs` | id, tenant_id, actor_id, action, resource_type, resource_id, result, ip, user_agent, request_id, before_json_redacted, after_json_redacted, prev_hash, hash, created_at | 哈希链 |
+| `login_attempts` | id, tenant_id, login_id, ip, success, failure_reason, created_at | 锁定 |
+| `refresh_tokens` | id, user_id, token_hash, family_id, expires_at, revoked_at, replaced_by | 轮换 |
+| `idempotency_keys` | key, tenant_id, user_id, endpoint, request_hash, response_json, status, created_at, expires_at | 幂等 |
+| `content_safety_events` | id, tenant_id, trace_id, direction, rule, action, excerpt_redacted, created_at | 内容安全 |
+
+### 4.6 ER 关系（核心）
+
+```text
+tenants 1─N users 1─N user_roles N─1 roles N─N permissions
+tenants 1─N teachers/students
+classes 1─N students; teachers N─N classes via teacher_class_courses
+tenants 1─N kb_documents 1─N kb_document_versions 1─N kb_chunks
+kb_document_versions 1─N kb_build_jobs 1─N kb_build_events
+kb_document_versions 1─1 kb_index_versions (published) N─1 kb_publish_aliases
+tenants 1─N conversations 1─N conversation_messages
+approval_requests 1─N approval_steps/actions/attachments
+leave_requests 1─N leave_status_history
+message_threads 1─N messages 1─N message_deliveries
+account_termination_requests 1─N events; 1─1 deletion_proofs
+audit_logs: 仅追加，prev_hash/hash 链
+```
+
+---
+
+## 5. API 与 SSE 契约
+
+### 5.1 约定
+
+- Base path：业务 API 使用 `/api/v1`；健康检查例外，固定在根路径 `/health/live`、`/health/ready`，供 Compose/Nginx/探针使用。
+- 身份：`Authorization: Bearer <access_token>`；平台/租户分 realm/audience。
+- 租户：只从 token 取 `tenant_id`；不接受 body/query 覆盖。
+- 错误信封：`{ "code": "...", "message": "...", "details": {...}, "request_id": "..." }`。
+- 分页：cursor（`cursor`, `limit`）；大列表虚拟滚动。
+- 幂等：写接口支持 `Idempotency-Key`；服务端用 `idempotency_keys` + 唯一约束。
+- 时间：UTC ISO8601；前端本地化。
+- OpenAPI 3.1 自动生成；前端 `openapi-typescript` 生成类型。
+- SSE：`Content-Type: text/event-stream`；Nginx `proxy_buffering off`、`X-Accel-Buffering: no`；心跳 15s；支持 `Last-Event-ID`/`since`。
+
+### 5.2 认证
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/auth/login` | 学校编号+账号+密码，返回 access/refresh/must_change_password |
+| POST | `/auth/refresh` | 轮换 refresh；复用检测 |
+| POST | `/auth/logout` | 撤销当前 refresh family |
+| POST | `/auth/change-password` | 首登/主动改密；撤销全部 refresh |
+| POST | `/auth/password-reset/request` | 员工邮件重置 |
+| POST | `/auth/password-reset/confirm` | 重置令牌 |
+| POST | `/auth/mfa/enroll` / `/auth/mfa/verify` | TOTP 可选 |
+
+### 5.3 SaaS / 租户
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/platform/tenants/register` | 学校注册（公开/受限） |
+| GET | `/platform/tenants` | 租户列表 |
+| POST | `/platform/tenants/{id}/review` | 通过/拒绝（理由） |
+| GET | `/platform/tenants/{id}/review-records` | 审核记录 |
+| POST | `/platform/configs` | 配置创建/变更（审批/双人确认） |
+| GET | `/platform/audit-logs` | 审计查询/导出 |
+| GET | `/platform/messages` | 平台消息 |
+
+### 5.4 组织与人员
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET/POST | `/school/teachers` | 教师列表/创建 |
+| GET/POST | `/school/students` | 学生列表/创建 |
+| POST | `/school/imports` | CSV/XLSX 异步导入 |
+| GET | `/school/imports/{job_id}` | 导入进度/错误报告 |
+| POST | `/school/permission-accounts` | 权限账号 |
+| GET | `/school/dashboard/overview` | 看板统计 |
+
+### 5.5 知识库
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/school/kb/documents` | 上传（multipart，最多 15） |
+| GET | `/school/kb/documents` | 列表/状态筛选 |
+| GET | `/school/kb/documents/{id}` | 详情 |
+| GET | `/school/kb/documents/{doc_id}/versions` | 版本列表 |
+| POST | `/school/kb/document-versions/{version_id}/submit-approval` | 提交审批 |
+| POST | `/school/kb/document-versions/{version_id}/build` | 创建构建（仅 APPROVED） |
+| GET | `/school/kb/build-jobs/{job_id}` | 构建快照 |
+| GET | `/school/kb/build-jobs/{job_id}/events` | SSE 构建进度 |
+| POST | `/school/kb/build-jobs/{job_id}/retry` | 重试 |
+| GET | `/school/kb/versions/{version_id}/chunks` | 分块列表（cursor/q/section/type） |
+| GET | `/school/kb/chunks/{chunk_id}` | 分块详情 |
+| POST | `/school/kb/versions/{version_id}/retrieval-test` | 检索测试 |
+| POST | `/school/kb/versions/{version_id}/test-sets` | 上传测试集 |
+| POST | `/school/kb/versions/{version_id}/tests` | 运行测试 |
+| POST | `/school/kb/versions/{version_id}/publish` | 发布（需 TEST_PASSED） |
+| POST | `/school/kb/versions/{version_id}/rollback` | 回滚 alias |
+| POST | `/school/kb/versions/{version_id}/offline` | 下线 |
+| DELETE | `/school/kb/versions/{version_id}` | 删除（软删+审计） |
+
+### 5.6 构建进度 SSE
+
+事件：
+
+```text
+event: build.stage
+data: {"job_id":"...","stage":"PARSING","tier":"standard","started_at":"..."}
+
+event: build.progress
+data: {"job_id":"...","stage":"PARSING","progress":0.42,"processed_units":42,"total_units":100,"message":"..."}
+
+event: build.log
+data: {"job_id":"...","level":"INFO","message":"...","ts":"..."}
+
+event: build.done
+data: {"job_id":"...","status":"READY","chunks":128,"duration_ms":123456}
+
+event: build.error
+data: {"job_id":"...","stage":"EMBEDDING","error_code":"EMBED_TIMEOUT","message":"...","retryable":true}
+```
+
+- `kb_build_events.seq` 递增；`Last-Event-ID` 或 `?since=<seq>` 续传。
+- 前端 fetch + Bearer；EventSource 无法带 Authorization header，不使用原生 EventSource。
+- 轮询兜底：`GET /school/kb/build-jobs/{job_id}` 每 3s。
+- 权限：`school.kb.view` + 数据范围；跨租 404。
+
+### 5.7 分块预览 / 检索测试
+
+`GET /school/kb/versions/{version_id}/chunks?cursor&limit&q&section&type` 返回：
+
+```json
+{
+  "items": [{
+    "chunk_id": "...",
+    "parent_id": "...",
+    "chunk_type": "child",
+    "section_path": "第一章 > 1.2",
+    "page_start": 3,
+    "page_end": 4,
+    "char_count": 420,
+    "token_count": 256,
+    "chunk_hash": "...",
+    "text_markdown": "...",
+    "embedding_status": "ready",
+    "metadata": {"table": false, "code": false}
+  }],
+  "next_cursor": "...",
+  "stats": {"parent_count": 12, "child_count": 128, "avg_chars": 410, "overlap_ratio": 0.12}
+}
+```
+
+`POST /school/kb/versions/{version_id}/retrieval-test`：
+
+```json
+{"query":"奖学金申请条件","top_k":10}
+```
+
+返回 dense/sparse/RRF/rerank 分数、chunk_id、引用预览；用于解释召回原因。
+
+### 5.8 C 端 Chat SSE
+
+`POST /campus/chat/turns`（`Accept: text/event-stream`）：
+
+```text
+event: meta
+data: {"turn_id":"...","trace_id":"...","conversation_id":"..."}
+
+event: step
+data: {"stage":"retrieve","label":"正在检索学校知识库"}
+
+event: tool_call
+data: {"tool":"kb.search","status":"running"}
+
+event: tool_result
+data: {"tool":"kb.search","status":"ok","duration_ms":180,"hits":8}
+
+event: reasoning_summary
+data: {"summary":"已找到 3 条相关校规，正在核对引用"}
+
+event: delta
+data: {"text":"根据学校规定，"}
+
+event: citation
+data: {"index":1,"chunk_id":"...","document":"奖学金评定办法","page":3,"section":"第二章"}
+
+event: done
+data: {"tokens_in":1200,"tokens_out":300,"first_token_ms":820,"latency_ms":4200,"stop_reason":"FINAL_ANSWER"}
+
+event: error
+data: {"code":"LLM_TIMEOUT","message":"生成超时，请重试","retryable":true,"partial":true}
+```
+
+- 思考摘要只在高层次；不发送原始 CoT/系统提示词/工具参数。
+- 用户停止：客户端 abort；服务端取消下游 LLM/工具任务。
+- 断线重连：客户端可用 turn_id 查询最终状态；不支持续传无限 token 流，重连后展示已完成部分/重试。
+
+### 5.9 审批 / 请假 / 消息 / 删除
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/school/approvals/todo` | 待办 |
+| GET | `/school/approvals/done` | 已办 |
+| GET | `/school/approvals/{id}` | 详情（含附件） |
+| POST | `/school/approvals/{id}/approve` | 通过 |
+| POST | `/school/approvals/{id}/reject` | 驳回（理由必填） |
+| POST | `/campus/leaves` | 学生提交请假 |
+| GET | `/campus/leaves` | 我的请假 |
+| POST | `/campus/leaves/{id}/withdraw` | 撤回 |
+| GET | `/school/messages` | B 端消息 |
+| POST | `/school/messages` | 发送消息 |
+| POST | `/school/messages/{id}/read` | B 端已读 |
+| GET | `/campus/messages` | C 端消息（C 端已读二期） |
+| POST | `/campus/account-termination` | 用户自助删除 |
+| POST | `/school/account-terminations` | 管理员撤权 |
+| POST | `/school/account-terminations/{id}/appeal` | 申诉 |
+| POST | `/school/account-terminations/{id}/freeze` | 冻结（暂停倒计时） |
+
+### 5.10 看板 / 反馈
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/school/dashboard/overview` | 人员/文档/审批/消息/反馈统计 |
+| GET | `/school/feedback` | 反馈列表（时间/评分筛选） |
+| GET | `/school/feedback/{id}` | 反馈详情（问题/答案摘要/引用） |
+| POST | `/school/feedback/{id}/handle` | 标记已处理 |
+| POST | `/school/feedback/{id}/reply` | 站内信答复 |
+
+---
+
+## 6. Loop + Harness
+
+### 6.1 核心契约（Pydantic）
+
+| Contract | 字段 |
+|---|---|
+| `AgentRequest` | tenant_id, user_id, conversation_id, turn_id, message, user_prefs, trace_id |
+| `TenantContext` | tenant_id, tenant_status, user_id, roles, permissions, data_scope, kb_version_ids, feature_flags |
+| `RouteResult` | intents[], primary_capability, confidence, needs_clarification, args |
+| `AgentEvent` | type(meta/step/tool_call/tool_result/reasoning_summary/delta/citation/done/error), payload |
+| `ToolSpec` | name, version, description, input_schema, output_schema, side_effect, permission, data_scope, timeout_ms, idempotent, audit_level, availability(ctx) |
+| `ToolCall` | tool, args, call_id |
+| `ToolResult` | ok, data, error_code, duration_ms, redacted_summary |
+| `GuardResult` | allow/block/redact/fallback, rule, severity, reason |
+| `StopReason` | FINAL_ANSWER/REFUSAL/CAPABILITY_FALLBACK/GUARD_BLOCK/TIMEOUT/USER_CANCELLED/MAX_STEPS/TOOL_BUDGET_EXCEEDED/REPEATED_CALL |
+| `TraceSpan` | trace_id, span_type, name, start_ms, duration_ms, attributes, status |
+
+### 6.2 状态与预算
+
+```text
+Fast Path:  INPUT_GUARD → ROUTE → RETRIEVE → GENERATE → VERIFY → OUTPUT_GUARD → DONE
+ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
+            → GENERATE → VERIFY → OUTPUT_GUARD → DONE
+```
+
+- `MAX_MODEL_DECISIONS=5`、`MAX_TOOL_CALLS=3`、`MAX_RETRIEVALS=2`、`TURN_TIMEOUT=30s`、`TOKEN_BUDGET=12000`。
+- 重复工具调用（同工具+同参数）拒绝；预算超限兜底。
+- 多意图：`intents[]`；编排器按预算为多个意图执行只读能力，合并回答；逐项兜底。
+
+### 6.3 工具
+
+| 工具 | 权限 | 说明 |
+|---|---|---|
+| `kb.search` | `campus.kb.qa` | 混合检索；只读 |
+| `kb.read_chunk` | `campus.kb.qa` | 读取证据；只读 |
+| `campus.navigate` | `campus.nav` | 返回前端路由/入口；不写 |
+
+- `ToolExecutor`：schema 校验 → 权限/租户/数据范围 → 超时 → 执行 → 审计/trace → 类型化结果。
+- 二期写工具必须 `side_effect=true` + 确认卡片 + 幂等 + 审批 + 沙箱 + 审计；MVP 不注册。
+
+### 6.4 上下文与记忆
+
+- `ContextBuilder` 加载：租户/用户/角色/数据范围/能力可用性/已发布 KB 版本/会话近 10 轮/滚动摘要/用户开关。
+- 能力可用性 = 已发布 KB 版本 + 已授权技能（二期）+ 用户开关 + 业务模块状态；禁止硬编码意图清单。
+- 记忆：会话消息 + 滚动摘要；固定 `pinned_kb_version_id`；不做长期记忆。
+- 清空当前会话：删除/标记当前会话消息，写审计，不影响其他会话。
+
+### 6.5 护栏
+
+- 输入：长度/编码/注入特征/PII/内容安全；输出：跨租 PII、系统提示词、工具/密钥/内网地址、XSS、伪造引用、违法/自伤不当内容。
+- 命中：安全话术 + `guard_events` + 指标；自伤支持性话术+线下求助，不诊断。
+- 引用校验：chunk_id 存在、属于当前租户/版本、与答案相关；失败修复或降级。
+
+### 6.6 观测 / Langfuse
+
+- 本地 `chat_traces`/`chat_trace_spans`/`guard_events`/`llm_usage` 必写。
+- `TraceExporter` 接口：`LocalTraceExporter` 必选；`LangfuseExporter` 可选，异步批量、脱敏、故障隔离。
+- Langfuse 默认元数据+哈希；内容采集场景见 `docs/observability-langfuse.md`。
+- Ragas 独立跑批；结果本地 `evals/reports/`，可选同步 Langfuse dataset/experiment。
+
+### 6.7 恢复
+
+- LLM：首 token 前最多 2 次重试；流中失败发 error + partial；熔断 5 次/60s 开 30s。
+- 嵌入/重排：超时降级；重排 300ms 跳过。
+- 工具：超时/权限/租户失败即返回结构化错误；不重试非幂等工具（MVP 全只读）。
+- 用户取消：取消下游任务；记录 `USER_CANCELLED`。
+
+---
+
+## 7. RAG
+
+### 7.1 解析
+
+| 类型 | 路径 |
+|---|---|
+| PDF/图片 | MinerU 4.0.12 V1 API；Standard → Basic → Flash |
+| DOCX/PPTX | LibreOffice headless 转 PDF → MinerU Standard；转换失败回退 Flash 原生 Office |
+| TXT/MD | 直接 Markdown 规范化 |
+| 统一输出 | Markdown + 页/章节/表格/代码元数据 |
+
+- MinerU V1 API：`/v1/health`、`/v1/tiers`、`/v1/uploads`、`/v1/parse/jobs`、`/v1/files`；4.0.12 支持 `/v1/tasks`、`/v1/file_parse`。
+- 解析器封装 `DocumentParserPort`；业务层不直接依赖 MinerU 细节。
+- 失败：重试/死信；记录 tier/降级原因；ClamAV fail-closed。
+
+### 7.2 切块（参数待 M3 实验）
+
+- 设计支持父子块：`parent_id`、`chunk_type`、`overlap_prev/next`、`section_path`、`page_start/end`。
+- 候选取值：子块 300/500/800 字、重叠 10/15/20%；父块 800–1200 字；表格/代码不拆。
+- M3 必须用评估集比较 recall/faithfulness/citation precision 后定参数，回写设计。
+- 每个子块嵌入前加“文档名+章节路径”上下文。
+
+### 7.3 嵌入 / 稀疏
+
+- Dense：BGE-M3，1024 维，TEI CPU。
+- Sparse：jieba 分词 + BM25；按 KB 版本维护 IDF；token hash 映射 uint32；Qdrant sparse vector。
+- 批量嵌入：按批更新进度；失败可重试；嵌入状态写 `kb_chunks.embedding_status`。
+- 若 TEI 不支持 BGE-M3/重排，改用 FlagEmbedding/sentence-transformers CPU 服务，接口不变（需确认）。
+
+### 7.4 Qdrant
+
+- 命名：`tenant_{tenant_hash}_kb_v{version_id}`；alias `tenant_{tenant_hash}_kb_active`。
+- Payload：`tenant_id_hash`、`kb_id`、`document_id`、`version_id`、`chunk_id`、`parent_id`、`doc_title`、`section_path`、`page_start/end`、`chunk_type`、`text_hash`、`is_published`。
+- Named vectors：`dense`（BGE-M3）、`sparse`（BM25）。
+- 发布：新 version collection 构建完成 → 测试通过 → alias 原子切换；旧 collection 保留至会话结束/7 天。
+- 回滚：alias 切回旧 collection；缓存 Key 含 version。
+- 隔离：查询强制 `tenant_id_hash` + `version_id`；每租户独立 collection；跨租测试。
+- collection 数量增长：定期清理 retired collection；监控磁盘/内存。
+
+### 7.5 检索 / 重排 / 引用
+
+1. Query 预处理（可选改写）。
+2. Dense top50 + sparse top50。
+3. RRF 融合（k=60）；按 parent_id 去重。
+4. bge-reranker-v2-m3 重排 top50→top10；300ms 超时跳过。
+5. 取 top10 子块+相邻块，≤6k token；按文档/章节组织。
+6. 生成严格依据证据；输出 [n] 引用；校验 chunk_id 存在/相关；无效引用降级。
+7. 无证据：拒答/兜底，不编造。
+
+### 7.6 热更新
+
+- 会话创建时固定 `pinned_kb_version_id`；新会话用当前 active 版本。
+- 发布/回滚原子切 alias；旧版本 collection 保留。
+- 删除/下线：新会话不可用；旧会话仍可引用旧版本；7 天后清理。
+- 缓存 Key：`tenant_id:kb_id:version_id:*`；发布/回滚后旧 Key 自然失效。
+
+---
+
+## 8. 多租户隔离
+
+### 8.1 强制层
+
+1. JWT 只从 token 取 `tenant_id`；平台/租户分 realm/audience。
+2. 中间件设置 `TenantContext`；请求级 contextvar。
+3. 仓储层基类强制 `tenant_id` 过滤；禁止裸 SQL 跨租。
+4. PostgreSQL RLS：`SET LOCAL app.tenant_id`；策略 `tenant_id = current_setting('app.tenant_id')::uuid`；平台角色例外需显式 grant。
+5. Qdrant：每租户独立 collection + payload 校验。
+6. MinIO：`tenant/{tenant_id}/...` 前缀；签名 URL 短时有效。
+7. 缓存：`tenant:{tenant_id}:...` 前缀。
+8. 审计/日志：记录 tenant_id；跨租访问安全事件。
+
+### 8.2 跨租访问
+
+- 默认拒绝；平台跨租访问需二次授权（工单/审批）+ 审计；只读、最小必要。
+- 不得关联“同一自然人”事实。
+- 测试矩阵见 `docs/tenant-isolation.md`。
+
+---
+
+## 9. 认证与 RBAC
+
+- JWT access 15m；refresh 7d 轮换；refresh token 存 hash；family 复用检测。
+- 账号删除/撤权审批通过、密码修改、权限重大变更时递增 `users.token_version`，使现有 access/refresh 失效；账号删除保留期内允许重新登录，但只签发只读会话。
+- 密码 bcrypt cost 12；初始密码 12 位随机；首登改密；历史 5；最小 10/3 类/128；禁止含学号/工号。
+- 5 次/15 分钟锁定 15 分钟；MFA TOTP 可选。
+- 角色/权限/数据范围矩阵见 `docs/rbac-matrix.md`。
+- 审批分权：提交人不能自批；超管例外默认关闭；SaaS 审核员不得审核自己提交学校。
+
+---
+
+## 10. 状态机
+
+详见 `docs/state-machines.md`。核心：
+
+- 租户：pending → active / rejected / suspended → deleted。
+- 用户：active → locked / retention_readonly → deleted/anonymized。
+- KB 文档版本：UPLOADED → PENDING_APPROVAL → APPROVED/REJECTED → BUILDING → READY/FAILED → PUBLISHED → OFFLINE/DELETED；内容修改 → 新版本 PENDING_APPROVAL。
+- 构建任务：QUEUED → PARSING → NORMALIZING → CHUNKING → EMBEDDING → INDEXING → VALIDATING → READY/FAILED。
+- 请假：DRAFT → PENDING → APPROVED/REJECTED/WITHDRAWN。
+- 账号删除：REQUESTED → APPROVED → RETENTION_READONLY → DELETED/ANONYMIZED；APPEALED/FROZEN 分支。
+- 审批：PENDING → APPROVED/REJECTED/CANCELLED/EXPIRED。
+- 消息 outbox：PENDING → SENDING → SENT / RETRY / DEAD。
+
+---
+
+## 11. Langfuse
+
+版本：**Server 4.63.0 + Python SDK 5.0.2**（Server ≥4.59.0 才支持 Python SDK v5）。详见 `docs/observability-langfuse.md`。要点：
+
+- 生产独立主机自托管；开发 optional。
+- 默认 metadata+hash；内容采集场景：KB 测试、C 端反馈、定制化。
+- 职责：观测+评估+Prompt 草稿/实验；Git 是生产 prompt 唯一事实来源。
+- 平台/运维专属；tenant_hash；访问审计；trace 180 天。
+- 异步导出；故障不影响聊天；非审计日志。
+
+---
+
+## 12. 配置中心
+
+- 分层：global / tenant / user。
+- 配置项：模型/嵌入/重排、切块/检索、限流/配额、功能开关、审批超时、内容安全、Langfuse 场景开关。
+- 密钥：`model_configs.api_key_enc` 信封加密；界面/日志掩码；轮换/撤销。
+- 变更：审批或双人确认；生产至少两个平台特权账号；单账号 break-glass（原因+审计+事后复核）。
+- 版本化：每次变更生成版本；缓存失效；回滚到上一版本。
+- DB 连接：只从环境变量/密钥管理读取，不进 UI。
+
+---
+
+## 13. 性能测量口径
+
+- 核心 API：Nginx→FastAPI→DB/Redis；P95≤500ms（不含 AI）。
+- SSE 首 token：Nginx 收到请求→客户端收到首个 `delta`（快路径）或首个 `step`（ReAct）；P95≤3s；ReAct 首答案≤5s。
+- 快路径预算：向量化≤150ms、检索≤200ms、重排≤300ms、LLM TTFT≤2.3s。
+- 并发：非 AI 200；AI 50 流；压测后回调。
+- 工具：k6；报告含并发数、P50/P95/P99、错误率、CPU/内存/GPU/显存。
+- 发布/回滚：200 并发零 5xx；旧会话固定版本。
+- 结果存 `benchmarks/results/`。
+
+---
+
+## 14. ADR（关键决策）
+
+| ADR | 决策 | 理由 | 代价 |
+|---|---|---|---|
+| ADR-001 | 模块化单体 + Worker | 单人开发、事务简单、部署轻 | 未来拆分需边界纪律 |
+| ADR-002 | LangGraph + 自定义 Harness | 框架可替换；产品约束集中 | 自建契约/观测代码 |
+| ADR-003 | Qdrant 替代 pgvector | dense+sparse、collection/alias 适合蓝绿 | 多一个服务 |
+| ADR-004 | MinerU 4.0.12 + tier 降级 | 最新稳定、V1 API、质量档位 | 6GB 显存需降级验证 |
+| ADR-005 | C 端 H5，不做小程序 | POST 流式简单、无审核/域名白名单 | 微信生态触达弱 |
+| ADR-006 | 账号删除双入口 | 人员撤权 + 用户自助都合规 | 状态机复杂 |
+| ADR-007 | KB 单文档版本审批 | 精细控制、拒绝不阻塞其他文档 | 审批条数增加 |
+| ADR-008 | Git 为 prompt 唯一事实来源 | 避免双源、可审计 | Langfuse Prompt UI 仅实验 |
+| ADR-009 | Langfuse 独立主机 | 数据不出域、资源隔离 | 需额外主机 |
+| ADR-010 | 业务场景测试主门禁 | 保证业务输出而非仅代码正确 | 测试成本上升 |
+| ADR-011 | 代码审查强制 | 降低安全/隔离/状态机缺陷 | 开发节奏变慢 |
+| ADR-012 | ReAct 5 步/3 工具/2 检索 | 多跳能力与成本平衡 | 首字 5s 例外 |
+
+---
+
+## 15. 风险与待确认
+
+| 风险 | 影响 | 对策 |
+|---|---|---|
+| 16GB/6GB 资源紧张 | OOM、构建慢 | 资源限额、GPU 单并发、Langfuse 独立主机、M0 基准 |
+| MinerU Standard 在 6GB OOM | 解析失败 | Basic/Flash 降级；监控降级率；必要时默认 Basic |
+| Arq 对 Python 3.13 兼容性 | 任务队列不可用 | M0 验证；不兼容则提出 Taskiq 等替代并确认 |
+| Qdrant collection 增长 | 磁盘/内存 | 定期清理 retired；监控 |
+| H5 微信内 SSE 缓冲 | 流式失效 | fetch 流式 + 轮询兜底；M0/E2E 实测 |
+| 切块参数未定 | 召回质量 | M3 实验+评估集；不提前拍板 |
+| Langfuse 独立主机未提供 | 生产观测缺失 | M6 交付部署方案；未提供则本地 trace+Ragas，最终阶段补 |
+| 阶段冲突未定 | 范围/排期 | spec 标“待确认”；不纳入 MVP |
+| 测试数据/密钥泄露 | 合规 | .gitignore、secret 扫描、测试环境隔离 |
