@@ -83,6 +83,7 @@
 | TD-052 | M0-E | 测试中的假密钥常量易被 secret 扫描误报 | 已延后 | M0-F | 建 CI 时集中到 conftest 并统一命名（`FAKE_*`），配合 bandit/pip-audit/secret 扫描 |
 | TD-053 | M0-E | MinerU 镜像 10.5GB（`mineru[torch]` 拉入 6GB+ CUDA 运行库） | 已延后 | M3 | 若 GPU 小模型加速收益低于体积成本，改 CPU-only torch 或改用官方 slim 变体 |
 | TD-054 | M0-E | MinerU 生产分发形态：镜像推私有 registry + 模型离线预置 | 已采纳 | M6 | 生产不从公网重建镜像：push 到私有 registry 并预置模型（modelscope 可达）到卷/镜像，避免上线时拉 PyPI/HF |
+| TD-055 | M0-E | 自建镜像 vs 官方 vLLM 路径的解析质量对照未做 | 已采纳 | M3 | 同软件同模型，但 VLM 走 CPU llama-cpp + GGUF(Q8_0) 与官方 GPU vLLM 全精度不同；M3 用真实校园文档（表格/公式/扫描/多栏）做质量对照与回归，必要时升精度或换后端；已有夹具 `backend/tests/fixtures/mineru_table_cn.pdf` |
 
 ---
 
