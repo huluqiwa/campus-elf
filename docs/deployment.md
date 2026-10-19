@@ -16,7 +16,9 @@
 |---|---|---|---|
 | development | 本机开发 | 本地 Compose；MailHog；Langfuse optional | `.env` 本地，不入库 |
 | test | 自动化/集成 | 独立 Compose project；独立 DB/Redis/MinIO/Qdrant | 独立测试密钥 |
-| production | 交付 | Linux + Compose + Nginx + HTTPS；Langfuse 独立主机 | 密钥管理/环境变量 |
+| production | SaaS 运营环境（由运营方部署与运维） | Linux + Compose + Nginx + HTTPS；Langfuse 独立主机 | 密钥管理/环境变量 |
+
+- 定位：本系统是**多租户 SaaS**，由运营方（我们）统一部署一套平台（SaaS 平台端 + 校方 B 端 + 教师/学生 C 端），**校方不部署任何组件**，只通过平台注册成为租户后使用；租户边界靠 tenant_id + RLS + 仓储过滤 + 缓存/对象存储/向量库租户前缀保障。
 
 - 三套环境配置、数据库、密钥严格隔离。
 - 生产 `DEV_SKIP_SCHOOL_REVIEW=false`、`DEV_SKIP_FILE_SCAN=false`，启动时校验。
@@ -137,6 +139,7 @@ location /api/v1/school/kb/build-jobs/ {
 
 ## 7. Langfuse 独立主机
 
+- **归属**：由 SaaS 运营方自托管在**独立观测主机**上（不与应用主机共用），平台/运维专属访问；**校方不部署、不直接访问**。不使用 Langfuse Cloud（校园数据不出运营方控制的环境）。
 - 独立主机/VM；官方 self-hosting：Langfuse Web/Worker + PostgreSQL + ClickHouse + Redis + S3/MinIO。
 - 版本锁定：**Server 4.63.0 + Python SDK 5.0.2**；镜像 `langfuse/langfuse:4.63.0`、`langfuse/worker:4.63.0`；不使用 `latest`。
 - Server ≥4.59.0 才支持 Python SDK v5；v4 使用 OTel 接入，读取用 Observations API v2 / Metrics API v2 / Scores API v3。
