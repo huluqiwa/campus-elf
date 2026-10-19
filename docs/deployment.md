@@ -34,7 +34,7 @@
 | `observability` | langfuse-web、langfuse-worker、langfuse-postgres、clickhouse、langfuse-redis、langfuse-minio | 开发 optional；生产独立主机 |
 | `tools` | k6、playwright（可选） | 压测/E2E |
 
-> 开发机 16GB：默认 `core+rag+parser`；`observability` 默认关闭。生产 Langfuse 在独立主机。
+> 开发机 16GB：**默认只启动 core**；`rag` 与 `parser` 按需分开启动，不要同时开启全部 profile；`observability` 默认关闭。生产 Langfuse 在独立主机。
 
 ---
 
@@ -65,16 +65,16 @@
 
 | 服务 | 内存限额 | 说明 |
 |---|---|---|
-| postgres | 2GB | shared_buffers 调优 |
-| redis | 512MB | maxmemory 策略 |
-| minio | 512MB | |
-| qdrant | 2GB | 向量内存/磁盘 |
+| postgres | 1.5GB | shared_buffers 调优 |
+| redis | 384MB | maxmemory 策略 |
+| minio | 384MB | |
+| qdrant | 1.5GB | 向量内存/磁盘 |
 | backend | 1GB | 2–4 workers |
 | worker | 1GB | 并发受 MinerU/CPU 限制 |
-| clamav | 1GB | 病毒库 |
-| tei-embed | 1.5GB | CPU |
-| tei-rerank | 1.5GB | CPU |
-| mineru | 4GB + GPU | GPU 单并发 |
+| clamav | 1.5GB | 病毒库；768MB 实测会 OOMKilled |
+| tei-embed | 2.5GB | CPU；float32 + 小批量 |
+| tei-rerank | 2.5GB | CPU；float32 + 小批量 |
+| mineru | 3584m + GPU | GPU 单并发；M0-E 验证 |
 | nginx | 256MB | |
 | langfuse（独立主机） | 按官方 | 不与应用共用 |
 
@@ -126,6 +126,13 @@ location /api/v1/school/kb/build-jobs/ {
 
 ---
 
+## 6.5 MinIO 与 TEI 的实际处理
+
+- **MinIO**：官方 Docker Hub/Quay 仓库与 dl.min.io 二进制当前不可匿名获取；`deploy/minio/Dockerfile` 从官方源码构建固定 `RELEASE.2025-10-15T17-29-55Z`，不依赖 `latest`。该 RELEASE 为官方安全修复版本。
+- **TEI 模型下载**：首次启动直连 HuggingFace 下载 BGE-M3 / reranker 权重（约 2.2GB+）。`hf-mirror.com` 不返回 ETag，会导致 TEI 报 `Header etag is missing`，因此当前使用直连；下载完成后缓存到 `tei_models` 卷。
+- **Qdrant healthcheck**：镜像不含 curl/wget，使用容器自带 bash `/dev/tcp` 做 TCP 探活。
+- **ClamAV**：首次启动更新病毒库并加载，需约 1.5GB 内存；健康检查通过前不得上传文件。
+
 ## 7. Langfuse 独立主机
 
 - 独立主机/VM；官方 self-hosting：Langfuse Web/Worker + PostgreSQL + ClickHouse + Redis + S3/MinIO。
@@ -152,7 +159,7 @@ location /api/v1/school/kb/build-jobs/ {
 | backend | `/health/live`、`/health/ready` |
 | nginx | `/health` |
 
-- `depends_on: condition: service_healthy`；启动顺序：DB/Redis/MinIO → Qdrant/TEI/MinerU → backend/worker → nginx。
+- 当前 compose 未使用 `depends_on`；健康检查用于探针/运维，不自动控制启动顺序。启动顺序由脚本/人工保证：DB/Redis/MinIO → Qdrant/TEI/MinerU → backend/worker → nginx（M0-C 起接入）。
 - 失败重启策略 `unless-stopped`；日志轮转。
 
 ---
@@ -184,7 +191,11 @@ location /api/v1/school/kb/build-jobs/ {
 # 2. 复制配置
 cp .env.example .env
 # 3. 启动 core + rag + parser
-docker compose --profile core --profile rag --profile parser up -d
+# core（无 profile）→ rag → parser 分开启动，避免 16GB 同时全开
+docker compose up -d
+docker compose --profile rag up -d
+# parser 需先构建 MinerU 镜像（M0-E），当前未验证
+docker compose --profile parser up -d
 # 4. 后端
 cd backend && uv sync && uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
@@ -193,7 +204,7 @@ cd frontend && pnpm install && pnpm --filter admin dev
 pnpm --filter campus dev
 ```
 
-> 以上命令在 M0 落地后生效；当前仅文档阶段。
+> **M0-B 实测状态**：core（PostgreSQL/Redis/MinIO/MailHog/ClamAV）与 rag（Qdrant/TEI embed/rerank）已全部 healthy；TEI embed 返回 1024 维向量，rerank 返回有效分数；MinIO 从官方源码构建固定 RELEASE。MinerU parser profile 尚未构建/验证，留到 M0-E。
 
 ---
 

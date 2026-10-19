@@ -13,8 +13,9 @@
 - 配置模板与 Git 忽略规则
 - 文档确认
 - **M0-A：Git 初始化、Python 3.13 后端最小骨架、健康检查、测试、代码审查**
+- **M0-B：Docker Compose core/rag 依赖栈**——PostgreSQL 16、Redis 7.4、MinIO（源码构建固定 RELEASE）、MailHog、ClamAV、Qdrant 1.19.2、TEI 1.9.4 embed/rerank 全部 healthy；TEI 返回 1024 维向量与重排分数。
 
-待完成：Compose 依赖、Harness 空壳、前端脚手架、MinerU/Langfuse/Arq 兼容性验证、CPU 嵌入/重排基准。
+待完成：Harness 空壳、前端脚手架、MinerU/Langfuse/Arq 兼容性验证、CPU 嵌入/重排基准。
 
 ## 技术栈（已锁定）
 
