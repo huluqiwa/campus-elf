@@ -40,6 +40,7 @@
 
 **方案 A（推荐）：官方 `docker/global/Dockerfile` 构建固定 tag 镜像**
 - 做法：`git clone --depth 1 --branch <4.0.12 tag>` → `docker build -f docker/global/Dockerfile -t mineru:4.0.12` → `api-server --host 0.0.0.0 --port 8000`，compose `parser` profile 映射 8100。
+  - 已否决，实际采用自定义 torch 镜像与 `mineru-kit api-server ...` 命令，见 §8；官方镜像构建命令已废弃，勿照抄。
 - 优点：与官方部署最接近；V1 API 独立服务；GPU 单并发可控。
 - 缺点/成本：镜像大、构建耗时；模型下载体积大；6GB 显存可能需要 Basic/Flash。
 - 风险：构建网络/磁盘不足；GPU 驱动；Standard 不可用。
@@ -68,8 +69,8 @@
 
 ### 2.4 Langfuse
 
-**方案 A（推荐）：开发 optional profile，固定 4.63.0**
-- 做法：`docker compose --profile observability up -d` 单独验证 Web/Worker/Postgres/ClickHouse/Redis/S3；默认关闭；应用侧 `LANGFUSE_ENABLED=false`。
+**方案 A（推荐）：开发 optional 独立 compose，固定 4.63.0**
+- 做法：`cd deploy/observability && cp .env.example .env && docker compose up -d`（独立 compose 文件，无 profile），单独验证 Web/Worker/Postgres/ClickHouse/Redis/S3；默认关闭；应用侧 `LANGFUSE_ENABLED=false`。
 - 优点：与生产独立主机方案一致；不占 16GB 常驻；验证版本/健康/组件可用。
 - 缺点/成本：组件多、内存大；仅按需启动。
 - 风险：16GB 同时启 core+rag+observability 可能 OOM；必须单独启动验证。
@@ -84,9 +85,9 @@
 ## 3. 选择结论
 
 - 依赖：方案 B（分组增量 + 导入冒烟）。
-- MinerU：方案 A（官方 Dockerfile 固定 tag + V1 API + 六 G 显存降级验证）。
-- Arq：方案 A 优先；不兼容时先报告再选 B/C。
-- Langfuse：方案 A（开发 optional，默认关闭，独立启动验证）。
+- MinerU：方案 A（官方 Dockerfile）**已否决** → 自定义 `python:3.13-slim + mineru[torch]` 镜像 + V1 API + 6GB 显存三档验证（见 §8）。
+- Arq：方案 A（已通过；队列命名按 0.28 契约由 `WorkerSettings.queue_name` + `create_pool(default_queue_name=…)` 对齐）。
+- Langfuse：方案 A（开发 optional 独立 compose，默认关闭，单独启动验证）。
 - 不改 spec/design 决策；只把验证结果与版本证据写入 design/deployment。
 
 ## 4. 实现顺序与 TDD 测试清单
@@ -104,8 +105,9 @@
    - [ ] `/v1/health` 健康
    - [ ] 用一个合成 PDF 调 V1 API，记录实际 tier（Standard/Basic/Flash）、耗时、显存
 4. **Langfuse**：
-   - [ ] optional profile 单独启动，组件 healthy
+   - [ ] 独立 compose 单独启动（非 profile），组件 healthy
    - [ ] 应用侧默认关闭时不影响后端启动/测试
+   - [ ] `evals/scripts/langfuse_smoke.py` 可复现 trace 证据
 5. 文档与台账：把版本/摘要/降级结果写回 design/deployment，TD-012 标完成，新问题登记。
 
 ## 5. 测试策略
@@ -133,10 +135,43 @@
 
 - MinerU 构建/模型下载会消耗时间、磁盘；6GB 显存 Standard 可能不可用。
   - 已确认策略：Standard→Basic→Flash 自动降级；实际 tier 写入构建元数据；若默认档位需要调整，先报告再改。
+  - M0-E 实测结果：6GB 显存下 **standard 可用且未降级**（VLM 走 llama-cpp CPU，显存占用 <500MiB）；降级链由 M3 执行器实现并在其上真实验证。
 - Arq 若不兼容 Python 3.13：不静默替换，先给 Taskiq/Celery 对比。
 - Langfuse 验证只做开发 optional；不部署生产观测主机、不外送真实数据。
 
-## 8. 审查对照
+## 8. 执行结果（2026-10-20）
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 依赖分组 | web/db/队列、RAG/存储、Agent/LLM、鉴权/加密 四组导入与版本断言通过 | `backend/tests/test_dependencies.py` |
+| Ragas/Langfuse | Ragas 0.4.3 与 langchain-community 0.4 不兼容（vertexai 模块被移除）；已移至独立 `evals/` uv 项目并锁 `langchain-community<0.4`，导入通过 | `evals/pyproject.toml`、`evals/tests/test_dependencies.py` |
+| Arq | Arq 0.28.0 在 Python 3.13 + Redis 下真实执行任务通过；队列命名按 0.28 契约对齐（`WorkerSettings.queue_name` + `create_producer_pool`），单测断言 `create_worker(WorkerSettings).queue_name`，集成用例验证生产/消费落到同一命名空间队列 | `backend/app/workers/`、`backend/tests/integration/test_arq_smoke.py`、`backend/tests/test_worker_settings.py` |
+| Langfuse | 4.63.0 web/worker/Postgres 17/ClickHouse 25.12/Redis/MinIO 全部健康；SDK 发送合成 trace 后 Observations API v2 可查到 `m0e-smoke` | `deploy/observability/`、`evals/scripts/langfuse_smoke.py`（可复现冒烟脚本） |
+| MinerU | 官方 `docker/global/Dockerfile` 基于 vLLM 且要求 8GB+ 显存，6GB 不适用；改为 `python:3.13-slim + mineru[torch]` 自定义镜像（非 root、模型源 `auto`、VLM 引擎 `auto`→llama-cpp），构建成功并完成三档真实解析 | `deploy/mineru/Dockerfile`、`deploy/docker-compose.yml`、下表运行期证据 |
+
+### MinerU 运行期证据（2026-10-20，RTX 4050 Laptop 6GB）
+
+| tier | 首次（含模型下载） | 热态耗时 | 输出长度 | 结果 |
+|---|---|---|---|---|
+| standard | 248.1s | 1.9s（parse 1368ms） | 248 字符 markdown | 标题 + 三节内容正确 |
+| basic | — | 2.0s（parse 1896ms） | 248 字符 markdown | 正确 |
+| flash | — | 0.9s（parse 280ms） | 247 字符 markdown | 正确 |
+
+- 实际 tier = **standard，未触发降级**；显存占用全程 421–455 MiB（`nvidia-smi` 采样），无 OOM。
+- 模型体积：pipeline 小模型 227MB（`/data/mineru/models/MinerU-4_models_torch`）+ VLM GGUF 1.2GB（`MinerU2.5-Pro-2605-1.2B-GGUF`：主模型 531MB + mmproj 709MB），落在 `mineru_data` 卷；VLM 由 llama-cpp 走 CPU 推理，因此 6GB 显存不是瓶颈，代价是首次冷启动慢。
+- 健康检查 `GET /v1/health` 只声明能力（`version=4.0.12`、输出格式、来源类型），**不能作为可用性证据**，故 M3 上线验证必须带一次真实 `/v1/file_parse`（登记 TD-046）。
+- 组件自检：`mineru-kit api-server` 参数（`--tier/--concurrency/--upload-dir/--preload-models`）与内层 `--upload-dir` 的 click 校验是容器启动失败的两个根因，已修复并写入 `deploy/mineru/README.md`。
+- 测试夹具：`backend/tests/fixtures/mineru_smoke.pdf`（1 页合成 PDF，报告 lab 开放时间/请假审批/冒烟说明三段文字）。
+
+### 偏离与登记
+
+- MinerU 官方镜像不适用于 6GB：登记 TD-043（已采纳，自定义 torch 镜像 + 运行期完成三档验证）；传递依赖未固定版本登记 TD-045。
+- Ragas/langchain-community 冲突：登记 TD-042，已完成（独立 evals 项目 + 版本锁定）。
+- jieba 0.42.1 在 3.13 的 SyntaxWarning：登记 TD-041，测试按类别过滤（带 module 限定无效，已修正说明），延后 M3 评估替代分词器。
+- Langfuse `DATABASE_URL` 漂移：登记 TD-044，改为由 `POSTGRES_*` 拼装 + 敏感项 fail-fast，状态为「已缓解」，生产观测主机部署时收口。
+- 观测栈镜像未 pin digest：TD-048；Langfuse 复用 MinIO root 凭据：TD-049；缺 CI 导致集成证据不自动复现：TD-047。
+
+## 9. 审查对照
 
 - 审查时重点验证：
   - 依赖版本与 Python 3.13 实际解析结果；

@@ -1,4 +1,4 @@
-# 部署依赖栈（M0-B）
+# 部署依赖栈（M0-B / M0-E 已验证）
 
 ## 启动
 
@@ -19,7 +19,8 @@ docker compose up -d
 # 3. 加 RAG：Qdrant / TEI embedding / TEI reranker
 docker compose --profile rag up -d
 
-# 4. 加 MinerU（M0-E 才构建/验证；当前 parser profile 未验证）
+# 4. 加 MinerU（M0-E 已验证：构建 → 启动 → /v1/health → 真实解析三档）
+docker compose --profile parser build mineru
 docker compose --profile parser up -d
 ```
 
@@ -53,14 +54,23 @@ docker compose down
 - ClamAV 首次启动会更新病毒库，加载病毒库约需 1GB+ 内存；`mem_limit` 已设为 1536m，768m 会 OOMKilled。健康检查未通过前不要上传文件。
 - TEI 首次启动会直连 HuggingFace 下载 BGE-M3 / reranker 模型（约 2.2GB+），耗时取决于网络；模型缓存在 `tei_models` 卷。`hf-mirror.com` 不返回 ETag，会导致 TEI 报 `Header etag is missing`，因此当前使用直连。
 - MinIO 官方 Docker Hub/Quay/dl.min.io 当前不可匿名获取；`deploy/minio/Dockerfile` 从官方源码构建固定 `RELEASE.2025-10-15T17-29-55Z`。详见 `deploy/minio/README.md`。
-- MinerU 镜像需要本地构建；在构建前 `parser` profile 不可用。详见 `deploy/mineru/README.md`。
-- Langfuse 不在本文件；生产独立观测主机，开发 optional 在 M0-E 验证。
+- MinerU 镜像需要本地构建（`docker compose --profile parser build mineru`）；M0-E 已实测构建成功、容器 healthy、standard/basic/flash 三档真实解析通过（详见 `deploy/mineru/README.md`）。
+- Langfuse 不在本文件：开发 optional 用 `deploy/observability/docker-compose.yml`（独立 compose，M0-E 已验证 4.63.0 全组件健康 + 冒烟脚本）；生产用独立观测主机。
 - 16GB 开发机不要同时启动全部 profile；按需 `--profile rag`、`--profile parser` 分开验证。
-- 已验证：PostgreSQL 查询、Redis PING、MinIO 健康/未授权 403、Qdrant 建删集合、ClamAV 扫描、MailHog SMTP 投递、TEI embed 1024 维、TEI rerank 分数。
+- 已验证：PostgreSQL 查询、Redis PING 与 Arq 任务、MinIO 健康/未授权 403、Qdrant 建删集合、ClamAV 扫描、MailHog SMTP 投递、TEI embed 1024 维、TEI rerank 分数、MinerU 三档解析、Langfuse 4.63.0 端到端 trace。
 - TEI 冒烟：
   ```bash
   curl -fsS http://127.0.0.1:8081/health
   curl -fsS http://127.0.0.1:8082/health
   curl -fsS -X POST http://127.0.0.1:8081/embed -H 'Content-Type: application/json' -d '{"inputs":"奖学金申请条件"}'
   curl -fsS -X POST http://127.0.0.1:8082/rerank -H 'Content-Type: application/json' -d '{"query":"奖学金申请条件","texts":["奖学金申请条件包括成绩和综合素质测评。","图书馆本科生可借10册。"]}'
+  ```
+- MinerU 冒烟（`/v1/health` 只声明能力，不能证明模型可用）：
+  ```bash
+  curl -fsS http://127.0.0.1:8100/v1/health
+  curl -fsS -X POST http://127.0.0.1:8100/v1/file_parse -F "files=@backend/tests/fixtures/mineru_smoke.pdf"
+  ```
+- Langfuse 冒烟（先启动 `deploy/observability`，并确保 `langfuse` bucket 已创建）：
+  ```bash
+  cd evals && uv run python scripts/langfuse_smoke.py
   ```

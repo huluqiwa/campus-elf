@@ -31,7 +31,7 @@
 | `core` | postgres、redis、minio、mailhog（dev）、clamav、backend、worker、frontend/nginx | 应用基础 |
 | `rag` | qdrant、tei-embed、tei-rerank | 向量/嵌入/重排 |
 | `parser` | mineru（GPU） | MinerU 4.0.12 V1 API |
-| `observability` | langfuse-web、langfuse-worker、langfuse-postgres、clickhouse、langfuse-redis、langfuse-minio | 开发 optional；生产独立主机 |
+| `observability` | langfuse-web、langfuse-worker、langfuse-postgres、clickhouse、langfuse-redis、langfuse-minio | 开发 optional，独立 compose（`deploy/observability/`）；生产独立主机 |
 | `tools` | k6、playwright（可选） | 压测/E2E |
 
 > 开发机 16GB：**默认只启动 core**；`rag` 与 `parser` 按需分开启动，不要同时开启全部 profile；`observability` 默认关闭。生产 Langfuse 在独立主机。
@@ -74,7 +74,7 @@
 | clamav | 1.5GB | 病毒库；768MB 实测会 OOMKilled |
 | tei-embed | 2.5GB | CPU；float32 + 小批量 |
 | tei-rerank | 2.5GB | CPU；float32 + 小批量 |
-| mineru | 3584m + GPU | GPU 单并发；M0-E 验证 |
+| mineru | 3584m + GPU | GPU 单并发；M0-E 实测模型加载后约 3.2GB，显存 <500MiB |
 | nginx | 256MB | |
 | langfuse（独立主机） | 按官方 | 不与应用共用 |
 
@@ -118,11 +118,13 @@ location /api/v1/school/kb/build-jobs/ {
 
 ## 6. MinerU GPU
 
-- 镜像/依赖固定 4.0.12；`mineru[torch]`。
-- GPU 单并发；队列由 Worker 控制；进度写入 DB。
-- 模型缓存卷 `mineru-data/`；首次启动下载模型需预置/离线包。
-- 健康检查 `/v1/health`；失败重试/死信；tier 降级记录。
-- 6GB 显存：Standard→Basic→Flash；若 Standard 降级率过高，默认 Basic 并报告质量差异。
+- 镜像/依赖固定 4.0.12；自定义镜像 `deploy/mineru/Dockerfile`（`mineru[torch]`，非 root，`WORKDIR /data`）。
+- 启动命令：`mineru-kit api-server --host 0.0.0.0 --port 8000 --upload-dir /data/uploads --concurrency 1`（`api-server` 是 `mineru-kit` 子命令，无独立可执行文件）。
+- GPU 单并发（`--concurrency 1`）；队列由 Worker 控制；进度写入 DB。
+- 模型源 `MINERU_MODEL_SOURCE=auto`（huggingface/modelscope 自动解析）；模型落 `mineru_data` 卷的 `/data/mineru/models` + `/data/hf`。实测 standard 档模型合计约 1.4GB（pipeline 小模型 227MB + VLM GGUF 1.2GB：主模型 531MB + mmproj 709MB）。
+- VLM 引擎 `MINERU_MODEL_VLM_ENGINE=auto` → 本机解析为 llama-cpp **CPU 推理**；实测显存占用恒为 421–485MiB（远低于 6GB），代价是冷启动慢。
+- 健康检查 `/v1/health` 只声明能力（版本/输出格式/来源），**不代表模型可用**；上线验证必须带一次真实 `/v1/file_parse`（TD-046）。
+- 6GB 显存实测：standard/basic/flash 三档均可用（热态 1.9s / 2.0s / 0.9s），未触发降级；降级链 Standard→Basic→Flash 由 M3 执行器实现并验证。
 
 ---
 
@@ -154,7 +156,7 @@ location /api/v1/school/kb/build-jobs/ {
 | redis | `redis-cli ping` |
 | minio | `/minio/health/live` |
 | qdrant | `/healthz` |
-| mineru | `/v1/health` |
+| mineru | `/v1/health`（只声明能力；M0-E 实测缺模型时也可能返回 ok，**上线验证必须带一次真实 `/v1/file_parse`**，见 TD-046） |
 | tei | `/health` |
 | backend | `/health/live`、`/health/ready` |
 | nginx | `/health` |
@@ -194,7 +196,8 @@ cp .env.example .env
 # core（无 profile）→ rag → parser 分开启动，避免 16GB 同时全开
 docker compose up -d
 docker compose --profile rag up -d
-# parser 需先构建 MinerU 镜像（M0-E），当前未验证
+# parser 需先构建 MinerU 镜像（M0-E 已验证：构建 → 启动 → /v1/health → 真实解析）
+docker compose --profile parser build mineru
 docker compose --profile parser up -d
 # 4. 后端
 cd backend && uv sync && uv run alembic upgrade head

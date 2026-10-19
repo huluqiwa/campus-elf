@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     docs_enabled: bool = True
 
+    # 必填：无默认值，缺失即 fail-fast，禁止静默回退到无凭证的本机 Redis。
+    redis_url: str
+    # Redis 键/队列命名空间前缀；arq 队列名形如 `<redis_prefix>:queue`。
+    redis_prefix: str = "campus_elf"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

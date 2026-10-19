@@ -123,6 +123,32 @@
 - 更好做法与 TD 处置：TD-029~TD-038 已登记 `docs/tech-debt.md`，其中 TD-037/038 已完成，TD-029~031/033~036 已采纳，TD-032 延后。
 - 结论：Major 已修，可提交；剩余 Minor 记入 M0-F/M1 技术债。
 
+### M0-E 兼容性与外部组件验证
+
+- 日期：2026-10-20
+- 范围：`backend/pyproject.toml` + `app/config.py` + `app/workers/**` + `tests/**`（依赖分组、Arq、WorkerSettings）、`evals/**`（独立 uv 项目 + 冒烟脚本）、`deploy/mineru/**`、`deploy/observability/**`、`deploy/docker-compose.yml`（parser profile）、`docs/**`
+- 审查方式：两个独立审查 agent（① 后端依赖/Arq/evals；② 部署/MinerU 容器/观测栈），第一轮 + 复审两轮；高风险项（容器安全、缓存路径、模型来源、队列命名落地）由审查者实机复核
+- 第一轮发现与修复：
+  - **Blocker（部署）**：compose 的 mineru `command` 是裸 `api-server`，而该入口不存在（是 `mineru-kit` 子命令）→ 容器 127 退出循环。已改为完整 argv，实机 `Cmd` 与 `RestartCount=0` 验证。
+  - **Blocker（部署）**：`MINERU_MODEL_SOURCE=local` 但镜像不含模型 → 首次解析必失败。已改 `auto`（huggingface/modelscope），模型落 `mineru_data` 卷。
+  - **Major（部署）**：`MINERU_MODEL_VLM_ENGINE=torch` 非法（合法值 auto/llama-cpp/vllm/lmdeploy/mlx），会让任何 mineru 命令在导入期崩溃；已改 `auto`，实测解析日志为 llama-cpp 引擎。
+  - **Major（部署）**：模型缓存路径与卷不匹配（挂 `/root/.cache` 而实际 `/data/mineru`）→ 已统一到 `/data` 单卷。
+  - **Major（后端）**：`test_arq_smoke` 无条件 `flushdb()`，URL 漏写 DB 段会静默落到业务库 DB 0 → 新增一次性 DB 护栏（DB≥10；反例 0/无段/5 全部被拒），去掉 flushdb，改唯一队列隔离 + `wait_for` 超时 + finally 清理 + 队列清空断言。
+  - **Major（后端）**：Worker 直读 `os.environ` 且有硬编码无凭证回退 DSN → `Settings.redis_url` 改必填、`build_redis_settings` 从配置构造，缺失即 ValidationError（fail-fast）。
+  - **Minor 已修**：jieba 过滤按类别生效（原带 module 写法无效）；evals 打包映射 `src/campus_elf_evals`；evals README 命令改 `cd evals && uv run python -m …`；观测栈敏感项全部 `${VAR:?}`、`DATABASE_URL` 由 `POSTGRES_*` 拼装、`pull_policy: never` + README 预构建 MinIO、`POSTGRES_VERSION` 默认 `17-alpine`、文件头注释改项目规则；MinerU 镜像非 root + `ipc: host` + ulimits、健康检查去 wget 回退、`start_period 300s`、显式 `--concurrency 1`、官方 vLLM 构建命令标注废弃。
+  - **Minor（部署）**：`deploy/observability/.env(.example)` 的 `DATABASE_URL` 死配置已删除；`deploy/README.md`、`docs/deployment.md`、`docs/milestone.md`、根 `README.md` 的“未验证/自动降级”表述已按实测更正。
+- 复审发现与修复：
+  - **Major（后端，复审新增）**：`RedisSettings.default_queue_name` 在 arq 0.28 中不被 `create_pool`/`Worker` 读取，队列命名空间实际未生效且单测断言的是无效中间量（假绿）。已按 arq 真实契约重做：`WorkerSettings.queue_name`（arq CLI 传给 Worker）+ `create_producer_pool()`（`create_pool(default_queue_name=…)`）；单测断言 `create_worker(WorkerSettings).queue_name == "campus_elf:queue"`，集成用例改成“生产者不传 `_queue_name` → 消费者仍能取到任务”。
+  - **Minor 已修**：`backend/tests/conftest.py` 提供 `REDIS_URL` 默认值，单元测试不再依赖开发者本机 `.env`；`evals/scripts/langfuse_smoke.py` 全部异常转可读 `FAIL`；ruff `src` 增补 `scripts`。
+  - 复审结论：部署/观测栈侧**通过**（无 Blocker/Major 残留）；后端侧修复后重测通过。
+- 复测证据：
+  - `backend`：`uv lock --check` 通过；`ruff check app tests` 通过；`mypy app tests` strict 通过（31 files）；`TEST_REDIS_URL=redis://…:6379/15 uv run pytest` → **58 passed**（含真实 burst worker 集成）；未设 `TEST_REDIS_URL` 时集成用例 skip 而非 fail。
+  - `evals`：`ruff check .` 通过；`pytest` → 2 passed。
+  - MinerU：镜像构建成功（`mineru:4.0.12`，非 root）；`/v1/health` ok（version 4.0.12）；真实解析三档——standard 冷 248.1s（含模型下载）/热 1.9s、basic 2.0s、flash 0.9s，Markdown 内容正确；显存采样 12 次均 455–485 MiB，未降级。
+  - Langfuse：观测栈从零冷启动（新项目名 + 必填项 fail-fast）全部 healthy，`{"status":"OK","version":"4.63.0"}`；`evals/scripts/langfuse_smoke.py` → `OK trace=c486f13c… observation=b9ad3d14…`（首次失败仅因 `langfuse` bucket 未建，已写入 README 前置步骤）。
+- 更好做法与 TD 处置：TD-041（证据更正，延后 M3）、TD-042（完成）、TD-043（完成：自定义镜像 + 三档实测）、TD-044（已缓解，M6 收口）、TD-045（已采纳，M3 固定传递依赖）、TD-046（完成：健康检查≠可用）、TD-047（已采纳，M0-F CI）、TD-048/049（已采纳/延后，M6）；新增 TD-050（已拒绝）、TD-051（已采纳，M1 功能探针）、TD-052（延后 M0-F）、TD-053（延后 M3，镜像体积）。
+- 结论：两轮审查的 Blocker/Major 均已修复并复测通过，可提交；剩余 Minor 已登记 TD。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

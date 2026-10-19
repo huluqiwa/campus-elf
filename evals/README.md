@@ -11,6 +11,8 @@ evals/
 ├─ rubric.md
 ├─ fixtures/
 │  └─ sample_kb.md          # 合成学校知识库，供评估用例引用
+├─ scripts/
+│  └─ langfuse_smoke.py     # 观测栈连通性冒烟（写 trace 后经 v2 observations 复查）
 ├─ cases/
 │  ├─ kb_qa.jsonl
 │  ├─ citation.jsonl
@@ -79,15 +81,17 @@ evals/
 
 ## 5. 运行方式（M4 落地）
 
-计划命令：
+本目录是独立 uv 项目（backend 依赖按设计不含 ragas/langfuse），评估命令必须在本目录内运行：
 
 ```bash
-cd backend
-uv run python ../evals/run_eval.py \
-  --dataset ../evals/cases \
-  --fixtures ../evals/fixtures/sample_kb.md \
-  --report ../evals/reports/
+cd evals
+uv run python -m campus_elf_evals.run_eval \
+  --dataset cases \
+  --fixtures fixtures/sample_kb.md \
+  --report reports/
 ```
+
+> `campus_elf_evals.run_eval` 模块在 M4 落地；`scripts/langfuse_smoke.py` 已可用于验证观测栈连通性。
 
 - 使用测试租户与测试 KB；不连接生产数据。
 - LLM 使用 `.env` 中配置；温度 0；记录 token/成本。

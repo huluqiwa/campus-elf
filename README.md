@@ -18,14 +18,16 @@
 
 - **M0-D：前端脚手架**——pnpm workspace、apps/admin（Element Plus）、apps/campus（Vant 4）、packages/api-client/ui/config；`pnpm build`/`typecheck` 通过，Playwright 冒烟 2 passed。
 
-待完成：MinerU/Langfuse/Arq 兼容性验证、CPU 嵌入/重排基准、M0 验收报告。
+- **M0-E：兼容性与外部组件验证**——分组依赖（web/db、rag、agent、auth）导入与版本断言通过；Ragas/Langfuse 隔离到独立 `evals/` uv 项目（`langchain-community<0.4`）；Arq 0.28 在真实 Redis 上执行任务通过；Langfuse 4.63.0 自托管栈健康并可用 `evals/scripts/langfuse_smoke.py` 复现 trace 证据；MinerU 4.0.12 自定义镜像（非 root、模型源 `auto`、VLM llama-cpp）standard/basic/flash 三档真实解析通过，6GB 显存占用 <500MiB 未降级。
+
+待完成：CPU 嵌入/重排基准、CI/测试基础设施、M0 验收报告。
 
 ## 技术栈（已锁定）
 
 - Python 3.13.x、FastAPI、SQLAlchemy 2 async、Alembic
 - LangGraph + 自定义 Harness（LangGraph 只做图执行）
 - PostgreSQL 16、Qdrant、Redis 7.4、MinIO
-- MinerU 4.0.12（Standard → Basic → Flash 自动降级）
+- MinerU 4.0.12（实际 tier 写入构建元数据；Standard→Basic→Flash 降级链在 M3 执行器落地）
 - BGE-M3 dense + jieba/BM25 sparse + bge-reranker-v2-m3（TEI CPU）
 - Vue 3 + TypeScript + Vite；管理端 Element Plus，C 端 Vant 4（移动端 H5）
 - Langfuse Server 4.63.0 + Python SDK 5.0.2（生产独立主机自托管，开发可选）

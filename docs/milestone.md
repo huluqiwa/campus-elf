@@ -59,7 +59,7 @@
 ### 3.3 退出标准
 
 - `docker compose up` 一键启动 core；健康检查通过。
-- MinerU V1 API `/v1/health` 通过；PDF 在 6GB 下跑通 Standard，OOM 自动降 Basic/Flash。
+- MinerU V1 API `/v1/health` 通过；PDF 在 6GB 下跑通 Standard（M0-E 实测：三档均可用、显存 <500MiB、未触发降级；Standard→Basic→Flash 降级链由 M3 执行器实现并验证）。
 - 空壳 Loop 发 `meta/step/done` SSE，记录 stop_reason。
 - 本地 trace 必发；Langfuse 关闭不影响运行，开启后映射正确（mock 端点）。
 - Python 3.13 下核心依赖可导入/启动；不兼容项已报告，不静默替换。

@@ -1,0 +1,5 @@
+# 二进制文件禁止行尾转换
+*.pdf binary
+*.png binary
+*.jpg binary
+*.woff2 binary

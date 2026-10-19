@@ -240,26 +240,48 @@ services:
 
   mineru:
     image: ${MINERU_IMAGE:-mineru:4.0.12}
+    build:
+      context: ./mineru
+      args:
+        MINERU_VERSION: 4.0.12
     profiles: ["parser"]
+    # 镜像 ENTRYPOINT 为 `bash -c 'exec "$@"' --`，此处给出完整命令；
+    # `api-server` 是 mineru-kit 的子命令，不存在独立的 api-server 可执行文件。
     command:
+      - "mineru-kit"
       - "api-server"
       - "--host"
       - "0.0.0.0"
       - "--port"
       - "8000"
+      - "--upload-dir"
+      - "/data/uploads"
+      # GPU 单并发：避免并行解析争抢 6GB 显存。
+      - "--concurrency"
+      - "1"
     environment:
-      MINERU_MODEL_SOURCE: local
+      # auto：按网络可达性在 huggingface/modelscope 间解析并持久化，模型不随镜像分发。
+      MINERU_MODEL_SOURCE: auto
+      MINERU_MODEL_SMALL_BACKEND: torch
+      # 合法值：auto/llama-cpp/vllm/lmdeploy/mlx；本镜像只装 mineru[torch]（含 llama-cpp）。
+      MINERU_MODEL_VLM_ENGINE: auto
+    # torch/CUDA 共享内存需求（对齐官方 compose 的 GPU 服务设置）。
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
     ports:
       - "127.0.0.1:8100:8000"
     volumes:
-      - mineru_models:/root/.cache
+      # 模型目录（MINERU_HOME=/data/mineru）与 HF/modelscope 缓存（HF_HOME、MODELSCOPE_CACHE）都在 /data。
       - mineru_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/health || wget -q -O - http://localhost:8000/v1/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 180s
+      # 健康检查只声明能力；模型下载发生在首次解析，不阻塞启动。
+      start_period: 300s
     deploy:
       resources:
         reservations:
@@ -287,5 +309,4 @@ volumes:
   clamav_data:
   qdrant_data:
   tei_models:
-  mineru_models:
   mineru_data:

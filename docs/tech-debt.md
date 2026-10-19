@@ -40,7 +40,7 @@
 | TD-009 | M0-B | Postgres 显式 shared_buffers/max_connections 调优 | 已延后 | M1 | 当前仅 `shm_size` |
 | TD-010 | M0-B | TEI 模型离线预置/支持 ETag 的镜像源 | 已延后 | M0-F | 直连下载 ~4.5GB；已固定 revision |
 | TD-011 | M0-B | ClamAV 固定精确版本 tag，而非 `stable` digest | 已延后 | M6 | 已用 digest 固定内容；tag 语义浮动 |
-| TD-012 | M0-B | MinerU 4.0.12 镜像构建 + V1 API + 6GB 档位降级验证 | 已采纳 | M0-E | M0-B 只定义 parser profile，未构建 |
+| TD-012 | M0-B | MinerU 4.0.12 镜像构建 + V1 API + 6GB 档位降级验证 | 已完成 | M0-E | 自定义 torch 镜像构建成功；standard/basic/flash 三档真实解析通过，显存 <500MiB 未降级 |
 | TD-013 | M0-B | 默认只启 core，rag/parser 分开；文档与 compose 对齐 | 已完成 | M0-B | bbc2bfd 已修文档与 profile 口径 |
 | TD-014 | M0-B | MinIO 构建注入 Version/ReleaseTag/CommitID | 已完成 | M0-B | 镜像 `--version` 已显示 RELEASE（bbc2bfd） |
 | TD-015 | M0-C | `audit_level`/`idempotent`/`redacted_summary` 接入执行策略 | 已延后 | M4 | 当前所有工具执行都审计 |
@@ -69,6 +69,19 @@
 | TD-038 | M0-D | `/health` 与 `/api` 同源代理，避免 CORS | 已完成 | M0-D | c4d4dfa 已修 Major |
 | TD-039 | 流程 | 历史 M0-A~M0-D 未做“实现前设计简报” | 已拒绝 | — | 历史功能点已交付并审查；M0-E 起强制先简报后编码，不回溯 |
 | TD-040 | 流程 | 实现前设计简报门禁 | 已完成 | — | 本次更新 AGENTS/checklist/milestone/design-briefs |
+| TD-041 | M0-E | jieba 0.42.1 在 Python 3.13 产生 SyntaxWarning；评估 pkuseg/HanLP 等替代 | 已延后 | M3 | 测试按类别过滤（`ignore::SyntaxWarning`；带 module 限定的写法对包内文件无效，已修正）；切块阶段统一评估分词器 |
+| TD-042 | M0-E | ragas 0.4.3 与 langchain-community 0.4 不兼容（vertexai 模块被移除） | 已完成 | M0-E | 独立 `evals/` 项目 + `langchain-community<0.4`，导入通过 |
+| TD-043 | M0-E | 官方 MinerU Dockerfile 基于 vLLM，要求 8GB+ 显存，6GB 不适用 | 已采纳 | M0-E | 改 `python:3.13-slim + mineru[torch]` 自定义镜像（VLM 引擎 `auto`→llama-cpp、模型源 `auto`、非 root）；运行期 tier 验证后收口 |
+| TD-044 | M0-E | Langfuse 官方 compose 的 DATABASE_URL 默认值不随 POSTGRES_PASSWORD 变化 | 已缓解 | M6 | M0-E 已改为由 `POSTGRES_*` 拼装 `DATABASE_URL` 并 fail-fast；生产观测主机部署时再收口 |
+| TD-045 | M0-E | MinerU 镜像内 `mineru[torch]` 的传递依赖（torch/transformers 等）未固定版本 | 已采纳 | M3 | 实测 `docker images` 10.5GB、容器内 site-packages 6.2GB（nvidia 3.2GB + torch 1.2GB）；建议预装固定 torch 版本（指定 index）并加 PyPI 镜像 |
+| TD-046 | M0-E | MinerU `/v1/health` 只声明能力，不校验模型是否可用 | 已完成 | M0-E | 确认该行为；E3 验收链路补真实 `/v1/file_parse` 冒烟，健康检查不作为可用性证据 |
+| TD-047 | M0-E | 缺 CI 导致 Arq 集成用例默认 skip，真实执行证据不自动复现 | 已采纳 | M0-F | CI 加 Redis service 并设 `TEST_REDIS_URL=...:6379/15`（配合一次性 DB 护栏） |
+| TD-048 | M0-E | 观测栈镜像仅按 tag 固定，未 pin digest（与 core/rag 策略不一致） | 已采纳 | M6 | 生产观测主机部署时统一 pin digest |
+| TD-049 | M0-E | Langfuse 复用 MinIO root 凭据（同一凭据既是 S3 access key） | 已延后 | M6 | 生产观测主机部署时改用专用用户 + 最小权限策略 |
+| TD-050 | M0-E | 是否把 langgraph/langchain-core/openai 移入 optional 依赖组 | 已拒绝 | — | M0-E 简报已批准在 M0 验证 agent 组兼容性；M4 立即使用，拆组会扩大改动面 |
+| TD-051 | M0-E | 依赖测试只断言导入与版本，不覆盖运行时 API 漂移 | 已采纳 | M1 | 接 LangGraph/OpenAI 客户端时补最小功能探针（两节点 StateGraph、实例化 AsyncOpenAI 不发网） |
+| TD-052 | M0-E | 测试中的假密钥常量易被 secret 扫描误报 | 已延后 | M0-F | 建 CI 时集中到 conftest 并统一命名（`FAKE_*`），配合 bandit/pip-audit/secret 扫描 |
+| TD-053 | M0-E | MinerU 镜像 10.5GB（`mineru[torch]` 拉入 6GB+ CUDA 运行库） | 已延后 | M3 | 若 GPU 小模型加速收益低于体积成本，改 CPU-only torch 或改用官方 slim 变体 |
 
 ---
 
@@ -80,8 +93,8 @@
 | M0-B | TD-007~014 | TD-013/014 | TD-012 | TD-007~011 | 无 | 通过 |
 | M0-C | TD-015~028 | TD-027/028 | TD-016/018/025/026 | TD-015/017/019~024 | TD-021 | 通过 |
 | M0-D | TD-029~038 | TD-037/038 | TD-029~031/033~036 | TD-032 | 无 | 通过 |
-| M0-E | 待评审 | — | — | — | — | 待做 |
+| M0-E | TD-041~053 | TD-012/042/046 | TD-045/047/048/051 | TD-041/049/052/053 | TD-050 | 通过（两轮审查，Blocker/Major 全部修复） |
 | M0-F | 待评审 | — | — | — | — | 待做 |
 
-> M0-E 开始前先处理 `已采纳/目标 M0-E` 的条目：TD-012（MinerU）。
-> M0-F 开始前处理 TD-002/005/010/029/030/031/033/034/035。
+> M0-E 开始前先处理 `已采纳/目标 M0-E` 的条目：TD-012（MinerU）——已完成（自定义镜像 + 三档实测）。
+> M0-F 开始前处理 TD-002/005/010/029/030/031/033/034/035，以及 M0-E 新登记的 TD-047/052。

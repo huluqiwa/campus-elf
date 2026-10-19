@@ -11,6 +11,24 @@ dependencies = [
   "structlog>=24,<26",
   "jinja2>=3.1,<4",
   "jsonschema>=4.23,<5",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "asyncpg>=0.30,<1",
+  "alembic>=1.14,<2",
+  "redis>=5,<7",
+  "arq>=0.26,<1",
+  "qdrant-client>=1.12,<2",
+  "aioboto3>=15,<16",
+  "nh3>=0.2,<1",
+  "jieba>=0.42,<1",
+  "python-multipart>=0.0.12,<1",
+  "langgraph>=1,<2",
+  "langchain-core>=1,<2",
+  "openai>=2,<3",
+  "pyjwt>=2.9,<3",
+  "pwdlib[bcrypt]>=0.2,<1",
+  "pyotp>=2.9,<3",
+  "cryptography>=47,<48",
+  "aiosmtplib>=3,<5",
 ]
 
 [dependency-groups]
@@ -26,6 +44,10 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q"
+# jieba 0.42.1 在 Python 3.13 下产生 SyntaxWarning；见 TD-041。
+# 注意：带 module 限定（如 ignore::SyntaxWarning:jieba）对包内文件不生效，必须按类别过滤。
+filterwarnings = ["ignore::SyntaxWarning"]
+markers = ["integration: requires external services (Redis/MinerU/Langfuse)"]
 
 [tool.ruff]
 line-length = 100
