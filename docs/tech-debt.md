@@ -67,6 +67,8 @@
 | TD-036 | M0-D | 用 OpenAPI 生成客户端替换手写 api-client | 已采纳 | M1 | 后端 OpenAPI 就绪后生成 |
 | TD-037 | M0-D | 前端环境变量放到 `frontend/.env`，根 `.env` 不生效 | 已完成 | M0-D | c4d4dfa 新增 frontend/.env.example |
 | TD-038 | M0-D | `/health` 与 `/api` 同源代理，避免 CORS | 已完成 | M0-D | c4d4dfa 已修 Major |
+| TD-039 | 流程 | 历史 M0-A~M0-D 未做“实现前设计简报” | 已拒绝 | — | 历史功能点已交付并审查；M0-E 起强制先简报后编码，不回溯 |
+| TD-040 | 流程 | 实现前设计简报门禁 | 已完成 | — | 本次更新 AGENTS/checklist/milestone/design-briefs |
 
 ---
 

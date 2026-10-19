@@ -11,7 +11,8 @@
 
 ## 1. 流程
 
-1. 实现者完成 TDD（红→绿→重构），单元/集成测试通过。
+0. 实现前已有 `docs/design-briefs/<ID>.md`：候选方案、选择理由、测试策略、预判 TD；高风险项已确认。
+1. 实现者完成 TDD（红→绿→重构），单元/集成测试通过；实现与设计简报一致，偏离有 TD 处置。
 2. 业务场景测试通过，业务输出断言满足。
 3. 自动检查：ruff、mypy、ESLint、vue-tsc、bandit/pip-audit、pnpm audit、secret 扫描。
 4. 独立 review agent/独立上下文审查 staged diff；不依赖实现者解释。

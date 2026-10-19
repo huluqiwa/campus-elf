@@ -49,6 +49,7 @@
 | `docs/code-review-checklist.md` | 代码审查清单与分级 |
 | `docs/review-log.md` | 功能点审查记录模板 |
 | `docs/tech-debt.md` | 更好做法/技术债台账与闭环处置 |
+| `docs/design-briefs/` | 实现前设计简报（候选方案、选择理由、测试策略） |
 | `evals/` | LLM 评估集、rubric、runner 设计 |
 | `benchmarks/` | k6/locust 压测脚本与报告规范 |
 

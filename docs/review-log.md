@@ -31,6 +31,7 @@
 ```markdown
 ### <功能点 ID / 名称>
 - 日期：
+- 设计简报：docs/design-briefs/<ID>.md
 - commit/diff：
 - 审查人/agent：
 - 范围：
