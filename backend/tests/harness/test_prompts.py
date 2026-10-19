@@ -4,8 +4,9 @@ import hashlib
 
 import pytest
 from jinja2 import UndefinedError
+from pydantic import ValidationError
 
-from app.harness.prompts import PromptRegistry
+from app.harness.prompts import PromptRegistry, PromptSpec
 
 
 def test_prompt_register_and_render() -> None:
@@ -52,6 +53,13 @@ def test_prompt_normalizes_crlf_hash() -> None:
     spec = registry.register("kb_answer", "v1", "a\r\nb")
     assert spec.template == "a\nb"
     assert spec.sha256 == hashlib.sha256(b"a\nb").hexdigest()
+
+
+def test_prompt_spec_rejects_hash_mismatch() -> None:
+    """template 与 sha256 不一致时拒绝构造。"""
+
+    with pytest.raises(ValidationError):
+        PromptSpec(name="x", version="v1", template="a", sha256="0" * 64)
 
 
 def test_prompt_missing_version_raises() -> None:

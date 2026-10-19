@@ -74,6 +74,12 @@ async def error_handler(call: ToolCall, ctx: TenantContext) -> ToolResult:
     raise RuntimeError("boom")
 
 
+async def non_toolresult_handler(call: ToolCall, ctx: TenantContext) -> ToolResult:
+    """返回非 ToolResult，用于契约违反测试。"""
+
+    return {"ok": True}  # type: ignore[return-value]
+
+
 @pytest.mark.asyncio
 async def test_tool_executor_success_records_trace_and_audit() -> None:
     """成功调用写 trace span 与 audit 事件。"""
@@ -98,6 +104,7 @@ async def test_tool_executor_success_records_trace_and_audit() -> None:
     assert trace_sink.spans[0].tenant_id is not None
     assert len(audit_sink.events) == 1
     assert audit_sink.events[0].action == "tool.execute"
+    assert audit_sink.events[0].trace_id == "trace-1"
     assert audit_sink.verify() is True
 
 
@@ -237,6 +244,44 @@ async def test_tool_executor_handler_error() -> None:
     )
     assert result.ok is False
     assert result.error_code == "TOOL_ERROR"
+
+
+async def test_tool_executor_non_toolresult_is_tool_error() -> None:
+    """处理器违反返回类型时降级为 TOOL_ERROR，且仍写审计。"""
+
+    registry = ToolRegistry()
+    registry.register(spec(), non_toolresult_handler)
+    audit_sink = InMemoryAuditSink(SECRET)
+    executor = ToolExecutor(
+        registry,
+        trace=TraceRecorder(InMemoryTraceSink()),
+        audit=audit_sink,
+    )
+    result = await executor.execute(ToolCall(tool="kb.search", args={}), tenant())
+    assert result.ok is False
+    assert result.error_code == "TOOL_ERROR"
+    assert audit_sink.count == 1
+
+
+async def test_tool_executor_invalid_schema() -> None:
+    """schema 运行期解析失败时返回 INVALID_SCHEMA。"""
+
+    registry = ToolRegistry()
+    # $ref 指向不存在的本地定义：注册期 check_schema 通过，运行期解析失败。
+    schema = {"$ref": "#/definitions/missing"}
+    registry.register(spec(input_schema=schema), ok_handler)
+    result = await make_executor(registry).execute(
+        ToolCall(tool="kb.search", args={"q": "x"}), tenant()
+    )
+    assert result.ok is False
+    assert result.error_code == "INVALID_SCHEMA"
+
+
+def test_tool_executor_requires_trace_and_audit() -> None:
+    """trace/audit 是必需依赖。"""
+
+    with pytest.raises(TypeError):
+        ToolExecutor(ToolRegistry())  # type: ignore[call-arg]
 
 
 @pytest.mark.asyncio

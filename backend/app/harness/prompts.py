@@ -8,7 +8,7 @@ from typing import Any
 
 from jinja2 import StrictUndefined, meta
 from jinja2.sandbox import SandboxedEnvironment
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _normalize_template(template: str) -> str:
@@ -28,6 +28,17 @@ class PromptSpec(BaseModel):
     sha256: str = Field(min_length=64, max_length=64)
     hash_scheme_version: str = "1"
     source_path: str | None = None
+
+    @model_validator(mode="after")
+    def _verify_hash(self) -> "PromptSpec":
+        """拒绝 template 与 sha256 不一致的实例。"""
+
+        expected = hashlib.sha256(
+            _normalize_template(self.template).encode("utf-8")
+        ).hexdigest()
+        if self.sha256 != expected:
+            raise ValueError("prompt sha256 does not match template")
+        return self
 
 
 class PromptRegistry:

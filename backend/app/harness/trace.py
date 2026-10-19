@@ -29,9 +29,13 @@ class InMemoryTraceSink:
         self.spans: list[TraceSpan] = []
 
     def write_turn(self, record: TraceRecord) -> None:
-        """保存回合 trace 深拷贝。"""
+        """保存回合 trace 深拷贝，并脱敏嵌套 span attributes。"""
 
-        self.turns.append(record.model_copy(deep=True))
+        safe_spans = [
+            span.model_copy(update={"attributes": redact_mapping(span.attributes)})
+            for span in record.spans
+        ]
+        self.turns.append(record.model_copy(update={"spans": safe_spans}, deep=True))
 
     def write_span(self, span: TraceSpan) -> None:
         """保存 span，并脱敏 attributes。"""

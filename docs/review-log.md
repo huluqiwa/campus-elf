@@ -8,7 +8,7 @@
 | 文档阶段（非代码） | 2026-10-19 | docs/* | 待用户确认 | 0 | 0 | 0 | N/A | 已确认 |
 | M0-A 后端最小骨架 | 2026-10-19 | feature/M0-foundation | 独立 Explore review agent | 0 | 1 | 12 | Major 已修复；低成本 Minor 已修；其余记录 | 已提交 |
 | M0-B Compose 依赖栈 | 2026-10-19 | feature/M0-foundation | 独立 Explore review agent | 1 | 3 | 14 | Blocker/Major 已修；关键 Minor 已修；MinerU 留 M0-E | 已提交 |
-| M0-C Harness 骨架 | 2026-10-19 | feature/M0-foundation | 第一轮独立审查 + 结构化自查 | 0 | 8 | 14 | 8 Major 已修；Minor 记录；独立复审因余额中断 | 可提交（待余额恢复后补复审） |
+| M0-C Harness 骨架 | 2026-10-19 | feature/M0-foundation | 两轮独立审查（第二轮补做） | 0 | 8+1 | 20 | 两轮 Major 已修；关键 Minor 已修；其余记录 | 已提交 |
 
 ### M0-A 后端最小骨架
 
@@ -81,23 +81,26 @@
   6. 审计链可重算/截断/重放 → HMAC-SHA256 + 序号 + event_id + 深拷贝 + `head_hash`/`count` + `verify(expected_head, expected_count)`；测试覆盖篡改、重放、截断。
   7. 脱敏不完整、trace 未脱敏 → 扩展敏感 key 与值正则（邮箱/手机/证件/Bearer），trace span attributes 写入前脱敏。
   8. 测试缺口 → 扩展到 41 个用例，覆盖权限/写工具/可用性/租户状态/数据范围/schema/超时/异常/取消/缺失工具/审计篡改/重放/截断/脱敏/Prompt 严格变量/CRLF。
-- 第二轮独立复审：尝试复用同一 Explore agent 复核，因账户 **Insufficient Balance** 中断；未获得独立复审结论。
-- 结构化自查：逐项对照上述 8 Major 与测试覆盖，确认已修复；剩余 Minor 记录在下方。
+- 第二轮独立复审（余额恢复后补做）：8 个 Major 中 7 项已实质修复；新增 **F1 Major** 与 F2/F3 Minor。已修复：
+  - **F1（Major）**：`InMemoryTraceSink.write_turn` 未脱敏嵌套 `spans[].attributes`，存在明文旁路。已修复为对嵌套 span attributes 递归脱敏，并新增断言。
+  - **F2**：handler 返回非 `ToolResult` 时降级为 `TOOL_ERROR`；input/output schema 解析异常（含 `$ref`）统一降级为 `INVALID_SCHEMA`；两者都保证 trace/audit 落盘。
+  - **F3**：`ToolRegistry.register` 用 `jsonschema.Draft202012Validator.check_schema` 校验 schema 合法性，非法直接 `ValueError`。
+  - **F5**：`ToolRegistry.available`/`CapabilityRegistry.available` 增加 tenant_status 与 data_scope 过滤。
+  - **F8**：`AuditEvent` 增加 `trace_id`，工具审计与 trace 建立关联。
+  - **F9**：`PromptSpec` 增加 `sha256` 与 template 一致性校验。
+  - **F10**：脱敏补充 15 位证件号、带空格手机号，以及 credential/session/otp/verify_code/student_no/employee_no 等 key。
 - 剩余 Minor（M0-C 不阻塞，留后续）：
-  - trace/audit 为同步接口，接 PostgreSQL/JSONL/Langfuse 时需评估阻塞；后续改 async 或放入 worker。
-  - `audit_level` 暂未区分 none/basic/full；当前工具执行全部审计。
+  - F4：`audit_level`/`idempotent`/`redacted_summary` 尚未被消费，声明与执行仍有漂移。
+  - F6：`input_schema`/`output_schema` 默认空，未强制只读工具显式声明。
+  - F7：`frozen=True` 对嵌套 dict（如 `feature_flags`）无效，安全上下文需改不可变映射。
+  - F11：`AuditSink`/`TraceSink` 为同步接口，接 DB 时需评估 async/worker。
   - `verify()` 空链返回 True；生产需外部锚点/WORM 配合。
-  - `PromptRegistry.versions` 按字符串排序，v10/v2 语义未处理。
-  - `E501` 仍被 ignore；中文 Prompt 字符串需要。
-  - `ToolExecutor` 对 handler 自身抛 TimeoutError 与 wait_for 超时未区分；trace/audit sink 故障未隔离。
-  - `CapabilitySpec.permission` 默认 None（公开）；后续按需改为必填/显式 public。
-  - `AgentRequest` 内嵌 TenantContext，当前仅文档说明必须由认证层注入；接入 HTTP 时需拆外部 DTO。
-  - 审计/ trace 仍为内存实现；落库与 WORM 在后续里程碑。
+  - `PromptRegistry.versions` 按字符串排序；`E501` 仍 ignore；handler 自抛 TimeoutError 与 wait_for 超时未区分；trace/audit sink 故障未隔离；`CapabilitySpec.permission` 默认公开；`AgentRequest` 内嵌 TenantContext 需认证层注入；审计/trace 仍为内存实现。
 - 复测：
-  - `uv run pytest`：41 passed
+  - `uv run pytest`：48 passed
   - `uv run ruff check .`：通过
   - `uv run mypy app tests`：通过
-- 结论：可提交；建议在余额恢复后补一次独立复审，再进入 M0-D。
+- 结论：两轮审查的 Major 均已修复，可提交；进入 M0-D 时把剩余 Minor 纳入技术债清单。
 
 ## 高风险功能复审记录
 

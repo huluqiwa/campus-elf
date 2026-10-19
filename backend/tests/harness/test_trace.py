@@ -50,3 +50,5 @@ def test_trace_recorder_writes_turn_and_span() -> None:
     assert sink.spans[0].attributes["token"] == "***"
     assert sink.spans[0].attributes["email"] == "***"
     assert sink.turns[0].trace_id == "trace-1"
+    assert sink.turns[0].spans[0].attributes["token"] == "***"
+    assert sink.turns[0].spans[0].attributes["email"] == "***"

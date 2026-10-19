@@ -89,6 +89,29 @@ def test_tool_registry_rejects_write_tool_by_default() -> None:
         registry.register(tool_spec(side_effect=True), _handler)
 
 
+def test_tool_registry_rejects_invalid_schema() -> None:
+    """注册期校验 schema 合法性。"""
+
+    registry = ToolRegistry()
+    with pytest.raises(ValueError):
+        registry.register(tool_spec(input_schema={"type": "not-a-type"}), _handler)
+
+
+def test_tool_registry_available_filters_tenant_and_scope() -> None:
+    """停用租户与范围不足时不返回工具。"""
+
+    registry = ToolRegistry()
+    registry.register(tool_spec(data_scope="school"), _handler)
+    assert registry.available(tenant(tenant_status="suspended")) == ()
+    assert registry.available(tenant(permissions=frozenset({"kb.read"}))) == ()
+    assert [
+        s.name
+        for s in registry.available(
+            tenant(permissions=frozenset({"kb.read"}), data_scopes=("school",))
+        )
+    ] == ["kb.search"]
+
+
 def test_tool_registry_available_filters_permission_write_and_flag() -> None:
     """可用工具排除写工具，并按权限/开关过滤。"""
 
@@ -102,13 +125,16 @@ def test_tool_registry_available_filters_permission_write_and_flag() -> None:
     assert registry.available(tenant()) == ()
     assert [
         s.name
-        for s in registry.available(tenant(permissions=frozenset({"kb.read"})))
+        for s in registry.available(
+            tenant(permissions=frozenset({"kb.read"}), data_scopes=("self",))
+        )
     ] == ["kb.search"]
     assert [
         s.name
         for s in registry.available(
             tenant(
                 permissions=frozenset({"kb.read"}),
+                data_scopes=("self",),
                 feature_flags={"ENABLE_KB": True},
             )
         )

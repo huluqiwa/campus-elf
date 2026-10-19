@@ -65,6 +65,14 @@ def test_audit_external_anchor_detects_truncation() -> None:
     assert sink.verify(expected_head=head, expected_count=2) is False
 
 
+def test_audit_expected_head_mismatch() -> None:
+    """链头与外部锚点不一致时 verify 失败。"""
+
+    sink = InMemoryAuditSink(SECRET)
+    sink.append(event({"ok": True}))
+    assert sink.verify(expected_head="wrong-head") is False
+
+
 def test_audit_rejects_duplicate_event_id() -> None:
     """重放相同 event_id 被拒绝。"""
 
@@ -85,7 +93,9 @@ def test_redact_mapping_is_recursive_and_value_aware() -> None:
             "list": [{"authorization": "Bearer x"}],
             "contact": "a@example.com",
             "note": "13800138000",
+            "spaced": "138 0013 8000",
             "ref": "110101199001011234",
+            "old_id": "110101900101123",
         }
     )
     assert result["api_key"] == "***"
@@ -94,4 +104,6 @@ def test_redact_mapping_is_recursive_and_value_aware() -> None:
     assert result["list"][0]["authorization"] == "***"
     assert result["contact"] == "***"
     assert result["note"] == "***"
+    assert result["spaced"] == "***"
     assert result["ref"] == "***"
+    assert result["old_id"] == "***"

@@ -34,11 +34,18 @@ _SENSITIVE_KEY_PARTS = (
     "prompt",
     "answer",
     "completion",
+    "credential",
+    "session",
+    "otp",
+    "verify_code",
+    "student_no",
+    "employee_no",
 )
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-_MOBILE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+_MOBILE_RE = re.compile(r"(?<!\d)1[3-9]\d(?:\s?\d{4}){2}(?!\d)")
 _ID_CARD_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
+_ID_CARD_15_RE = re.compile(r"(?<!\d)\d{15}(?!\d)")
 _BEARER_RE = re.compile(r"(?i)Bearer\s+[A-Za-z0-9._-]+")
 
 
@@ -47,8 +54,9 @@ def _redact_string(value: str) -> str:
 
     value = _BEARER_RE.sub("Bearer ***", value)
     value = _EMAIL_RE.sub("***", value)
-    value = _MOBILE_RE.sub("***", value)
-    return _ID_CARD_RE.sub("***", value)
+    value = _ID_CARD_RE.sub("***", value)
+    value = _ID_CARD_15_RE.sub("***", value)
+    return _MOBILE_RE.sub("***", value)
 
 
 def redact_mapping(value: Any) -> Any:
@@ -93,6 +101,7 @@ class AuditEvent(BaseModel):
     resource_type: str = Field(min_length=1)
     resource_id: str = Field(min_length=1)
     result: str = Field(min_length=1)
+    trace_id: str | None = Field(default=None, max_length=128)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     event_id: UUID = Field(default_factory=uuid4)

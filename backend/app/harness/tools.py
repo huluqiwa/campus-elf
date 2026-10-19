@@ -12,25 +12,8 @@ import jsonschema
 
 from app.harness.audit import AuditEvent, AuditSink
 from app.harness.contracts import TenantContext, ToolCall, ToolResult, TraceSpan
-from app.harness.registry import ToolRegistry
+from app.harness.registry import ToolRegistry, scope_allows
 from app.harness.trace import TraceRecorder
-
-_SCOPE_RANK: dict[str, int] = {
-    "none": 0,
-    "self": 1,
-    "course": 2,
-    "class": 3,
-    "school": 4,
-}
-
-
-def _scope_allows(required: str, ctx: TenantContext) -> bool:
-    """判断用户数据范围是否覆盖工具要求；范围可向下兼容。"""
-
-    if required == "none":
-        return True
-    required_rank = _SCOPE_RANK[required]
-    return any(_SCOPE_RANK.get(scope, -1) >= required_rank for scope in ctx.data_scopes)
 
 
 class ToolExecutor:
@@ -78,7 +61,7 @@ class ToolExecutor:
             return self._finish(
                 call, ctx, ToolResult(ok=False, error_code="TOOL_UNAVAILABLE"), start
             )
-        if not _scope_allows(spec.data_scope, ctx):
+        if not scope_allows(spec.data_scope, ctx):
             return self._finish(
                 call, ctx, ToolResult(ok=False, error_code="DATA_SCOPE_DENIED"), start
             )
@@ -89,7 +72,8 @@ class ToolExecutor:
             return self._finish(
                 call, ctx, ToolResult(ok=False, error_code="INVALID_ARGS"), start
             )
-        except jsonschema.SchemaError:
+        except Exception:
+            # 包含 SchemaError 与 $ref 解析异常；统一降级为 INVALID_SCHEMA。
             return self._finish(
                 call, ctx, ToolResult(ok=False, error_code="INVALID_SCHEMA"), start
             )
@@ -109,12 +93,15 @@ class ToolExecutor:
             # 不把异常文本写入结果，避免泄露内部地址/凭证。
             result = ToolResult(ok=False, error_code="TOOL_ERROR")
 
+        if not isinstance(result, ToolResult):
+            result = ToolResult(ok=False, error_code="TOOL_ERROR")
+
         if result.ok:
             try:
                 jsonschema.validate(instance=result.data, schema=spec.output_schema)
             except jsonschema.ValidationError:
                 result = ToolResult(ok=False, error_code="INVALID_RESULT")
-            except jsonschema.SchemaError:
+            except Exception:
                 result = ToolResult(ok=False, error_code="INVALID_SCHEMA")
 
         return self._finish(call, ctx, result, start)
@@ -155,6 +142,7 @@ class ToolExecutor:
                 resource_type="tool",
                 resource_id=call.tool,
                 result="success" if result.ok else "error",
+                trace_id=trace_id,
                 metadata={
                     "call_id": str(call.call_id),
                     "ok": result.ok,

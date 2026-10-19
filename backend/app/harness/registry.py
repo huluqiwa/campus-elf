@@ -6,9 +6,28 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import jsonschema
+
 from app.harness.contracts import TenantContext, ToolCall, ToolResult, ToolSpec
 
 ToolHandler = Callable[[ToolCall, TenantContext], Awaitable[ToolResult]]
+
+_SCOPE_RANK: dict[str, int] = {
+    "none": 0,
+    "self": 1,
+    "course": 2,
+    "class": 3,
+    "school": 4,
+}
+
+
+def scope_allows(required: str, ctx: TenantContext) -> bool:
+    """判断用户数据范围是否覆盖工具要求；范围可向下兼容。"""
+
+    if required == "none":
+        return True
+    required_rank = _SCOPE_RANK[required]
+    return any(_SCOPE_RANK.get(scope, -1) >= required_rank for scope in ctx.data_scopes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +66,10 @@ class CapabilityRegistry:
         return tuple(sorted(self._items.values(), key=lambda item: item.name))
 
     def available(self, ctx: TenantContext) -> tuple[CapabilitySpec, ...]:
-        """按权限与功能开关返回当前可用能力。"""
+        """按租户状态、权限与功能开关返回当前可用能力。"""
 
+        if ctx.tenant_status != "active":
+            return ()
         result: list[CapabilitySpec] = []
         for spec in self._items.values():
             if spec.permission is not None and spec.permission not in ctx.permissions:
@@ -87,6 +108,16 @@ class ToolRegistry:
             raise ValueError(f"write tool registration is disabled: {spec.name}")
         if spec.name in self._specs:
             raise ValueError(f"tool already registered: {spec.name}")
+        for schema_name, schema in (
+            ("input_schema", spec.input_schema),
+            ("output_schema", spec.output_schema),
+        ):
+            try:
+                jsonschema.Draft202012Validator.check_schema(schema)
+            except jsonschema.SchemaError as exc:
+                raise ValueError(
+                    f"invalid {schema_name} for tool {spec.name}: {exc.message}"
+                ) from exc
         self._specs[spec.name] = spec
         self._handlers[spec.name] = handler
 
@@ -106,13 +137,17 @@ class ToolRegistry:
         return tuple(sorted(self._specs.values(), key=lambda item: item.name))
 
     def available(self, ctx: TenantContext) -> tuple[ToolSpec, ...]:
-        """按权限、功能开关与只读策略返回当前可用工具。"""
+        """按租户状态、权限、数据范围、功能开关与只读策略返回当前可用工具。"""
 
+        if ctx.tenant_status != "active":
+            return ()
         result: list[ToolSpec] = []
         for spec in self._specs.values():
             if spec.side_effect:
                 continue
             if spec.permission not in ctx.permissions:
+                continue
+            if not scope_allows(spec.data_scope, ctx):
                 continue
             if spec.availability_flag is not None and not ctx.feature_flags.get(
                 spec.availability_flag, False
