@@ -1,6 +1,6 @@
 # SC-01 文档查阅人群（ACL）与切块编辑 · Spec/Design 变更草案
 
-- 状态：**待用户确认**（确认后回写 `requirements.md` / `spec.md` / `design.md` / `milestone.md` / `test-plan.md` / `rbac-matrix.md` / `state-machines.md` / `tenant-isolation.md`）
+- 状态：**已确认（2026-10-21）**——组织模型选 **方案 A**（独立 `departments` 树 + `classes.grade`）；§6 十条假设无异议；已回写 `requirements.md` / `spec.md` / `design.md` / `milestone.md` / `test-plan.md` / `rbac-matrix.md` / `state-machines.md` / `tenant-isolation.md` / `tech-debt.md`
 - 提出日期：2026-10-21
 - 影响里程碑：M2（+1 功能点）、M3（+2 功能点）、M4（+1 功能点）、M1-E（权限种子预留）
 - 不影响：M0、M1-A、M1-B 已交付代码；M1-C / M1-D 顺序不变

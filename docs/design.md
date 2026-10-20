@@ -199,9 +199,10 @@ LLM-05-CampusCompanionElf/
 | `role_permissions` | role_id, permission_id, tenant_id（复合外键保证与父行同租） | 角色-权限 |
 | `user_roles` | user_id, role_id, tenant_id（复合外键保证与父行同租） | 多角色 |
 | `data_scopes` | id, tenant_id, role_id/user_id, scope_type(school/class/course/self), scope_id | 数据范围 |
-| `teachers` | id, tenant_id, user_id, employee_no, name, age, gender, position, id_card_enc, id_card_hmac, id_card_mask | 身份证加密/掩码 |
+| `teachers` | id, tenant_id, user_id, employee_no, name, age, gender, position, **department_id**, id_card_enc, id_card_hmac, id_card_mask | 身份证加密/掩码；部门归属供文档人群判定（A30） |
 | `students` | id, tenant_id, user_id, student_no, name, class_id, gender, head_teacher_id, counselor_id, id_card_enc, id_card_hmac, id_card_mask | 档案 |
-| `classes` | id, tenant_id, grade, name, head_teacher_id, counselor_id | 班级 |
+| `classes` | id, tenant_id, grade, name, head_teacher_id, counselor_id | 班级（grade 供"年级"人群使用） |
+| `departments` | id, tenant_id, parent_id, name, code, path, status | 部门/科室树（A30）；复合外键 `(parent_id, tenant_id)`；唯一 `(tenant_id, parent_id, name)` |
 | `courses` | id, tenant_id, code, name | 课程 |
 | `teacher_class_courses` | teacher_id, class_id, course_id, term | 任教关系 |
 | `import_jobs` | id, tenant_id, type, file_object_key, status, total_rows, success_rows, failed_rows, error_report_key, retry_count | 导入 |
@@ -212,10 +213,13 @@ LLM-05-CampusCompanionElf/
 | 表 | 关键字段 | 说明 |
 |---|---|---|
 | `kb_documents` | id, tenant_id, title, tags, description, status, current_version_id, created_by | 文档 |
-| `kb_document_versions` | id, tenant_id, document_id, version_no, source_object_key, source_hash, mime, size, status, approval_request_id, created_by | 版本；status: DRAFT/UPLOADED/SCAN_FAILED/PENDING_APPROVAL/REJECTED/APPROVED/BUILDING/READY/FAILED/PUBLISHED/OFFLINE/DELETED |
+| `kb_document_versions` | id, tenant_id, document_id, version_no, source_object_key, source_hash, mime, size, status, approval_request_id, **parent_version_id, derivation_type(initial/chunk_edit), acl_confirmed_by, acl_confirmed_at**, created_by | 版本；status 同下；派生版本（K5）由 parent_version_id 追溯 |
 | `kb_build_jobs` | id, tenant_id, document_version_id, status, stage, progress, processed_units, total_units, tier, fallback_reason, retry_count, error_code, message, started_at, updated_at, finished_at | 构建任务；同版本仅一个活跃任务 |
 | `kb_build_events` | id, job_id, seq, event_type, payload_json, created_at | SSE 事件持久化，支持 Last-Event-ID/since |
-| `kb_chunks` | id, tenant_id, document_version_id, parent_id, chunk_type(parent/child), chunk_index, text, text_markdown, section_path, page_start, page_end, token_count, char_count, overlap_prev, overlap_next, chunk_hash, metadata_json, embedding_status | 分块 |
+| `kb_chunks` | id, tenant_id, document_version_id, parent_id, chunk_type(parent/child), chunk_index, text, text_markdown, section_path, page_start, page_end, token_count, char_count, overlap_prev, overlap_next, chunk_hash, metadata_json, embedding_status, **is_human_edited, edited_by, edited_at** | 分块 |
+| `kb_document_audiences` | id, tenant_id, version_id, audience_type(department/role/class/grade/course/user/all), audience_id, created_by, created_at | 版本级查阅人群（K4）；`all` 时 audience_id 为空；唯一 `(version_id, audience_type, audience_id)` |
+| `kb_chunk_edits` | id, tenant_id, source_version_id, chunk_id, before_hash, after_hash, new_content, edited_by, reason, status(draft/submitted/confirmed/discarded), derived_version_id, created_at | 块编辑记录（K5） |
+| `kb_embedding_cache` | tenant_id, model, chunk_hash, dense_object_key, sparse_object_key, created_at | 向量复用缓存（K5）；派生重建只对改动块重新推理 |
 | `kb_index_versions` | id, tenant_id, kb_id/document_version_id, qdrant_collection, status, published_at, retired_at | 版本化索引 |
 | `kb_publish_aliases` | tenant_id, kb_id, alias, collection, version_id, updated_at | alias 指针 |
 | `kb_test_sets` | id, tenant_id, document_version_id, name, file_object_key, status, created_by | 测试集 |
@@ -359,7 +363,8 @@ audit_logs: 仅追加，prev_hash/hash 链
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET/POST | `/school/teachers` | 教师列表/创建 |
+| GET/POST | `/school/departments` | 部门树维护（A30）；返回层级结构 |
+| GET/POST | `/school/teachers` | 教师列表/创建（含 department_id 归属） |
 | GET/POST | `/school/students` | 学生列表/创建 |
 | POST | `/school/imports` | CSV/XLSX 异步导入 |
 | GET | `/school/imports/{job_id}` | 导入进度/错误报告 |
@@ -374,6 +379,8 @@ audit_logs: 仅追加，prev_hash/hash 链
 | GET | `/school/kb/documents` | 列表/状态筛选 |
 | GET | `/school/kb/documents/{id}` | 详情 |
 | GET | `/school/kb/documents/{doc_id}/versions` | 版本列表 |
+| GET/PUT | `/school/kb/document-versions/{id}/audiences` | 读取/全量设置版本查阅人群（K4；保存后置为"未确认"） |
+| POST | `/school/kb/document-versions/{id}/audiences/confirm` | 确认人群（K4；`school.kb.acl.manage`，写审计） |
 | POST | `/school/kb/document-versions/{version_id}/submit-approval` | 提交审批 |
 | POST | `/school/kb/document-versions/{version_id}/build` | 创建构建（仅 APPROVED） |
 | GET | `/school/kb/build-jobs/{job_id}` | 构建快照 |
@@ -381,7 +388,10 @@ audit_logs: 仅追加，prev_hash/hash 链
 | POST | `/school/kb/build-jobs/{job_id}/retry` | 重试 |
 | GET | `/school/kb/versions/{version_id}/chunks` | 分块列表（cursor/q/section/type） |
 | GET | `/school/kb/chunks/{chunk_id}` | 分块详情 |
-| POST | `/school/kb/versions/{version_id}/retrieval-test` | 检索测试 |
+| POST | `/school/kb/versions/{version_id}/retrieval-test` | 检索测试（支持人群视角） |
+| POST | `/school/kb/chunks/{chunk_id}/edits` | 提交块编辑（K5；带 `base_hash`，理由必填） |
+| GET | `/school/kb/document-versions/{id}/chunk-edits` | 块编辑 diff 列表（K5） |
+| POST | `/school/kb/document-versions/{id}/derive` | 确认并派生新版本（K5；校方超管确认） |
 | POST | `/school/kb/versions/{version_id}/test-sets` | 上传测试集 |
 | POST | `/school/kb/versions/{version_id}/tests` | 运行测试 |
 | POST | `/school/kb/versions/{version_id}/publish` | 发布（需 TEST_PASSED） |
@@ -433,6 +443,8 @@ data: {"job_id":"...","stage":"EMBEDDING","error_code":"EMBED_TIMEOUT","message"
     "chunk_hash": "...",
     "text_markdown": "...",
     "embedding_status": "ready",
+    "is_human_edited": false,
+    "edited_by": null,
     "metadata": {"table": false, "code": false}
   }],
   "next_cursor": "...",
@@ -443,12 +455,26 @@ data: {"job_id":"...","stage":"EMBEDDING","error_code":"EMBED_TIMEOUT","message"
 `POST /school/kb/versions/{version_id}/retrieval-test`：
 
 ```json
-{"query":"奖学金申请条件","top_k":10}
+{
+  "query": "奖学金申请条件",
+  "top_k": 10,
+  "as_user_id": null,
+  "as_audiences": null,
+  "ignore_acl": false
+}
 ```
 
-返回 dense/sparse/RRF/rerank 分数、chunk_id、引用预览；用于解释召回原因。
+- 默认按**操作者自身**的人群集合过滤（与 C 端问答同一套过滤逻辑，保证"测试能复现线上"）。
+- `as_user_id` / `as_audiences`：校方用"某用户/某人群视角"验证 ACL 配置是否命中预期。
+- `ignore_acl=true`：仅校方超管（`school.kb.retrieval_test.unfiltered`）可用，用于排查"配置后为何查不到"，调用强制写审计。
+
+返回 dense/sparse/RRF/rerank 分数、chunk_id、引用预览，以及每个候选块命中的 ACL token；用于解释召回原因。
+
+**块编辑（K5）**：`POST /school/kb/chunks/{chunk_id}/edits` 提交 `{new_content, reason, base_hash}`；冲突返回 `409 CHUNK_CONFLICT`。`POST /school/kb/document-versions/{id}/derive` 在校方超管确认后生成派生版本，构建只重嵌改动块（未改块复用 `kb_embedding_cache`）；发布沿用 KB-05 的 alias 切流，旧会话仍固定源版本。
 
 ### 5.8 C 端 Chat SSE
+
+**文档人群过滤（K4，M4 落地）**：每轮检索前由服务端把登录身份解析为人群 token 集合（B 端：部门/角色/任课·班主任班级/课程/自身；C 端学生：班级/年级/自身），作为 Qdrant 过滤条件（至少命中一个 token）；请求体中的任何人群/租户字段一律忽略。解析失败或结果为空按空集处理（fail-closed）→ 不召回、不引用、逐项兜底话术，不提示"存在但无权"。未经授权时回答、引用、错误信息均不得出现该文档的标题/章节。
 
 `POST /campus/chat/turns`（`Accept: text/event-stream`）：
 
@@ -676,7 +702,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 2. 中间件设置 `TenantContext`；请求级 contextvar。
 3. 仓储层基类强制 `tenant_id` 过滤；禁止裸 SQL 跨租。
 4. PostgreSQL RLS：`SET LOCAL app.tenant_id`；策略 `tenant_id = current_setting('app.tenant_id')::uuid`；平台角色例外需显式 grant。
-5. Qdrant：每租户独立 collection + payload 校验。
+5. Qdrant：每租户独立 collection + payload 校验 + 文档人群 token 过滤（`min_should: 1`，无 token 的版本禁止发布，fail-closed）。
 6. MinIO：`tenant/{tenant_id}/...` 前缀；签名 URL 短时有效。
 7. 缓存：`tenant:{tenant_id}:...` 前缀。
 8. 审计/日志：记录 tenant_id；跨租访问安全事件。

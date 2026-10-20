@@ -72,6 +72,7 @@
 | `school.dashboard.view` | 基础看板 |
 | `school.feedback.view` | 反馈查看 |
 | `school.feedback.update` | 标记处理/答复 |
+| `school.org.manage` | 部门树维护（A30） |
 | `school.personnel.view` | 人员查看 |
 | `school.personnel.create/edit/delete` | 人员维护 |
 | `school.personnel.import` | 批量导入 |
@@ -86,6 +87,10 @@
 | `school.kb.publish` | 发布/回滚/下线 |
 | `school.kb.delete` | 删除 |
 | `school.kb.view_chunks` | 分块预览/检索测试 |
+| `school.kb.acl.manage` | 文档查阅人群配置与确认（K4） |
+| `school.kb.chunk.edit` | 提交块编辑（K5） |
+| `school.kb.chunk.confirm` | 确认块编辑并派生版本（K5，仅超管） |
+| `school.kb.retrieval_test.unfiltered` | 沙箱"忽略 ACL"对比视图（K4，仅超管，强制审计） |
 | `school.approval.todo` | 待办/审批 |
 | `school.approval.leave` | 请假审批 |
 | `school.approval.account_termination` | 删除/撤权审批 |
@@ -134,6 +139,7 @@
 | 反馈查看/答复 | — | — | — | √ | △ | — | — | — |
 | 人员查看 | — | — | — | √ | √ | △ | — | — |
 | 人员增删改/导入 | — | — | — | √ | △ | — | — | — |
+| 部门树维护 | — | — | — | √ | △ | — | — | — |
 | 敏感字段完整查看 | — | — | — | √ | △ | — | — | — |
 | 权限账号/角色 | — | — | — | √ | △ | — | — | — |
 | KB 查看/构建进度 | — | — | — | √ | √ | △ | — | — |
@@ -142,6 +148,10 @@
 | KB 构建/测试 | — | — | — | √ | △ | △ | — | — |
 | KB 发布/回滚/下线 | — | — | — | √ | △ | — | — | — |
 | KB 分块预览/检索测试 | — | — | — | √ | △ | △ | — | — |
+| KB 人群 ACL 配置/确认 | — | — | — | √ | △ | — | — | — |
+| KB 块编辑提交 | — | — | — | √ | △ | — | — | — |
+| KB 块编辑确认/派生 | — | — | — | √ | — | — | — | — |
+| KB 沙箱忽略 ACL | — | — | — | √ | — | — | — | — |
 | 审批待办/请假/删除 | — | — | — | √ | △ | △ | — | — |
 | 校方消息 | — | — | — | √ | √ | △ | — | — |
 | 校方审计 | — | — | — | √ | △ | — | — | — |
@@ -176,4 +186,5 @@
 - 平台运营是否可以修改模型密钥，还是仅超管？
 - 审计导出是否仅平台审计/超管？
 - 是否需要“校方审计员”只读角色？
-- 数据范围是否支持“年级/院系”层级（当前只有全校/班级/课程/个人）。
+- 数据范围是否支持"年级/院系"层级（当前只有全校/班级/课程/个人）。
+- （已确认 2026-10-21）部门/科室组织单元与文档人群 ACL 模型见 `docs/spec-changes/SC-01-kb-acl-chunk-edit.md`：部门作为**人群选择器**数据源，不进入 `data_scopes`。

@@ -69,7 +69,8 @@ JWT (tenant_id, realm)
 ### 2.4 Qdrant
 
 - 每租户+每版本独立 collection：`tenant_{tenant_hash}_kb_v{version_id}`；alias `tenant_{tenant_hash}_kb_active`。
-- payload 必含 `tenant_id_hash`、`version_id`、`document_id`、`chunk_id`；查询强制过滤。
+- payload 必含 `tenant_id_hash`、`version_id`、`document_id`、`chunk_id`、`audiences`（文档人群 token，K4）、`is_human_edited`；查询强制过滤。
+- 文档人群过滤：查询条件要求至少命中一个 `audiences` token（`min_should: 1`）；无 token 的版本禁止发布（fail-closed）。人群集合由服务端按登录身份解析，前端字段一律忽略。
 - 不使用跨租共享 collection；若未来合并，必须引入强制 payload 过滤 + 测试。
 - collection 创建/删除/alias 切换全部审计；旧 collection 按会话结束/7 天清理。
 
@@ -124,6 +125,7 @@ JWT (tenant_id, realm)
 - [ ] MinIO 前缀含 tenant_id。
 - [ ] Qdrant collection 按租户/版本。
 - [ ] 签名 URL/查询强制租户过滤。
+- [ ] 携带文档人群的向量：payload 含 `audiences`，检索按身份 token 过滤（`min_should: 1`），无人群版本禁止发布。
 - [ ] 清理策略。
 
 新增消息/通知：
@@ -144,6 +146,8 @@ JWT (tenant_id, realm)
 | 缓存跨租 | 不可命中 |
 | MinIO 跨租 | 签名 URL/前缀拒绝 |
 | Qdrant 跨租 | collection/payload 过滤拒绝 |
+| 文档人群（跨人群） | 非授权部门/班级/学生不召回、不引用、回答无文档名泄漏 |
+| 文档人群（fail-closed） | 版本无 ACL 时构建/发布 409；人群解析为空时召回集为空 |
 | 平台跨租 | 默认拒绝；授权+审计后只读 |
 | 消息通道 | 平台/租户隔离，禁止租户间 |
 | KB 检索 | 跨租文档/分块不可召回 |

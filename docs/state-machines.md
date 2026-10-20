@@ -76,15 +76,40 @@ PUBLISHED → NEW_VERSION → PENDING_APPROVAL
 | TEST_PASSED | 发布 | PUBLISHED | alias 切换；新会话用新版本 |
 | PUBLISHED | 下线 | OFFLINE | 新会话不可用；旧会话保留 |
 | PUBLISHED | 删除 | DELETED | 软删；旧会话保留至结束/7 天 |
-| PUBLISHED | 内容修改 | NEW_VERSION | 新版本 PENDING_APPROVAL；旧版本在线 |
+| PUBLISHED | 原文/结构修改（重传、重切块、增删块） | NEW_VERSION | 新版本 PENDING_APPROVAL；旧版本在线 |
+| PUBLISHED | 块级文本校正（KB-10） | DERIVED | 派生版本（`derivation_type=chunk_edit`）→ 超管确认 → 派生构建；旧版本在线 |
+| APPROVED/READY/TEST_PASSED | 块级文本校正 | DERIVED | 同上；派生版本沿用源版本已确认 ACL |
+| READY/APPROVED | ACL 未确认（`acl_confirmed=false`） | 拒绝 | 构建/发布返回 409 `ACL_UNCONFIRMED`（K4，fail-closed） |
+| 任意 | ACL 变更 | 同状态 | 即时生效（不受会话固定版本保护）；审计前后值 |
 | PUBLISHED | 仅标签/描述修改 | PUBLISHED | 免审；审计前后值 |
 
 **不变量**
-- 未 APPROVED 不得创建构建任务。
-- TEST_PASSED 才能发布。
+- 未 APPROVED 不得创建构建任务；派生版本（K5）以"超管确认"替代平台审批，但同样不得原地修改源版本。
+- TEST_PASSED 才能发布；派生版本与初始版本走同一发布/回滚路径。
 - 同一文档版本最多一个活跃构建任务。
 - 发布/回滚只切 alias，不修改分块内容。
-- 内容修改必须新版本；不可原地修改已发布版本。
+- 原文/结构修改必须新版本；块级文本校正必须走派生版本（不可原地改已发布版本的块）。
+- 块编辑不得增删块、改变父子结构与父块归属；`base_hash` 冲突即 409。
+- 版本必须有已确认的 ACL 才能构建/发布（K4 fail-closed）。
+
+### 3.1 块编辑与派生版本（K5）
+
+```text
+源版本（APPROVED / READY / TEST_PASSED / PUBLISHED）
+  → 编辑子块（kb_chunk_edits: draft/submitted，base_hash 乐观锁）
+  → 生成派生版本（derivation_type=chunk_edit, parent_version_id=源版本）
+  → 超管确认（school.kb.chunk.confirm + 审计）
+  → 派生构建（COPY → EMBED(仅改动块) → INDEX → VALIDATE → READY）
+  → TESTING → TEST_PASSED → 发布（alias 切流）
+```
+
+| 当前 | 事件 | 目标 | 守卫/副作用 |
+|---|---|---|---|
+| 源版本在线 | 提交块编辑 | 编辑草稿 | 仅子块文本；理由必填；`base_hash` 匹配 |
+| 编辑草稿 | 确认并派生 | 派生版本 | 校方超管权限；审计 `kb.version.derived`；复制全部块 |
+| 派生版本 | 创建构建 | BUILDING | 跳过解析/切块；仅改动块重嵌（未改块复用向量缓存） |
+| 派生版本 | 构建失败 | FAILED | 可重试；源版本与线上 alias 不受影响 |
+| 派生版本发布 | alias 切流 | PUBLISHED | 新会话用派生版本；旧会话仍固定源版本 |
 
 ---
 
