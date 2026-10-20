@@ -76,12 +76,14 @@
 
 ## 7. Git 规范
 
-- 模式 A：`main` + `feature/*` + `hotfix/*`；无 PR；`main` 不直接 push。
+- 模式 A：`main` + `feature/*` + `hotfix/*`；无 PR；**不在 `main` 上直接改代码提交**（`main` 只接受来自功能分支的快进合并）。
 - 分支命名：`<类型>/<任务号>-<简短描述>`，无任务号用日期。
 - Conventional Commits：`feat/fix/docs/style/refactor/perf/test/build/ci/chore/revert`。
 - 提交前必须：`git status`、`git diff --staged`；检查密钥/产物/临时调试代码/大文件。
 - 禁止 `git add .` / `git add -A`；禁止 force push、直接 push 共享分支、`reset --hard`、`clean -fd`、修改 hooks/GPG。
 - 误提交密钥：立即停止 push，`git rm --cached`，并告知密钥已泄露、必须轮换。
+- **远端与推送**：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 通道可用）。每个功能点「测试通过 + 独立审查通过 + 提交」后必须推送，流程：功能分支提交 → `git branch -f main <feature-branch>`（等价的快进合并）→ `git push origin main`；**CI 未绿不得视为功能点完成**。
+- **CI 查询**：`gh run list` / `gh run view <id> --log-failed`（新机器需 `winget install --id GitHub.cli` + `gh auth login`）；4 条工作流按目录路径过滤触发，security 另在推送 main 与每周一 03:00 运行。
 
 ## 8. 环境与运行
 

@@ -85,13 +85,14 @@
 | TD-054 | M0-E | MinerU 生产分发形态：镜像推私有 registry + 模型离线预置 | 已采纳 | M6 | 生产不从公网重建镜像：push 到私有 registry 并预置模型（modelscope 可达）到卷/镜像，避免上线时拉 PyPI/HF |
 | TD-055 | M0-E | 自建镜像 vs 官方 vLLM 路径的解析质量对照未做 | 已采纳 | M3 | 同软件同模型，但 VLM 走 CPU llama-cpp + GGUF(Q8_0) 与官方 GPU vLLM 全精度不同；M3 用真实校园文档（表格/公式/扫描/多栏）做质量对照与回归，必要时升精度或换后端；已有夹具 `backend/tests/fixtures/mineru_table_cn.pdf` |
 | TD-056 | M0-F | CPU 重排延迟无法进入快路径预算（8 候选 p50≈11.7s vs 首 token P95≤3s） | 已采纳 | M3/M4 | 实测见 `docs/benchmarks-m0.md`；需在 M3/M4 从「减少候选 / 提高 CPU 配额 / 换更快模型 / GPU TEI / 仅 ReAct 路径重排」中决策并用评估与压测验证 |
-| TD-057 | M0-F | CI 工作流尚无远端仓库，未真实执行 | 已采纳 | M1 | 本地 `scripts/ci.sh` 已等价跑通；仓库推送 GitHub 后自动生效并回填首次执行证据 |
+| TD-057 | M0-F | CI 工作流尚无远端仓库，未真实执行 | 已完成 | M0-F | 远端 `huluqiwa/campus-elf` 已生效：首次运行修复 4 处配置问题（GITHUB_ENV 引号、evals 脚本路径、pnpm allowBuilds、gitleaks 首推区间）后 4 条工作流全绿 |
 | TD-058 | M0-F | 本地 npm 镜像不支持 audit endpoint | 已完成 | M0-F | `scripts/ci.sh` 检测后自动切 registry.npmjs.org；CI 默认官方源 |
 | TD-059 | M0-F | 空壳 Loop 无认证/无真实 LLM，仅骨架 | 已采纳 | M4 | 由 M4 真实 Loop 替换并移除 `DEV_SKELETON_LOOP_ENABLED`；生产默认关闭（404） |
 | TD-060 | M0-F | `ragas`/`diskcache` 存在无修复版本的上游漏洞（PYSEC-2026-3046/2447） | 已延后 | 监控 | 两者均为上游最新版（ragas 0.4.3、diskcache 5.6.3）；evals 为隔离的本地评估项目、不进生产镜像；CI pip-audit 已显式 ignore 并在上游发版后移除 |
 | TD-061 | M0-F | production 未强制关闭 `/docs`（OpenAPI 文档） | 已采纳 | M6 | 生产部署检查项加入 `DOCS_ENABLED=false`；当前仅可关闭，未做强制校验 |
 | TD-062 | M0-F | `/health/ready` 每次探活新建连接（无池化） | 已采纳 | M1 | 接 SQLAlchemy/Redis 连接池后改为复用，避免高频探针连接 churn |
 | TD-063 | M0-F | 空壳 Loop 忽略 `Accept: text/event-stream`；api-client 超时不可注入 | 已采纳 | M4 | 真实 Loop 落地时按契约返回 406 或文档化；e2e 悬挂用例改用可注入超时，去掉时序依赖 |
+| TD-064 | M0-F | e2e job 每次安装 Chrome 约 4.5 分钟（占单次 CI 大部分额度） | 已采纳 | M1 | 可缓存 Playwright/Chrome 或改用内置 chromium（与「与本地一致的 Chrome 通道」取舍）；亦可 e2e 仅在 main/手动触发时跑 |
 
 ---
 
@@ -104,7 +105,7 @@
 | M0-C | TD-015~028 | TD-027/028 | TD-016/018/025/026 | TD-015/017/019~024 | TD-021 | 通过 |
 | M0-D | TD-029~038 | TD-037/038 | TD-029~031/033~036 | TD-032 | 无 | 通过 |
 | M0-E | TD-041~053 | TD-012/042/046 | TD-045/047/048/051 | TD-041/049/052/053 | TD-050 | 通过（两轮审查，Blocker/Major 全部修复） |
-| M0-F | TD-002/005/010/029~031/033~035/047/052 + TD-056~063 | TD-002/005/010/029~035/047/052/058 | TD-051/054~057/059 | TD-041/049/053/060 | TD-050 | 通过（M0 收口，见 docs/m0-acceptance.md） |
+| M0-F | TD-002/005/010/029~031/033~035/047/052 + TD-056~064 | TD-002/005/010/029~035/047/052/057/058 | TD-051/054~056/059/061~064 | TD-041/049/053/060 | TD-050 | 通过（M0 收口，见 docs/m0-acceptance.md） |
 
 > M0-E 开始前先处理 `已采纳/目标 M0-E` 的条目：TD-012（MinerU）——已完成（自定义镜像 + 三档实测）。
 > M0-F 已完成（TD-002/005/010/029~031/033~035/047/052 全部收口）。M1 开始前处理：TD-016/018/025/026/036/051/057。

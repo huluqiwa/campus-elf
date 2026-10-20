@@ -36,6 +36,7 @@
 | 前端质量门禁 | `pnpm lint` / `format:check` / `typecheck` / `test:unit` / `build` / `audit` | 通过（Vitest 5 passed；Prettier 全绿；audit：No known vulnerabilities found） |
 | E2E | `pnpm test:e2e` | 5 passed（admin 渲染、campus 渲染、health mock 200/503/超时失败态） |
 | 一键本地 CI | `bash scripts/ci.sh` | 见 §4 执行记录 |
+| **远端 CI（GitHub Actions）** | `gh run list` | **4 条工作流全绿**（2026-10-20 首次运行修复 4 处配置问题后）：backend 46s、evals 22s、security 40s、frontend（含 e2e）4m45s；路径过滤已生效 |
 
 ## 3. 关键工程结论（供 M1+ 使用）
 

@@ -174,6 +174,18 @@
 - 更好做法与 TD 处置：TD-002/005/010/029~035/047/052/058 已完成；新增 TD-056（CPU 重排延迟，M3/M4）、TD-057（CI 待远端生效，M1）、TD-059（空壳 Loop 认证，M4）、TD-060（ragas/diskcache 无修复版本，监控）、TD-061（生产未强制关 /docs，M6）、TD-062（ready 探活连接池化，M1）、TD-063（Accept 校验与可注入超时，M4）。
 - 结论：两轮审查的 Blocker/Major 全部修复并复测通过，可提交；M0 验收见 `docs/m0-acceptance.md`。
 
+### M0-F 收尾：远端 CI 首次运行修复（2026-10-20）
+
+- 背景：仓库推送 `huluqiwa/campus-elf`（SSH）后，4 条工作流首次运行**全部失败**（16–53 秒，属"起步即错"而非测试失败）。用 `gh run view <id> --log-failed` 取回真实报错。
+- 发现与修复：
+  1. **backend**：`GITHUB_ENV` 不会剥离引号，`test-stack.sh env` 输出的 `export K="值"` 被原样写入环境变量，导致 `TEST_REDIS_URL` 的字面量带 `"`，被一次性 DB 护栏（DB>=10）判非法。→ 新增 `env-plain` 子命令（无 export/无引号）供 CI 使用，`env` 保留给本地 `eval`。
+  2. **evals**：用例集校验脚本路径多一层（`../../scripts` → `../scripts`），python 退出码 2。
+  3. **frontend**：pnpm 11.28 改为 `allowBuilds` 映射，`onlyBuiltDependencies` 不再生效，CI 下 `ERR_PNPM_IGNORED_BUILDS: esbuild@0.28.2` 直接失败。→ 用官方 `pnpm approve-builds --all` 生成正确配置；本地以 `CI=true pnpm install --frozen-lockfile` 干净安装复现并验证。
+  4. **security**：gitleaks-action 在仓库首次推送时对根提交执行 `<sha>^..<sha>`，报 `unknown revision` 误失败。→ 改为固定版本二进制（8.24.3）全历史扫描（同时移除一个第三方 action 依赖）；本地 Docker 实跑发现 2 处历史提交中的测试假值 `test-secret-key-123456`，已在白名单按精确字符串放行。
+- 顺带优化：4 条工作流加**路径过滤**（只改前端就只跑前端），security 改为「推送 main + 每周一 03:00 + 手动」，把私有仓库 Actions 额度按需消耗。
+- 复测证据（2026-10-20）：backend 46s ✅、evals 22s ✅、security 40s ✅、frontend（frontend+e2e）4m45s ✅；`gitleaks` 本地全历史扫描 14 提交/1.23MB「no leaks found」；后端 86 passed（env-plain 导出方式下）。
+- TD 处置：TD-057（CI 待远端生效）→ 已完成；新增 TD-064（e2e 安装 Chrome 约 4.5 分钟，可缓存/限触发，M1）。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |
