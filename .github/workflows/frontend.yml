@@ -1,11 +1,18 @@
 name: frontend
 
-# 前端质量门禁：ESLint / vue-tsc / Vitest / 构建 / Playwright / 依赖审计。
+# 前端质量门禁：ESLint / Prettier / vue-tsc / Vitest / 构建 / Playwright / 依赖审计。
+# 触发范围（省 Actions 额度）：只改前端或本工作流时运行（e2e 另见 paths 说明）。
 
 on:
   push:
     branches: [main, "feature/**"]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
   pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
   workflow_dispatch:
 
 jobs:
@@ -82,7 +89,7 @@ jobs:
       - name: 构建并运行 E2E
         run: pnpm test:e2e
 
-      - name: 上传失败产物
+      - name: 上传失败产物（截图/trace 落在 test-results/）
         if: failure()
         uses: actions/upload-artifact@v4
         with:

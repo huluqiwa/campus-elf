@@ -1,12 +1,20 @@
 name: evals
 
-# 评估作业（独立 uv 项目）：依赖导入断言 + 静态检查。
+# 评估作业（独立 uv 项目）：依赖导入断言 + 静态检查 + 用例集完整性。
 # 真实评估跑批（Ragas + 真实 LLM）不进入快速门禁，见 evals/README.md §5。
 
 on:
   push:
     branches: [main, "feature/**"]
+    paths:
+      - "evals/**"
+      - "scripts/check_eval_cases.py"
+      - ".github/workflows/evals.yml"
   pull_request:
+    paths:
+      - "evals/**"
+      - "scripts/check_eval_cases.py"
+      - ".github/workflows/evals.yml"
   workflow_dispatch:
 
 jobs:
@@ -36,5 +44,6 @@ jobs:
       - name: 测试
         run: uv run pytest
 
-      - name: 用例集完整性（每类 ≥20 条、对抗 ≥3 条）
-        run: uv run python ../../scripts/check_eval_cases.py
+      - name: 用例集完整性（每类 ≥20 条；PI/CT 全量对抗）
+        # 脚本在仓库根的 scripts/ 下；从 evals/ 出发是上一级目录。
+        run: uv run python ../scripts/check_eval_cases.py

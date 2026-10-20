@@ -92,6 +92,24 @@ export TEST_MINIO_ENDPOINT="http://127.0.0.1:59000"
 EOF
 }
 
+print_env_plain() {
+  # 供 CI 写入 $GITHUB_ENV：不加 export、不加引号（GITHUB_ENV 不会剥引号，
+  # 带引号会让值本身带上 `"`，集成用例的一次性 DB 护栏会把 `"redis://...:15"` 判为非法）。
+  local pg_pw redis_pw pg_user pg_db
+  pg_pw="$(read_env_value TEST_POSTGRES_PASSWORD)"
+  redis_pw="$(read_env_value TEST_REDIS_PASSWORD)"
+  pg_user="$(read_env_value TEST_POSTGRES_USER)"
+  pg_db="$(read_env_value TEST_POSTGRES_DB)"
+  pg_user="${pg_user:-campus_elf_test}"
+  pg_db="${pg_db:-campus_elf_test}"
+  cat <<EOF
+TEST_DATABASE_URL=postgresql+asyncpg://${pg_user}:${pg_pw}@127.0.0.1:55432/${pg_db}
+TEST_REDIS_URL=redis://:${redis_pw}@127.0.0.1:56379/15
+TEST_QDRANT_URL=http://127.0.0.1:56333
+TEST_MINIO_ENDPOINT=http://127.0.0.1:59000
+EOF
+}
+
 case "${1:-up}" in
   up)
     ensure_env_file
@@ -126,8 +144,13 @@ case "${1:-up}" in
     ensure_env_file
     print_env
     ;;
+  env-plain)
+    # CI 用：`bash scripts/test-stack.sh env-plain >> "$GITHUB_ENV"`
+    ensure_env_file
+    print_env_plain
+    ;;
   *)
-    echo "用法: $0 {up|up-all|down|status|env}" >&2
+    echo "用法: $0 {up|up-all|down|status|env|env-plain}" >&2
     exit 2
     ;;
 esac

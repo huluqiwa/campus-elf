@@ -119,7 +119,8 @@ fi
 # ---------- 安全 ----------
 if [[ "${WITH_SECURITY}" -eq 1 ]]; then
   if has_cmd gitleaks; then
-    step "security: gitleaks" gitleaks detect --config .gitleaks.toml --no-banner
+    # 与 CI 一致：全历史 + 合并提交跳过 + 命中即失败（exit-code=2）。
+    step "security: gitleaks" gitleaks detect --config .gitleaks.toml --redact -v --no-banner --exit-code=2 --log-opts=--no-merges
   else
     skip "security: gitleaks" "本机未安装 gitleaks（CI 由 gitleaks-action 执行）"
   fi

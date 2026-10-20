@@ -3,11 +3,24 @@ name: backend
 # 后端质量门禁：ruff / mypy / pytest（含真实 Redis 集成与业务场景）。
 # 集成与业务场景使用仓库自带的独立测试栈定义（deploy/docker-compose.test.yml），
 # 与本地 `scripts/test-stack.sh up` 完全一致；测试栈凭据由脚本在运行时随机生成（一次性容器，非真实凭证）。
+#
+# 触发范围（省 Actions 额度）：只改后端/测试栈/本工作流时运行。
 
 on:
   push:
     branches: [main, "feature/**"]
+    paths:
+      - "backend/**"
+      - "scripts/test-stack.sh"
+      - "deploy/docker-compose.test.yml"
+      - "deploy/.env.test.example"
+      - ".github/workflows/backend.yml"
   pull_request:
+    paths:
+      - "backend/**"
+      - "scripts/test-stack.sh"
+      - "deploy/docker-compose.test.yml"
+      - ".github/workflows/backend.yml"
   workflow_dispatch:
 
 jobs:
@@ -25,13 +38,13 @@ jobs:
 
       - name: 启动独立测试栈（PostgreSQL/Redis/Qdrant）
         working-directory: .
-        # 静默 up：避免把随机生成的一次性测试凭据写进 CI 日志（日志中只保留连接串导出）。
+        # 静默 up：避免把随机生成的一次性测试凭据写进 CI 日志。
         run: bash scripts/test-stack.sh up >/dev/null
 
       - name: 导出测试栈连接串
         working-directory: .
-        # test-stack.sh 输出 `export K=V` 形式的行；GITHUB_ENV 需要 `K=V`。
-        run: bash scripts/test-stack.sh env | sed -E 's/^export //' >> "$GITHUB_ENV"
+        # env-plain 输出不带 export、不带引号：GITHUB_ENV 不剥引号，带引号会让值本身含 `"`。
+        run: bash scripts/test-stack.sh env-plain >> "$GITHUB_ENV"
 
       - name: 安装 uv
         uses: astral-sh/setup-uv@v5
