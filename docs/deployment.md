@@ -165,6 +165,10 @@ location /api/v1/school/kb/build-jobs/ {
 - **运行时必须是超级用以外的角色**：超级用户连 `FORCE ROW LEVEL SECURITY` 也会绕过，RLS 形同虚设；
   部署脚本按约定命名创建登录角色（`campus_elf_tenant_login` / `campus_elf_platform_login`，口令由密钥管理注入），
   迁移会自动把它们加入对应组角色。测试栈（`scripts/test-stack.sh up`）已自动化同样流程并导出 `TEST_APP_DATABASE_URL` / `TEST_PLATFORM_DATABASE_URL`。
+- **迁移/运维脚本访问租户表的语义（重要）**：策略已按角色限定（`TO campus_elf_tenant|platform`），因此在
+  `FORCE RLS` 下，**非超级用户且非这两组成员**的连接（例如普通的"库属主"DDL 角色）**匹配不到任何策略**：
+  查询会静默返回 0 行、写入直接报 RLS 错误。因此 `MIGRATION_DATABASE_URL` 必须使用超级用户或
+  具备 `BYPASSRLS` 的运维角色；临时数据修复脚本应显式 `SET ROLE campus_elf_platform`（或临时 `ALTER TABLE … NO FORCE`，事后恢复）。
 - 角色与授权**不随迁移回滚**（集群级对象）；需要清理时手工 `DROP ROLE`（见 `scripts/test-stack.sh::cleanup_legacy_roles` 的做法）。
 
 ## 7. Langfuse 独立主机

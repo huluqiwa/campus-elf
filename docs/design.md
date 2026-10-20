@@ -260,7 +260,7 @@ LLM-05-CampusCompanionElf/
 | `deletion_proofs` | id, tenant_id, request_id, scope_hash, backup_expiry_at, generated_at, evidence_object_key | 删除证明 |
 | `audit_logs` | sequence (PK, 递增), event_id, tenant_id (可空=平台事件), actor_realm, actor_id, action, resource_type, resource_id, result, ip, user_agent, request_id, before_json_redacted, after_json_redacted, prev_hash (可空), hash (可空), hash_version (0=未入链), anchor_ref, created_at | 仅追加哈希链（M1-A 只建表与触发器，链值 M1-F 计算） |
 | `login_attempts` | id, tenant_id, login_id, ip, success, failure_reason, created_at | 锁定 |
-| `refresh_tokens` | id, user_id, token_hash, family_id, expires_at, revoked_at, replaced_by | 轮换 |
+| `refresh_tokens` | id (PK), jti (唯一), user_id, tenant_id, token_hash, family_id, issued_at, expires_at, rotated_to_jti, revoked_at, revoked_reason, ua_hash, ip_hash | 轮换与撤销的唯一事实来源 |
 | `idempotency_keys` | key, tenant_id, user_id, endpoint, request_hash, response_json, status, created_at, expires_at | 幂等 |
 | `content_safety_events` | id, tenant_id, trace_id, direction, rule, action, excerpt_redacted, created_at | 内容安全 |
 
@@ -308,7 +308,8 @@ audit_logs: 仅追加，prev_hash/hash 链
 - **仓储强制**：租户数据只能经 `TenantScopedRepository` 访问（查询强制 `tenant_id`，写入校验行自身一致性；
   父子同租由复合外键保证），与 RLS 构成双保险；
   `tests/integration/test_rls_policy_coverage.py` 作为「新表必须带 tenant_id + 策略 + 策略引用上下文变量」的门禁。
-- **关联表**：`role_permissions`、`user_roles` 也带 `tenant_id NOT NULL`（便于 RLS 统一生效，写入时由仓储校验与父行一致）。
+- **关联表**：`role_permissions`、`user_roles` 也带 `tenant_id NOT NULL`（便于 RLS 统一生效）；
+  父子同租由复合外键 `(子列, tenant_id) → (父表.id, 父表.tenant_id)` 保证（仓储只校验行自身 `tenant_id`）。
 - **新增表（M1-A）**：`refresh_tokens`（jti/family_id/token_hash/rotated_to_jti/revoked_*：令牌家族与轮换链的唯一事实来源，
   Redis 仅做加速标记）、`platform_role_permissions`（平台角色权限映射）、`audit_logs.anchor_ref`/`hash_version`（为 M6 外部锚点预留）。
 - **审计仅追加**：`audit_logs` 由触发器禁止 UPDATE/DELETE/TRUNCATE（对属主与超级用户同样生效），

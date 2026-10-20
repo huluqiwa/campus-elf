@@ -131,7 +131,7 @@
 | RLS 生效验证 | 30 条集成测试：无上下文 fail-closed、跨租读写被拒、连接池复用/并发不串租户、平台上下文不绕过业务表、审计表权限与策略 | `tests/integration/test_rls_*.py`、`test_audit_append_only.py` |
 | 门禁 | 覆盖度守卫：任何带 tenant_id 的表必须 NOT NULL + FORCE RLS + 有策略；平台表不得带 tenant_id | 同上 |
 | 关键发现 | ① **超级用户绕过 RLS**：运行时必须用非超级用户 → 迁移创建 `campus_elf_tenant`/`campus_elf_platform` 两个组角色（平台/租户分离，平台连接无业务表权限），测试栈创建登录角色并导出 `TEST_APP_DATABASE_URL`/`TEST_PLATFORM_DATABASE_URL`；② `fileConfig` 默认禁用既有 logger，会连带关掉 uvicorn 日志（已在 env.py 修正）；③ Windows GBK 读不了含中文的 alembic.ini（已改 ASCII + 显式 utf-8） | 测试与迁移实测 |
-| 测试 | 后端全量 **131 passed**（M1-A 新增 45 条：仓储 7、上下文 4、中间件 3、RLS 隔离 14、覆盖度 4、审计仅追加 5、生产 db_session 7（含缺 PLATFORM_DATABASE_URL 用例）） | `uv run pytest` |
+| 测试 | 后端全量 **130 passed / 0 skipped**（M1-A 新增 44 条：仓储 7、上下文 4、中间件 3、RLS 隔离 14、覆盖度 4、审计仅追加 5、生产 db_session 7） | `REQUIRE_TEST_SERVICES=1 uv run pytest` |
 
 
 ### 审查修复补充（M1-A 第一轮审查后）
