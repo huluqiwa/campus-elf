@@ -158,6 +158,15 @@ location /api/v1/school/kb/build-jobs/ {
 - **Qdrant healthcheck**：镜像不含 curl/wget，使用容器自带 bash `/dev/tcp` 做 TCP 探活。
 - **ClamAV**：首次启动更新病毒库并加载，需约 1.5GB 内存；健康检查通过前不得上传文件。
 
+## 6.6 数据库连接与角色（M1-A）
+
+- **三连接分离**（`docs/design.md` §4.6）：`DATABASE_URL`（租户侧应用，属 `campus_elf_tenant`）、
+  `PLATFORM_DATABASE_URL`（平台侧应用，属 `campus_elf_platform`）、`MIGRATION_DATABASE_URL`（DDL/迁移，库属主）。
+- **运行时必须是超级用以外的角色**：超级用户连 `FORCE ROW LEVEL SECURITY` 也会绕过，RLS 形同虚设；
+  部署脚本按约定命名创建登录角色（`campus_elf_tenant_login` / `campus_elf_platform_login`，口令由密钥管理注入），
+  迁移会自动把它们加入对应组角色。测试栈（`scripts/test-stack.sh up`）已自动化同样流程并导出 `TEST_APP_DATABASE_URL` / `TEST_PLATFORM_DATABASE_URL`。
+- 角色与授权**不随迁移回滚**（集群级对象）；需要清理时手工 `DROP ROLE`（见 `scripts/test-stack.sh::cleanup_legacy_roles` 的做法）。
+
 ## 7. Langfuse 独立主机
 
 - **归属**：由 SaaS 运营方自托管在**独立观测主机**上（不与应用主机共用），平台/运维专属访问；**校方不部署、不直接访问**。不使用 Langfuse Cloud（校园数据不出运营方控制的环境）。

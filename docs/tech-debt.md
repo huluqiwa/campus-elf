@@ -93,6 +93,16 @@
 | TD-062 | M0-F | `/health/ready` 每次探活新建连接（无池化） | 已采纳 | M1 | 接 SQLAlchemy/Redis 连接池后改为复用，避免高频探针连接 churn |
 | TD-063 | M0-F | 空壳 Loop 忽略 `Accept: text/event-stream`；api-client 超时不可注入 | 已采纳 | M4 | 真实 Loop 落地时按契约返回 406 或文档化；e2e 悬挂用例改用可注入超时，去掉时序依赖 |
 | TD-064 | M0-F | e2e job 每次安装 Chrome 约 4.5 分钟（占单次 CI 大部分额度） | 已采纳 | M1 | 可缓存 Playwright/Chrome 或改用内置 chromium（与「与本地一致的 Chrome 通道」取舍）；亦可 e2e 仅在 main/手动触发时跑 |
+| TD-065 | M1-A | 平台跨租访问缺专门通道 | 已取代 | — | 与 TD-072 重复，已合并到 TD-072 跟踪 |
+| TD-066 | M1-A | 开发/生产尚未提供应用登录角色与三连接分离 | 已采纳 | M1-B | 已实现：迁移创建组角色 `campus_elf_tenant`/`campus_elf_platform`，应用侧支持 `DATABASE_URL`/`PLATFORM_DATABASE_URL`/`MIGRATION_DATABASE_URL`，测试栈自动创建登录角色并导出 `TEST_APP_DATABASE_URL`/`TEST_PLATFORM_DATABASE_URL`；dev/prod 仍需部署脚本建登录角色并配置三连接 |
+| TD-067 | M1-A | refresh token 过期清理任务未实现 | 已采纳 | M1-C | 表已就绪（`refresh_tokens`）；M1-C 落地轮换后用 Arq 定时清理过期/已撤销行 |
+| TD-068 | M1-A | 审计哈希链校验脚本/只读接口未实现 | 已采纳 | M1-F | 表与仅追加约束已就绪；M1-F 实现链校验脚本 + 平台审计只读接口 |
+| TD-069 | M1-A | `updated_at` 仅 ORM 侧 `onupdate`，非 ORM 更新不刷新 | 已延后 | M2 | 需要时补数据库触发器或统一走 ORM 更新 |
+| TD-070 | M1-A | `list_all` 用 limit/offset 分页（design §5.1 约定 cursor） | 已采纳 | M2 | 稳定排序已补（created_at, id）；列表接口落地时改 cursor 分页 |
+| TD-071 | M1-A | 尚无「零 skip」CI 断言（仅覆盖缺变量场景） | 已采纳 | M1 尾 | 可在 CI 解析 pytest 的 -rs 输出，断言白名单外 skipped=0 |
+| TD-072 | M1-A | 平台跨租查询通道（二次授权+审计）未实现 | 已采纳 | M1-E | 平台连接已无业务表权限；M1-E 落地经审批的跨租查询通道并审计 |
+| TD-073 | M1-A | 非 development 环境启动自检（角色非超级用户 / RLS 已启用）未实现 | 已采纳 | M1-B | 应用首次连库时加一次性自检并 fail-fast，避免生产误用超级用户连接 |
+| TD-074 | M1-A | 认证层未断言「realm 与连接类型匹配」 | 已采纳 | M1-C | 平台 realm 只能用平台连接（`platform=True`）、租户 realm 只能用租户连接；一处误判即会拿到平台连接读到全量审计，须在 M1-C 用测试固定 |
 
 ---
 

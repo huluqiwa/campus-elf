@@ -32,7 +32,13 @@ from tests.support.fakes import FAKE_AUDIT_SECRET
 pytestmark = [pytest.mark.business, pytest.mark.integration]
 
 CHAT_ENDPOINT = "/api/v1/campus/chat/turns"
-REQUIRED_ENV = ("TEST_DATABASE_URL", "TEST_REDIS_URL", "TEST_QDRANT_URL")
+REQUIRED_ENV = (
+    "TEST_DATABASE_URL",
+    "TEST_APP_DATABASE_URL",
+    "TEST_PLATFORM_DATABASE_URL",
+    "TEST_REDIS_URL",
+    "TEST_QDRANT_URL",
+)
 
 
 @pytest.fixture
@@ -43,9 +49,11 @@ def service_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     if missing:
         pytest.skip(f"{', '.join(missing)} 未设置；先运行 scripts/test-stack.sh up 并导出 TEST_* ")
     # 与集成用例同一套一次性资源护栏：防误连业务库/开发库。
-    database_url = assert_test_database_dsn(os.environ["TEST_DATABASE_URL"])
+    assert_test_database_dsn(os.environ["TEST_DATABASE_URL"])
     redis_url = assert_disposable_redis_dsn(os.environ["TEST_REDIS_URL"])
-    monkeypatch.setenv("DATABASE_URL", database_url)
+    # 应用连接必须用非超级用户（RLS 生效），且平台/租户分离
+    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_APP_DATABASE_URL"])
+    monkeypatch.setenv("PLATFORM_DATABASE_URL", os.environ["TEST_PLATFORM_DATABASE_URL"])
     monkeypatch.setenv("REDIS_URL", redis_url)
     monkeypatch.setenv("QDRANT_URL", os.environ["TEST_QDRANT_URL"])
     monkeypatch.setenv("DEV_SKELETON_LOOP_ENABLED", "true")

@@ -61,7 +61,10 @@ if has_cmd uv; then
   step "backend: mypy" bash -c "cd backend && uv run mypy app tests"
   step "backend: 测试栈 up" bash scripts/test-stack.sh up
   eval "$(bash scripts/test-stack.sh env)"
-  export TEST_DATABASE_URL TEST_REDIS_URL TEST_QDRANT_URL
+  export TEST_DATABASE_URL TEST_APP_DATABASE_URL TEST_PLATFORM_DATABASE_URL
+  export TEST_REDIS_URL TEST_QDRANT_URL
+  # 与 CI 一致：缺少测试服务时硬失败，而不是静默 skip 安全用例
+  export REQUIRE_TEST_SERVICES=1
   # 不加 -q：addopts 已含 -q，叠加会导致汇总行被跳过（CI 日志看不到通过数）。
   step "backend: pytest（单元+集成+业务场景）" bash -c "cd backend && uv run pytest"
 else
@@ -124,7 +127,9 @@ if [[ "${WITH_SECURITY}" -eq 1 ]]; then
   else
     skip "security: gitleaks" "本机未安装 gitleaks（CI 由 gitleaks-action 执行）"
   fi
-  step "security: bandit" bash -c "cd backend && uv run --with bandit bandit -q -r app -x tests"
+  # app 全规则扫描；迁移目录（DDL 无法参数化、值均为代码内常量）只跳过 B608 这一条
+  step "security: bandit（app）" bash -c "cd backend && uv run --with bandit bandit -q -r app -x tests"
+  step "security: bandit（alembic，跳过 B608）" bash -c "cd backend && uv run --with bandit bandit -q -r alembic -s B608"
   step "security: pip-audit（backend）" bash -c "cd backend && uv run --with pip-audit pip-audit --skip-editable"
   # 忽略项见 TD-060（上游最新版且无修复；evals 不进生产）
   step "security: pip-audit（evals）" bash -c "cd evals && uv run --with pip-audit pip-audit --skip-editable --ignore-vuln PYSEC-2026-2447 --ignore-vuln PYSEC-2026-3046"

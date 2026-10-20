@@ -47,9 +47,13 @@ class Settings(BaseSettings):
     # Redis 键/队列命名空间前缀；arq 队列名形如 `<redis_prefix>:queue`。
     redis_prefix: str = "campus_elf"
 
-    # 数据库/向量库：M0 期间可选（未配置时就绪检查标记 not_configured）；
+    # 数据库：租户侧应用连接（必须是**非超级用户**，否则 RLS 被绕过）；
     # production 下必须配置，见下方校验。
     database_url: str | None = None
+    # 平台侧应用连接（独立角色，可读平台表与审计表）；平台路径必须配置它。
+    platform_database_url: str | None = None
+    # 迁移专用连接（DDL/建表/建策略）；缺省时回落到 database_url。
+    migration_database_url: str | None = None
     qdrant_url: str | None = None
 
     # 开发/测试专用：空壳 Loop SSE（无 LLM）；生产默认关闭，开启也仅用于联调。

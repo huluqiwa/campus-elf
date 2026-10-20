@@ -33,6 +33,8 @@ jobs:
     env:
       # 单元测试默认值（测试栈会覆盖）：
       REDIS_URL: redis://127.0.0.1:56379/15
+      # 硬门禁：缺少 TEST_* 时直接终止测试会话，而不是静默 skip 掉 RLS/租户隔离用例
+      REQUIRE_TEST_SERVICES: "1"
     steps:
       - uses: actions/checkout@v4
 

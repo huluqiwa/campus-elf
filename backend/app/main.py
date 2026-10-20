@@ -12,6 +12,7 @@ from app.api.health import router as health_router
 from app.config import get_settings
 from app.core.logging import configure_logging
 from app.harness.trace import InMemoryTraceSink, TraceSink
+from app.tenant.middleware import RequestContextMiddleware
 
 
 def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
@@ -35,6 +36,9 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
         redoc_url="/redoc" if settings.docs_enabled else None,
     )
     application.state.trace_sink = trace_sink if trace_sink is not None else InMemoryTraceSink()
+
+    # 请求级：生成/校验 request_id，并在请求结束时清空身份上下文（防协程复用泄漏）
+    application.add_middleware(RequestContextMiddleware)
 
     # 健康检查固定在根路径，供 Compose/Nginx/探针使用；业务路由挂 api_prefix。
     application.include_router(health_router)

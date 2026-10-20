@@ -196,8 +196,8 @@ LLM-05-CampusCompanionElf/
 | `users` | id, tenant_id, user_type(student/teacher), login_id, password_hash, status, must_change_password, mfa_secret_enc, last_login_at, token_version | C 端/B 端共用身份；login_id=学号/工号；token_version 用于权限/状态变更时使现有会话失效 |
 | `roles` | id, tenant_id, code, name, is_system | 校方角色 |
 | `permissions` | id, code, module, action | 权限点 |
-| `role_permissions` | role_id, permission_id | 角色-权限 |
-| `user_roles` | user_id, role_id | 多角色 |
+| `role_permissions` | role_id, permission_id, tenant_id（复合外键保证与父行同租） | 角色-权限 |
+| `user_roles` | user_id, role_id, tenant_id（复合外键保证与父行同租） | 多角色 |
 | `data_scopes` | id, tenant_id, role_id/user_id, scope_type(school/class/course/self), scope_id | 数据范围 |
 | `teachers` | id, tenant_id, user_id, employee_no, name, age, gender, position, id_card_enc, id_card_hmac, id_card_mask | 身份证加密/掩码 |
 | `students` | id, tenant_id, user_id, student_no, name, class_id, gender, head_teacher_id, counselor_id, id_card_enc, id_card_hmac, id_card_mask | 档案 |
@@ -258,7 +258,7 @@ LLM-05-CampusCompanionElf/
 | `account_termination_requests` | id, tenant_id, subject_user_id, initiator_type(SELF/ADMIN), requested_by, status, approved_by, retention_start_at, retention_end_at, freeze_started_at, freeze_reason, deletion_scope_json, proof_id | 双入口 |
 | `account_termination_events` | id, request_id, event_type, actor_id, reason, created_at | 状态历史 |
 | `deletion_proofs` | id, tenant_id, request_id, scope_hash, backup_expiry_at, generated_at, evidence_object_key | 删除证明 |
-| `audit_logs` | id, tenant_id, actor_id, action, resource_type, resource_id, result, ip, user_agent, request_id, before_json_redacted, after_json_redacted, prev_hash, hash, created_at | 哈希链 |
+| `audit_logs` | sequence (PK, 递增), event_id, tenant_id (可空=平台事件), actor_realm, actor_id, action, resource_type, resource_id, result, ip, user_agent, request_id, before_json_redacted, after_json_redacted, prev_hash (可空), hash (可空), hash_version (0=未入链), anchor_ref, created_at | 仅追加哈希链（M1-A 只建表与触发器，链值 M1-F 计算） |
 | `login_attempts` | id, tenant_id, login_id, ip, success, failure_reason, created_at | 锁定 |
 | `refresh_tokens` | id, user_id, token_hash, family_id, expires_at, revoked_at, replaced_by | 轮换 |
 | `idempotency_keys` | key, tenant_id, user_id, endpoint, request_hash, response_json, status, created_at, expires_at | 幂等 |
@@ -282,6 +282,39 @@ audit_logs: 仅追加，prev_hash/hash 链
 ```
 
 ---
+
+### 4.6 租户隔离实现细则（M1-A 落地）
+
+- **连接角色（三分离）**：DDL/迁移、租户侧运行、平台侧运行各用一个连接：
+  迁移连接（`MIGRATION_DATABASE_URL`）持有表与策略；运行时用两个**非超级用户**角色
+  `campus_elf_tenant`（租户侧）与 `campus_elf_platform`（平台侧，可读平台表与审计表）。
+  超级用户连 FORCE RLS 也会绕过，因此运行时连接绝不能是超级用户；登录角色口令由部署/测试脚本注入，不入库。
+- **授权方式**：**显式逐表授权**（不使用 `ALTER DEFAULT PRIVILEGES`——它会给未来所有表授全量 DML，
+  且 `pg_default_acl` 不随 DROP TABLE 清理，迁移重放后 ACL 会漂移）；新增表在对应迁移里显式授权，
+  由 `tests/integration/test_rls_policy_coverage.py` 守住；审计表对两个应用角色都只有 `SELECT, INSERT`。
+- **RLS 策略**：租户级表统一 `ENABLE + FORCE ROW LEVEL SECURITY`；策略**按角色限定**
+  （租户策略 `TO campus_elf_tenant`、平台策略 `TO campus_elf_platform`），避免任何角色自设 GUC 提权。
+  表达式用 `pg_input_is_valid(current_setting('app.tenant_id', true), 'uuid')` + `case ... else null end`：
+  未设置 / 空串 / 非法值一概退化为 NULL → 读取 0 行、写入被 `WITH CHECK` 拒绝（fail-closed，且不报错）。
+- **上下文注入**：每个事务内 `select set_config('app.tenant_id', :tid, true)`（事务级，连接归还即失效），
+  由 `app/db/session.py::db_session()` 统一封装；平台级代码路径需显式 `platform=True`
+  （设置 `app.platform_context='on'`，仅用于平台表与审计表读取）。
+- **平台不跨租**：平台上下文**不**绕过业务表隔离（平台连接在数据库层就没有业务表权限）；
+  跨租访问必须走"二次授权 + 审计"的专门通道（M1-E，见 TD-072）。
+- **tenants 也隔离**：`tenants` 无 `tenant_id`，但按 `id = app.tenant_id` 建策略（租户只见自己那一行），
+  另有平台策略供租户审核/运营读取全部；避免"租户连接能列出所有学校"。
+- **跨租父行引用**：`user_roles`/`role_permissions`/`data_scopes`/`refresh_tokens` 使用
+  **复合外键** `(子列, tenant_id) → (父表.id, 父表.tenant_id)`，父子必须同租（防对象图嫁接）。
+- **仓储强制**：租户数据只能经 `TenantScopedRepository` 访问（查询强制 `tenant_id`，写入校验行自身一致性；
+  父子同租由复合外键保证），与 RLS 构成双保险；
+  `tests/integration/test_rls_policy_coverage.py` 作为「新表必须带 tenant_id + 策略 + 策略引用上下文变量」的门禁。
+- **关联表**：`role_permissions`、`user_roles` 也带 `tenant_id NOT NULL`（便于 RLS 统一生效，写入时由仓储校验与父行一致）。
+- **新增表（M1-A）**：`refresh_tokens`（jti/family_id/token_hash/rotated_to_jti/revoked_*：令牌家族与轮换链的唯一事实来源，
+  Redis 仅做加速标记）、`platform_role_permissions`（平台角色权限映射）、`audit_logs.anchor_ref`/`hash_version`（为 M6 外部锚点预留）。
+- **审计仅追加**：`audit_logs` 由触发器禁止 UPDATE/DELETE/TRUNCATE（对属主与超级用户同样生效），
+  两个应用角色另只授予 `SELECT, INSERT` 权限（双层）。
+- **哈希链状态**：M1-A 只建表与仅追加约束；`prev_hash/hash` 可空且 `hash_version=0` 表示"未入链"，
+  链计算与校验由 M1-F 实现（TD-068）——当前**未计算、未校验**，不得视为已生效。
 
 ## 5. API 与 SSE 契约
 

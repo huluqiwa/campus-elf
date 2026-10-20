@@ -1,5 +1,11 @@
 # 校园陪伴精灵 — 多租户隔离规范（tenant-isolation.md）
 
+> **注意（2026-10-20，M1-A）**：本文档中关于 RLS 策略写法与「平台角色绕过」的早期示例已被
+> `docs/design.md` §4.6 取代——实际实现使用 `pg_input_is_valid` + `nullif` 的 fail-closed 表达式，
+> 平台侧**不**绕过业务表隔离（改为独立 DB 角色 + 二次授权通道）；示例里
+> `current_setting('app.tenant_id')::uuid` 缺 `missing_ok`，直接照抄会报错。
+
+
 | 项 | 内容 |
 |---|---|
 | 版本 | v1.0 |

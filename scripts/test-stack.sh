@@ -31,6 +31,8 @@ ensure_env_file() {
     echo "TEST_REDIS_PASSWORD=$(openssl rand -hex 16)"
     echo "TEST_MINIO_ROOT_USER=campus_elf_test"
     echo "TEST_MINIO_ROOT_PASSWORD=$(openssl rand -hex 16)"
+    echo "TEST_APP_PASSWORD=$(openssl rand -hex 16)"
+    echo "TEST_PLATFORM_PASSWORD=$(openssl rand -hex 16)"
     echo "TEST_MINIO_IMAGE=minio:RELEASE.2025-10-15T17-29-55Z"
   } > "${ENV_FILE}"
   chmod 600 "${ENV_FILE}"
@@ -43,6 +45,69 @@ read_env_value() {
 
 compose() {
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+}
+
+ensure_app_password() {
+  if [[ -z "$(read_env_value TEST_APP_PASSWORD)" ]]; then
+    echo "TEST_APP_PASSWORD=$(openssl rand -hex 16)" >> "${ENV_FILE}"
+  fi
+  if [[ -z "$(read_env_value TEST_PLATFORM_PASSWORD)" ]]; then
+    echo "TEST_PLATFORM_PASSWORD=$(openssl rand -hex 16)" >> "${ENV_FILE}"
+  fi
+}
+
+cleanup_legacy_roles() {
+  # 清理早期版本遗留的角色（它们对审计表仍带 UPDATE/DELETE 权限，且 pg_default_acl 不随迁移回滚）。
+  # 仅测试集群执行；逐条语句容错（角色不存在/无权限都不应阻断启动）。
+  local pg_user pg_db psql_run
+  pg_user="$(read_env_value TEST_POSTGRES_USER)"
+  pg_db="$(read_env_value TEST_POSTGRES_DB)"
+  psql_run() {
+    docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T postgres       psql -U "${pg_user:-campus_elf_test}" -d "${pg_db:-campus_elf_test}" -q -c "$1" >/dev/null 2>&1 || true
+  }
+  for legacy in campus_elf_app campus_elf_test_app campus_elf_tenant_login campus_elf_platform_login; do
+    psql_run "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${legacy}"
+    psql_run "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${legacy}"
+    psql_run "REVOKE ALL ON SCHEMA public FROM ${legacy}"
+    psql_run "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM ${legacy}"
+    psql_run "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM ${legacy}"
+    psql_run "DROP ROLE IF EXISTS ${legacy}"
+  done
+}
+
+ensure_app_roles() {
+  # 应用必须用**非超级用户**连接，RLS 才真正生效（超级用户连 FORCE RLS 也绕过）。
+  # 且平台侧与租户侧分离到两个登录角色（对应迁移创建的组角色
+  # campus_elf_tenant / campus_elf_platform），口令随机、只在本机 .env.test。
+  cleanup_legacy_roles
+  ensure_app_password
+  local tenant_pw platform_pw pg_user pg_db
+  tenant_pw="$(read_env_value TEST_APP_PASSWORD)"
+  platform_pw="$(read_env_value TEST_PLATFORM_PASSWORD)"
+  pg_user="$(read_env_value TEST_POSTGRES_USER)"
+  pg_db="$(read_env_value TEST_POSTGRES_DB)"
+  docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T postgres \
+    psql -U "${pg_user:-campus_elf_test}" -d "${pg_db:-campus_elf_test}" -v ON_ERROR_STOP=1 -q \
+    -c "DO \$\$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'campus_elf_test_tenant') THEN
+            CREATE ROLE campus_elf_test_tenant LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE PASSWORD '${tenant_pw}';
+          ELSE
+            ALTER ROLE campus_elf_test_tenant PASSWORD '${tenant_pw}';
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'campus_elf_test_platform') THEN
+            CREATE ROLE campus_elf_test_platform LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE PASSWORD '${platform_pw}';
+          ELSE
+            ALTER ROLE campus_elf_test_platform PASSWORD '${platform_pw}';
+          END IF;
+        END \$\$;" \
+    -c "DO \$\$ BEGIN
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'campus_elf_tenant') THEN
+            EXECUTE 'GRANT campus_elf_tenant TO campus_elf_test_tenant';
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'campus_elf_platform') THEN
+            EXECUTE 'GRANT campus_elf_platform TO campus_elf_test_platform';
+          END IF;
+        END \$\$;" >/dev/null
 }
 
 wait_healthy() {
@@ -75,9 +140,11 @@ wait_healthy() {
 }
 
 print_env() {
-  local pg_pw redis_pw pg_user pg_db
+  local pg_pw redis_pw app_pw platform_pw pg_user pg_db
   pg_pw="$(read_env_value TEST_POSTGRES_PASSWORD)"
   redis_pw="$(read_env_value TEST_REDIS_PASSWORD)"
+  app_pw="$(read_env_value TEST_APP_PASSWORD)"
+  platform_pw="$(read_env_value TEST_PLATFORM_PASSWORD)"
   pg_user="$(read_env_value TEST_POSTGRES_USER)"
   pg_db="$(read_env_value TEST_POSTGRES_DB)"
   pg_user="${pg_user:-campus_elf_test}"
@@ -89,15 +156,20 @@ export TEST_DATABASE_URL="postgresql+asyncpg://${pg_user}:${pg_pw}@127.0.0.1:554
 export TEST_REDIS_URL="redis://:${redis_pw}@127.0.0.1:56379/15"
 export TEST_QDRANT_URL="http://127.0.0.1:56333"
 export TEST_MINIO_ENDPOINT="http://127.0.0.1:59000"
+# 非超级用户连接（RLS 只在非超级用户下生效）：租户侧与平台侧分离
+export TEST_APP_DATABASE_URL="postgresql+asyncpg://campus_elf_test_tenant:${app_pw}@127.0.0.1:55432/${pg_db}"
+export TEST_PLATFORM_DATABASE_URL="postgresql+asyncpg://campus_elf_test_platform:${platform_pw}@127.0.0.1:55432/${pg_db}"
 EOF
 }
 
 print_env_plain() {
   # 供 CI 写入 $GITHUB_ENV：不加 export、不加引号（GITHUB_ENV 不会剥引号，
   # 带引号会让值本身带上 `"`，集成用例的一次性 DB 护栏会把 `"redis://...:15"` 判为非法）。
-  local pg_pw redis_pw pg_user pg_db
+  local pg_pw redis_pw app_pw platform_pw pg_user pg_db
   pg_pw="$(read_env_value TEST_POSTGRES_PASSWORD)"
   redis_pw="$(read_env_value TEST_REDIS_PASSWORD)"
+  app_pw="$(read_env_value TEST_APP_PASSWORD)"
+  platform_pw="$(read_env_value TEST_PLATFORM_PASSWORD)"
   pg_user="$(read_env_value TEST_POSTGRES_USER)"
   pg_db="$(read_env_value TEST_POSTGRES_DB)"
   pg_user="${pg_user:-campus_elf_test}"
@@ -107,6 +179,8 @@ TEST_DATABASE_URL=postgresql+asyncpg://${pg_user}:${pg_pw}@127.0.0.1:55432/${pg_
 TEST_REDIS_URL=redis://:${redis_pw}@127.0.0.1:56379/15
 TEST_QDRANT_URL=http://127.0.0.1:56333
 TEST_MINIO_ENDPOINT=http://127.0.0.1:59000
+TEST_APP_DATABASE_URL=postgresql+asyncpg://campus_elf_test_tenant:${app_pw}@127.0.0.1:55432/${pg_db}
+TEST_PLATFORM_DATABASE_URL=postgresql+asyncpg://campus_elf_test_platform:${platform_pw}@127.0.0.1:55432/${pg_db}
 EOF
 }
 
@@ -115,6 +189,7 @@ case "${1:-up}" in
     ensure_env_file
     compose up -d
     wait_healthy 3
+    ensure_app_roles
     echo "[test-stack] 测试栈已就绪（postgres/redis/qdrant）；在 shell 中执行以下命令导出连接串："
     print_env
     ;;
@@ -130,6 +205,7 @@ case "${1:-up}" in
     fi
     compose --profile minio up -d
     wait_healthy 4
+    ensure_app_roles
     print_env
     ;;
   down)
@@ -142,11 +218,13 @@ case "${1:-up}" in
     ;;
   env)
     ensure_env_file
+    ensure_app_password
     print_env
     ;;
   env-plain)
     # CI 用：`bash scripts/test-stack.sh env-plain >> "$GITHUB_ENV"`
     ensure_env_file
+    ensure_app_password
     print_env_plain
     ;;
   *)

@@ -61,6 +61,12 @@ jobs:
         working-directory: backend
         run: uv run --with bandit bandit -q -r app -x tests
 
+      - name: bandit（迁移脚本，跳过 B608）
+        working-directory: backend
+        # 迁移里的 DDL/种子 SQL 无法参数化且值均为代码内常量；只跳过"字符串拼 SQL"这一条，
+        # 其余规则照常扫描（app/ 仍然全规则）。
+        run: uv run --with bandit bandit -q -r alembic -s B608
+
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
         with:
