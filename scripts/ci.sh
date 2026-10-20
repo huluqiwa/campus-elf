@@ -53,12 +53,29 @@ skip() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# ---------- 源码入库校验（防 .gitignore 误伤） ----------
+check_sources_tracked() {
+  # M1-A 实测：.gitignore 的 `models/` 曾把 backend/app/db/models/ 整包忽略，
+  # 导致 5 个模型文件从未入库、CI 上根本不存在（本地却"全绿"）。
+  local untracked
+  untracked="$(comm -23     <(find backend/app backend/tests evals/src -name '*.py' | sort)     <(git ls-files | grep -E '^(backend/app|backend/tests|evals/src)/.*\.py$' | sort))"
+  if [[ -n "${untracked}" ]]; then
+    echo "[ci] 以下源码文件未被 git 跟踪（疑似 .gitignore 误伤，必须先入库）：" >&2
+    echo "${untracked}" >&2
+    return 1
+  fi
+  echo "[ci] backend/app、backend/tests、evals/src 下源码均已入库"
+}
+
+step "repo: 源码入库校验" check_sources_tracked
+
 # ---------- 后端 ----------
 if has_cmd uv; then
   step "backend: lock check" bash -c "cd backend && uv lock --check"
   step "backend: sync --frozen" bash -c "cd backend && uv sync --frozen"
   step "backend: ruff" bash -c "cd backend && uv run ruff check app tests"
-  step "backend: mypy" bash -c "cd backend && uv run mypy app tests"
+  # --no-incremental：本地 mypy 缓存曾掩盖 5 处类型错误（CI 冷缓存才发现），门禁必须冷跑
+  step "backend: mypy" bash -c "cd backend && uv run mypy --no-incremental app tests"
   step "backend: 测试栈 up" bash scripts/test-stack.sh up
   eval "$(bash scripts/test-stack.sh env)"
   export TEST_DATABASE_URL TEST_APP_DATABASE_URL TEST_PLATFORM_DATABASE_URL

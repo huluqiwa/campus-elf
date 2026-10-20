@@ -65,7 +65,8 @@ async def _create_tenant_via_platform(name: str) -> UUID:
         tenant = Tenant(name=name, status="active")
         session.add(tenant)
         await session.flush()
-        return tenant.id
+        tenant_id: UUID = tenant.id
+        return tenant_id
 
 
 async def _create_user(tenant_id: UUID, login_id: str) -> UUID:
@@ -77,7 +78,8 @@ async def _create_user(tenant_id: UUID, login_id: str) -> UUID:
         )
         session.add(user)
         await session.flush()
-        return user.id
+        user_id: UUID = user.id
+        return user_id
 
 
 @pytest.mark.asyncio

@@ -90,8 +90,10 @@ mineru-data/
 clamav-data/
 langfuse-data/
 
-# 模型与权重
-models/
+# 模型与权重（只匹配模型目录，避免误伤源码包 backend/app/db/models/）
+/models/
+deploy/tei/models/
+*/models/*.gguf
 *.gguf
 *.safetensors
 *.bin
