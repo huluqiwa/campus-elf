@@ -53,11 +53,20 @@ TABLES_ALLOWED_WITHOUT_TENANT_ID = {
     "platform_user_roles",
     "permissions",
     "platform_role_permissions",
+    "tenant_registration_requests",
+    "school_review_records",
     "alembic_version",
 }
 
 # 必须启用 RLS 的表 = 带 tenant_id 的表 + tenants（按 id 隔离）
 EXTRA_RLS_TABLES = {"tenants"}
+
+# 平台级表：允许带**可空** tenant_id（租户开通后回填/平台事件），不要求租户 RLS
+PLATFORM_TABLES_WITH_OPTIONAL_TENANT = {
+    "audit_logs",
+    "tenant_registration_requests",
+    "school_review_records",
+}
 
 
 @pytest.fixture(scope="module")
@@ -100,12 +109,14 @@ async def test_every_tenant_table_has_forced_rls_and_policy(engine: AsyncEngine)
     rls_by_table = {row["table_name"]: row for row in rls_rows}
 
     problems: list[str] = []
-    for row in tenant_columns:
-        table = row["table_name"]
+    # 租户级表 = 带 tenant_id 的表 - 平台表（平台表的 tenant_id 可空且无租户 RLS）
+    checked_tables = [
+        row["table_name"]
+        for row in tenant_columns
+        if row["table_name"] not in PLATFORM_TABLES_WITH_OPTIONAL_TENANT
+    ] + sorted(EXTRA_RLS_TABLES)
+    for table in checked_tables:
         meta = rls_by_table.get(table)
-        if row["is_nullable"] != "NO" and table != "audit_logs":
-            # audit_logs 的 tenant_id 允许为空（平台级事件）
-            problems.append(f"{table}.tenant_id 允许 NULL（租户级表必须 NOT NULL）")
         if meta is None:
             problems.append(f"{table} 不在 pg_class 中")
             continue
@@ -113,6 +124,15 @@ async def test_every_tenant_table_has_forced_rls_and_policy(engine: AsyncEngine)
             problems.append(f"{table} 未启用 FORCE RLS（表属主可绕过）")
         if meta["policy_count"] == 0:
             problems.append(f"{table} 没有 RLS 策略")
+
+    for row in tenant_columns:
+        if (
+            row["is_nullable"] != "NO"
+            and row["table_name"] not in PLATFORM_TABLES_WITH_OPTIONAL_TENANT
+        ):
+            problems.append(
+                f"{row['table_name']}.tenant_id 允许 NULL（租户级表必须 NOT NULL）"
+            )
 
     assert not problems, "租户级表 RLS 覆盖不全：\n" + "\n".join(problems)
 
@@ -136,7 +156,7 @@ async def test_platform_tables_do_not_carry_tenant_column(engine: AsyncEngine) -
         ).mappings().all()
 
     with_tenant = {row["table_name"] for row in rows}
-    unexpected = with_tenant & TABLES_ALLOWED_WITHOUT_TENANT_ID
+    unexpected = with_tenant & (TABLES_ALLOWED_WITHOUT_TENANT_ID - PLATFORM_TABLES_WITH_OPTIONAL_TENANT)
     assert not unexpected, f"平台级表意外带 tenant_id：{unexpected}"
 
     # 反向守卫：任何 public 表要么带 tenant_id，要么在允许清单里（防新业务表漏列）
@@ -188,11 +208,9 @@ async def test_every_policy_references_context_variables(engine: AsyncEngine) ->
         ).mappings().all()
 
     assert rows, "没有任何策略"
-    bad = [
-        f"{row['tablename']}.{row['policyname']}"
-        for row in rows
-        if not (
-            "app.tenant_id" in (row["qual"] or "") or "app.platform_context" in (row["qual"] or "")
-        )
-    ]
+    bad: list[str] = []
+    for row in rows:
+        combined = f"{row['qual'] or ''} {row['with_check'] or ''}"
+        if "app.tenant_id" not in combined and "app.platform_context" not in combined:
+            bad.append(f"{row['tablename']}.{row['policyname']}")
     assert not bad, f"以下策略未引用上下文变量，可能放行一切：{bad}"

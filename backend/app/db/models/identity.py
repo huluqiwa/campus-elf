@@ -24,7 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
-UserType = Literal["student", "teacher"]
+UserType = Literal["student", "teacher", "school_admin"]
 UserStatus = Literal["active", "locked", "disabled", "deleted"]
 
 
@@ -37,7 +37,10 @@ class User(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
         UniqueConstraint("tenant_id", "login_id", name="uq_users_tenant_id_login_id"),
         # 供子表做复合外键 (user_id, tenant_id)：保证父子同租（防跨租对象图嫁接）
         UniqueConstraint("id", "tenant_id", name="uq_users_id_tenant_id"),
-        CheckConstraint("user_type IN ('student', 'teacher')", name="user_type_valid"),
+        CheckConstraint(
+            "user_type IN ('student', 'teacher', 'school_admin')",
+            name="user_type_valid",
+        ),
         CheckConstraint(
             "status IN ('active', 'locked', 'disabled', 'deleted')", name="status_valid"
         ),
@@ -45,8 +48,8 @@ class User(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
 
     user_type: Mapped[str] = mapped_column(String(16), nullable=False)
     # 登录标识：学号或工号（可含字母数字）
-    login_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    display_name: Mapped[str | None] = mapped_column(String(100))
+    login_id: Mapped[str] = mapped_column(String(254), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(200))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     # 无 server_default：初始密码账号必须由创建方显式置 true（fail-loud）

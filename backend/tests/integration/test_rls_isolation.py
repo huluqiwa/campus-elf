@@ -115,14 +115,19 @@ async def _seed_two_tenants(
 ) -> tuple[UUID, UUID, UUID, UUID]:
     """建两个租户各一个用户，返回 (租户A, 租户B, 用户A, 用户B)。
 
-    租户（平台表）必须用**平台连接**创建——租户角色对 tenants 只有 SELECT
-    （学校开通是平台侧动作，见 TEN-02）；用户用租户连接 + 租户上下文创建。
+    租户由管理连接创建（平台运行角色在 M1-B 硬化后无 tenants 写权限）；
+    用户用租户连接 + 租户上下文创建。
     """
 
-    async with platform_session_factory() as session, session.begin():
-        await prepare_platform_context(session)
-        tenant_a = await _create_tenant(session, "示范一中")
-        tenant_b = await _create_tenant(session, "示范二中")
+    # 租户（平台级表）由管理连接创建：平台运行角色已无 tenants 写权限（M16）
+    admin_engine = make_test_engine("admin")
+    try:
+        admin_factory = make_session_factory(admin_engine)
+        async with admin_factory() as session, session.begin():
+            tenant_a = await _create_tenant(session, "示范一中")
+            tenant_b = await _create_tenant(session, "示范二中")
+    finally:
+        await admin_engine.dispose()
 
     async with session_factory() as session, session.begin():
         await prepare_tenant_context(session, tenant_a)

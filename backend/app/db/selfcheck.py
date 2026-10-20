@@ -1,0 +1,171 @@
+"""运行时数据库自检（TD-073）。
+
+生产/预发启动时验证：
+1. **租户与平台两个连接**的角色都不是超级用户、没有 BYPASSRLS（否则 RLS 形同虚设）；
+2. 所有租户级表逐表启用 FORCE RLS，且至少一条策略引用租户/平台上下文；
+3. 审核函数 owner 具备超级用户或 BYPASSRLS（SECURITY DEFINER 在 FORCE RLS 下需要）；
+4. 未设置租户上下文时租户数据不可见（fail-closed 探针）。
+
+失败即拒绝启动，避免"带病上线"。
+"""
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.session import db_session
+
+# 租户级表（含 tenants 自身）；audit_logs 允许 tenant_id 为空但有租户/平台策略
+REQUIRED_RLS_TABLES: tuple[str, ...] = (
+    "tenants",
+    "users",
+    "roles",
+    "role_permissions",
+    "user_roles",
+    "data_scopes",
+    "refresh_tokens",
+    "audit_logs",
+)
+
+
+class DatabaseSelfCheckError(RuntimeError):
+    """数据库安全基线不满足（拒绝启动）。"""
+
+
+async def _check_role(session: AsyncSession, label: str) -> None:
+    """校验当前连接角色不可绕过 RLS。"""
+
+    role = (
+        await session.execute(
+            text(
+                "select current_user as role_name, r.rolsuper, r.rolbypassrls "
+                "from pg_roles r where r.rolname = current_user"
+            )
+        )
+    ).mappings().one()
+    if role["rolsuper"] or role["rolbypassrls"]:
+        raise DatabaseSelfCheckError(
+            f"{label}连接角色 {role['role_name']} 具有超级用户/BYPASSRLS，禁止启动"
+        )
+
+
+async def _check_forced_rls(session: AsyncSession) -> None:
+    """逐表校验 FORCE RLS、策略数量、策略表达式与策略角色（禁止宽松策略放行）。
+
+    只用"存在一条合规策略"判定会被 `CREATE POLICY ... USING (true)` 绕过（M24）：
+    因此要求该表**所有**策略都引用租户/平台上下文，且只能授予两个应用组角色。
+    """
+
+    rows = (
+        await session.execute(
+            text(
+                """
+                select c.relname,
+                       c.relrowsecurity,
+                       c.relforcerowsecurity,
+                       count(p.policyname) as policy_count,
+                       count(*) filter (
+                           where p.policyname is not null
+                             and not (
+                                 coalesce(p.qual, '') || ' ' || coalesce(p.with_check, '')
+                                 ~ '(app\.tenant_id|app\.platform_context)'
+                             )
+                       ) as policy_without_context,
+                       count(*) filter (
+                           where p.policyname is not null
+                             and exists (
+                                 select 1 from unnest(p.roles) as policy_role
+                                 where policy_role not in
+                                     ('campus_elf_tenant', 'campus_elf_platform')
+                             )
+                       ) as policy_with_other_role
+                from pg_class c
+                join pg_namespace n on n.oid = c.relnamespace
+                left join pg_policies p
+                    on p.schemaname = 'public' and p.tablename = c.relname
+                where n.nspname = 'public' and c.relkind = 'r'
+                  and c.relname = any(:tables)
+                group by c.relname, c.relrowsecurity, c.relforcerowsecurity
+                """
+            ),
+            {"tables": list(REQUIRED_RLS_TABLES)},
+        )
+    ).mappings().all()
+
+    found = {row["relname"] for row in rows}
+    missing = set(REQUIRED_RLS_TABLES) - found
+    if missing:
+        raise DatabaseSelfCheckError(f"缺少租户级表: {', '.join(sorted(missing))}")
+
+    problems: list[str] = []
+    for row in rows:
+        if not row["relrowsecurity"] or not row["relforcerowsecurity"]:
+            problems.append(f"{row['relname']} 未启用 FORCE RLS")
+        if row["policy_count"] == 0:
+            problems.append(f"{row['relname']} 没有 RLS 策略")
+            continue
+        if row["policy_without_context"]:
+            problems.append(
+                f"{row['relname']} 有 {row['policy_without_context']} 条策略未引用租户/平台上下文"
+            )
+        if row["policy_with_other_role"]:
+            problems.append(
+                f"{row['relname']} 有 {row['policy_with_other_role']} 条策略授予了应用角色之外的"
+                "角色（如 PUBLIC）"
+            )
+    if problems:
+        raise DatabaseSelfCheckError("RLS 覆盖不完整：" + "；".join(problems))
+
+
+async def _check_review_function_owner(session: AsyncSession) -> None:
+    """SECURITY DEFINER 审核函数 owner 必须能绕过 FORCE RLS。"""
+
+    row = (
+        await session.execute(
+            text(
+                """
+                select r.rolname, r.rolsuper, r.rolbypassrls
+                from pg_proc p
+                join pg_roles r on r.oid = p.proowner
+                where p.proname = 'review_registration_request'
+                limit 1
+                """
+            )
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        raise DatabaseSelfCheckError("review_registration_request() 不存在（迁移未执行）")
+    if not (row["rolsuper"] or row["rolbypassrls"]):
+        raise DatabaseSelfCheckError(
+            f"审核函数 owner {row['rolname']} 不具备超级用户/BYPASSRLS，开通会被 RLS 拒绝"
+        )
+
+
+async def _check_fail_closed(session: AsyncSession) -> None:
+    """无租户上下文时，租户数据必须不可见（对非空表也有意义）。"""
+
+    for table in ("users", "roles", "refresh_tokens"):
+        visible = await session.scalar(
+            text(f"select count(*) from {table}")  # nosec B608 - 表名来自常量元组
+        )
+        if visible:
+            raise DatabaseSelfCheckError(
+                f"未设置租户上下文却可读取 {table}，RLS 隔离失效"
+            )
+
+
+async def verify_runtime_database() -> None:
+    """执行运行时数据库自检（租户 + 平台两个连接）。
+
+    异常:
+        DatabaseSelfCheckError: 连接角色可绕过 RLS、FORCE RLS/策略缺失、
+            审核函数 owner 不可绕过 RLS，或隔离失效。
+    """
+
+    async with db_session() as tenant_session:
+        await _check_role(tenant_session, "租户")
+        await _check_forced_rls(tenant_session)
+        await _check_review_function_owner(tenant_session)
+        await _check_fail_closed(tenant_session)
+
+    async with db_session(platform=True) as platform_session:
+        await _check_role(platform_session, "平台")

@@ -186,6 +186,51 @@
 - 复测证据（2026-10-20）：backend 46s ✅、evals 22s ✅、security 40s ✅、frontend（frontend+e2e）4m45s ✅；`gitleaks` 本地全历史扫描 14 提交/1.23MB「no leaks found」；后端 86 passed（env-plain 导出方式下）。
 - TD 处置：TD-057（CI 待远端生效）→ 已完成；新增 TD-064（e2e 安装 Chrome 约 4.5 分钟，可缓存/限触发，M1）。
 
+### M1-B 学校注册与审核：第一轮独立审查（2026-10-20）
+
+- 审查范围：M1-B 未提交改动（迁移 `c688c44dec81`、开通服务、平台接口、测试）。
+- 结论：**不通过**（1 Blocker + 14 Major + 16 Minor）。
+- Blocker：平台角色可向**存量租户**插入 users/roles/role_permissions/user_roles（`platform_provision` 只校验平台 GUC，不绑定新租户）——实测插入后租户会话能读回后门超管。
+- Major：校方超管拿到 `platform.*`；`login_id/display_name` 列宽不足导致审核 500；邮箱校验过弱（双 @/CRLF）；邮件失败留下已激活无密码租户；生产未强制平台/迁移连接与 SMTP；密钥明文；令牌非恒定时间比较；审计含明文邮箱；审计 `request_id` 全空；审核记录可改/删；先写对象后查重产生孤儿且无请求体上限；downgrade 遇 `school_admin` 数据失败；TD-073 自检缺失；失败路径无测试。
+- 修复：见 `docs/design-briefs/M1-B-tenant-onboarding.md` §9.1（B1 改为 `SECURITY DEFINER provision_tenant()`；M1–M14 全部处置；Minor 魔数/对象 key/bcrypt/文档编号修复，其余登记 TD-083~089）。
+- 复测：`ruff` 全绿、`mypy --no-incremental` 86 文件无问题、后端 **178 passed**（含 10 条新增回归）。
+- 第二轮复审：待执行（CI 通过后）。
+
+### M1-B 学校注册与审核：第二轮独立审查（2026-10-20）
+
+- 结论：**不通过**（1 Blocker + 8 Major + 14 Minor）。
+- Blocker B2：启动自检只检查租户连接、用全局 RLS 计数、空表 count=0 误判——平台连接可为超级用户、`users` 关闭 FORCE RLS 仍放行。
+- Major：平台可直接改申请状态/伪造审核记录且能直接调用内部分通函数创建无审计租户；`tenants` 完整 DML；邮件已发但提交失败的反向窗口；校名 CRLF 导致申请永久 502；chunked 请求绕过体积限制；原地修改 revision 导致旧 schema 不生效；运行时强制 DDL 超级用户 DSN；SECURITY DEFINER owner 语义未强制；关键失败路径缺测试。
+- 修复：见 `docs/design-briefs/M1-B-tenant-onboarding.md` §9.2（审核收进 `review_registration_request()`、平台最小权限、硬化 revision `d9f4a2b7c3e1`、自检覆盖双连接/逐表/owner、chunked 缓冲限制、控制字符、运行时移除迁移 DSN、新增 10 条失败路径测试）。
+- 复测：`ruff` 全绿、`mypy` 86 文件无问题、后端 **186 passed**、`alembic check` 无漂移。
+- 第三轮复审：待执行（CI 通过后）。
+
+### M1-B 学校注册与审核：第三轮独立审查（2026-10-21）
+
+- 结论：**不通过**（1 Blocker + 4 Major + 14 Minor）。
+- Blocker B3：`review_registration_request` 内表名未限定 schema，平台会话可用同名 TEMP 表遮蔽——伪造申请数据创建"影子租户"，真实申请保持 pending 却已产生审核记录与审计。
+- Major：自检 `bool_or` 判定被 `USING (true)` 宽松策略绕过；旧 schema（无 provision_tenant）升级后 downgrade 仍失败且测试未真实模拟第一轮；d9 downgrade 重新授予 users/roles 全量 DML（超出目标 revision）；全局 11MB 体积限制会阻断后续 KB 大上传。
+- 修复：见 `docs/design-briefs/M1-B-tenant-onboarding.md` §9.3（函数内全部 `public.` 限定 + 遮蔽回归测试；自检要求所有策略合规 + 宽松策略测试；c688 downgrade 幂等化 + 第一轮 schema 往返测试；downgrade 精确恢复 c688 权限；体积限制改按路由 + 透传测试；失败审计断言等 Minor 修复）。
+- 复测：`ruff`/`mypy` 全绿、后端 **189 passed**。
+- 第四轮复审：待执行（CI 通过后）。
+
+### M1-B 学校注册与审核：第四轮独立审查（2026-10-21）
+
+- 结论：**不通过**（2 Blocker + 2 Major + 7 Minor）。
+- Blocker B4：旧 schema 升级时 `CREATE OR REPLACE provision_tenant` 新建函数默认授予 PUBLIC EXECUTE（预撤销在创建之前被跳过），平台仍可无审计创建租户/超管。
+- Blocker B5：`d9` downgrade 重建身份表 INSERT + `platform_provision` 策略，恢复 B1 攻击路径，且与 c688 规范状态不符。
+- Major：第四轮修复仍写在已应用的 `d9` 内（旧 d9 环境不生效）；回归测试未覆盖上述两条路径。
+- 修复：见 `docs/design-briefs/M1-B-tenant-onboarding.md` §9.4（撤销移到创建之后并无条件执行；downgrade 只还原 c688 规范状态；新增 `e5c9d1f7a2b4` 幂等重放 revision；测试补函数 ACL 与越权攻击断言）。
+- 复测：`ruff`/`mypy` 全绿、后端 **189 passed**、head=`e5c9d1f7a2b4`。
+- 第五轮复审：待执行（CI 通过后）。
+
+### M1-B 学校注册与审核：第五轮独立审查（2026-10-21）——**通过**
+
+- 结论：**通过**（0 Blocker / 0 Major / 7 Minor）。
+- 验证：B4（旧 schema 升级后 `provision_tenant` 对 PUBLIC/平台不可执行，ACL `{campus_elf_test=X/...}`，平台调用抛 InsufficientPrivilegeError）；B5（`upgrade head → downgrade c688` 后平台向存量租户插 `school_admin` 被拒，`platform_provision=0`）；M28（`e5c9d1f7a2b4` 幂等重放，已应用 d9 的环境获得修复，downgrade/upgrade 往返正常）；M29（测试覆盖函数 ACL、平台调用拒绝、降级权限矩阵）。
+- Minor 收口：e5 增加 `_require_bypass_role`/触发器/列宽/tenants 授权幂等兜底与触发器函数 PUBLIC 撤销；迁移测试补租户角色执行拒绝、越权插入置于同一事务；文档补"downgrade d9 不回退 hardening"说明与 TD-095。
+- 审查证据：`ruff`/`mypy` 全绿、**189 passed**、`bash scripts/ci.sh` 全绿、`alembic check` 无漂移、head=`e5c9d1f7a2b4`。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

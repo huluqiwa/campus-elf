@@ -57,14 +57,15 @@ has_cmd() { command -v "$1" >/dev/null 2>&1; }
 check_sources_tracked() {
   # M1-A 实测：.gitignore 的 `models/` 曾把 backend/app/db/models/ 整包忽略，
   # 导致 5 个模型文件从未入库、CI 上根本不存在（本地却"全绿"）。
-  local untracked
-  untracked="$(comm -23     <(find backend/app backend/tests evals/src -name '*.py' | sort)     <(git ls-files | grep -E '^(backend/app|backend/tests|evals/src)/.*\.py$' | sort))"
-  if [[ -n "${untracked}" ]]; then
-    echo "[ci] 以下源码文件未被 git 跟踪（疑似 .gitignore 误伤，必须先入库）：" >&2
-    echo "${untracked}" >&2
+  # 这里只拦「被 git 忽略的源码」；尚未 add 的新文件（未忽略）不算违规。
+  local ignored
+  ignored="$(git ls-files --others --ignored --exclude-standard backend/app backend/tests evals/src     | grep -E '\.py$' || true)"
+  if [[ -n "${ignored}" ]]; then
+    echo "[ci] 以下源码文件被 .gitignore 忽略（不可能入库，必须先修忽略规则）：" >&2
+    echo "${ignored}" >&2
     return 1
   fi
-  echo "[ci] backend/app、backend/tests、evals/src 下源码均已入库"
+  echo "[ci] backend/app、backend/tests、evals/src 下源码未被忽略"
 }
 
 step "repo: 源码入库校验" check_sources_tracked

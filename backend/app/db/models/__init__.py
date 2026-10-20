@@ -2,6 +2,7 @@
 
 from app.db.models.audit import AuditLog
 from app.db.models.identity import RefreshToken, User
+from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
 from app.db.models.rbac import (
     PERMISSION_CATALOG,
     DataScope,
@@ -27,7 +28,9 @@ __all__ = [
     "RefreshToken",
     "Role",
     "RolePermission",
+    "SchoolReviewRecord",
     "Tenant",
+    "TenantRegistrationRequest",
     "User",
     "UserRole",
 ]

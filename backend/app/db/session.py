@@ -36,10 +36,11 @@ def migration_url_or_default() -> str:
     """
 
     settings = get_settings()
-    url = settings.migration_database_url or settings.database_url
-    if not url:
-        raise RuntimeError("MIGRATION_DATABASE_URL / DATABASE_URL 均未配置")
-    return url
+    if settings.migration_database_url is not None:
+        return settings.migration_database_url.get_secret_value()
+    if settings.database_url:
+        return settings.database_url
+    raise RuntimeError("MIGRATION_DATABASE_URL / DATABASE_URL 均未配置")
 
 
 def _make_engine(url: str, *, pool_size: int = 10) -> AsyncEngine:

@@ -485,7 +485,30 @@ data: {"code":"LLM_TIMEOUT","message":"生成超时，请重试","retryable":tru
 - 用户停止：客户端 abort；服务端取消下游 LLM/工具任务。
 - 断线重连：客户端可用 turn_id 查询最终状态；不支持续传无限 token 流，重连后展示已完成部分/重试。
 
-### 5.9 审批 / 请假 / 消息 / 删除
+### 5.9 学校注册与审核（M1-B）
+
+```text
+POST /api/v1/platform/tenants/register        # 公开；multipart：school_name/address/leadership/email/qualification
+POST /api/v1/platform/tenant-requests/{id}/review   # result=approved|rejected + reason
+GET  /api/v1/platform/tenants                 # 平台侧列表
+GET  /api/v1/platform/tenant-requests         # 平台侧申请列表（?status=pending/approved/rejected）
+GET  /api/v1/platform/tenants/{id}/review-records
+```
+
+- 状态机：`pending → approved | rejected`（一次申请只允许一次审核，`SELECT ... FOR UPDATE` + 唯一约束保证幂等）；数据库触发器进一步禁止审结后的任何状态迁移。
+- 去重：邮箱严格校验（单一 `@`、无空白/控制字符、local ≤64、总长 ≤254）且规范化后唯一（仅 `pending/approved` 占用，被拒可重报）；校名重复只置 `school_name_duplicate_hint`。
+- 通过/拒绝统一调用 `review_registration_request(...)`（**SECURITY DEFINER**，`search_path=pg_catalog,public,pg_temp` 且函数内**所有表名显式限定 `public.`**，防止调用方用同名 TEMP 表遮蔽）：函数内 `SELECT ... FOR UPDATE` 锁定申请 → 校验 pending → 通过时原子创建租户（active + 学校编号）、3 个内置角色、超管账号与角色绑定 → 写审核记录（含凭证快照）→ 写审计 → 状态迁移；平台运行角色只能 EXECUTE 审核函数，不能直接改申请状态/插审核记录/写租户身份；内部分通函数 `provision_tenant` 对 PUBLIC 与平台一律撤销 EXECUTE（`e5c9d1f7a2b4` 对已应用 `d9` 的环境幂等重放）。
+- 邮件仍在事务内发送：失败抛 502 并回滚整笔开通（申请保持 pending，可重试），避免"已激活但校方拿不到密码"；反向窗口（邮件已发出、事务提交失败）不会产生可登录账号，仅造成无效密码邮件，由重试生成新密码覆盖（TD-088）。
+- 校方超管权限只取 `permissions.module IN ('school','campus')`；`platform.*` 属平台 realm，不授予租户。
+- **平台最小权限**：`users/roles/role_permissions/user_roles` 零权限；`tenant_registration_requests` 仅 SELECT+INSERT（提交用，无 UPDATE/DELETE）；`school_review_records` 仅 SELECT（只追加触发器兜底）；`tenants` 仅 SELECT + 列级 `UPDATE(status,status_reason)`。开通/审核只能通过 `review_registration_request()`，无法向存量租户植入账号或伪造审核记录。
+- 学校编号：`SCH-` + 8 位随机（字符集排除 0/O/1/I/L），唯一约束兜底；开通函数调用外层用 SAVEPOINT 对编号冲突换号重试。
+- 对象存储 key：`onboarding/<request_id>/qualification.<ext>`、`reviews/<review_record_id>/qualification.<ext>`；开发/测试用本地目录，生产用 S3/MinIO。注册**先查重再写对象**，失败清理，避免重复提交产生孤儿文件；文件类型以魔数校验（PDF/PNG/JPEG），MIME 声明仅作快速拒绝。
+- 请求体限制**按路由**生效（仅 `/platform/tenants/register` 11MB，避免给后续 KB 50MB/300MB 上传引入全局上限）：有 `Content-Length` 直接拒绝；chunked/无长度时先缓冲并累计字节数，超限返回 413；未登记路由原样透传（不做缓冲）。
+- 鉴权：M1-C 之前审核接口使用 `DEV_PLATFORM_REVIEW_TOKEN`（常量时间比较；production 禁止配置；M1-C 换 JWT + `platform.tenant.review` 后删除，TD-078）；拒绝请求写 `platform.review.denied` 审计。
+- 审计脱敏：邮箱只落掩码（`a***@domain`），不写明文联系方式；`request_id` 贯穿提交/审核，与响应头 `X-Request-ID` 一致。
+- 启动自检（预发/生产）：**租户与平台两个连接**都不得为超级用户/BYPASSRLS；逐表要求 FORCE RLS、**每条策略都引用租户/平台上下文且只授予两个应用组角色**（防 `USING (true)` 宽松策略）；审核函数 owner 必须可绕过 FORCE RLS；无租户上下文时租户数据不可见。任一失败拒绝启动（TD-073）。
+
+### 5.10 审批 / 请假 / 消息 / 删除
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -506,7 +529,7 @@ data: {"code":"LLM_TIMEOUT","message":"生成超时，请重试","retryable":tru
 | POST | `/school/account-terminations/{id}/appeal` | 申诉 |
 | POST | `/school/account-terminations/{id}/freeze` | 冻结（暂停倒计时） |
 
-### 5.10 看板 / 反馈
+### 5.11 看板 / 反馈
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

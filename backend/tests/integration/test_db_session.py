@@ -20,6 +20,7 @@ from app.db.session import db_session, dispose_engine
 from tests.support.db import (
     clean_test_data,
     database_url,
+    make_session_factory,
     make_test_engine,
     upgrade_test_database,
 )
@@ -59,14 +60,19 @@ async def app_engine_env(
 
 
 async def _create_tenant_via_platform(name: str) -> UUID:
-    """用平台连接创建租户（平台侧动作）。"""
+    """用管理连接创建租户（平台运行角色已无 tenants 写权限，见 M16）。"""
 
-    async with db_session(platform=True) as session:
-        tenant = Tenant(name=name, status="active")
-        session.add(tenant)
-        await session.flush()
-        tenant_id: UUID = tenant.id
-        return tenant_id
+    engine = make_test_engine("admin")
+    try:
+        factory = make_session_factory(engine)
+        async with factory() as session, session.begin():
+            tenant = Tenant(name=name, status="active")
+            session.add(tenant)
+            await session.flush()
+            tenant_id: UUID = tenant.id
+            return tenant_id
+    finally:
+        await engine.dispose()
 
 
 async def _create_user(tenant_id: UUID, login_id: str) -> UUID:

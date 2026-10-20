@@ -111,7 +111,7 @@ location /api/v1/school/kb/build-jobs/ {
 ```
 
 - HTTPS：Let's Encrypt 或自有证书；HTTP→HTTPS 跳转；HSTS。
-- 上传大小：`client_max_body_size 300m`（按批）；个人库二期 30m。
+- 上传大小：`client_max_body_size 300m`（按批）；个人库二期 30m。**注册接口路径**（`/api/v1/platform/tenants/register`）单独设 `client_max_body_size 11m`（应用层同样限制 11MB，含 chunked）。
 - 限流：登录/API/SSE 分级；Redis 令牌桶为主。
 - 安全头：CSP、X-Content-Type-Options、Referrer-Policy、X-Frame-Options。
 - 访问日志脱敏；不记录 Authorization/Cookie。
@@ -170,6 +170,9 @@ location /api/v1/school/kb/build-jobs/ {
   查询会静默返回 0 行、写入直接报 RLS 错误。因此 `MIGRATION_DATABASE_URL` 必须使用超级用户或
   具备 `BYPASSRLS` 的运维角色；临时数据修复脚本应显式 `SET ROLE campus_elf_platform`（或临时 `ALTER TABLE … NO FORCE`，事后恢复）。
 - 角色与授权**不随迁移回滚**（集群级对象）；需要清理时手工 `DROP ROLE`（见 `scripts/test-stack.sh::cleanup_legacy_roles` 的做法）。
+- **启动自检（TD-073）**：`APP_ENV=staging|production` 时应用启动会执行 `verify_runtime_database()`——**租户与平台两个连接**角色都不得是超级用户或带 `BYPASSRLS`；逐表要求 FORCE RLS、每条策略都引用租户/平台上下文且只授予两个应用组角色；审核函数 owner 必须可绕过 FORCE RLS；未设置租户上下文时租户数据必须不可见。任一不满足直接拒绝启动。
+- **生产配置校验强制项**：`DATABASE_URL`、`PLATFORM_DATABASE_URL`、`QDRANT_URL`、真实 `SMTP_HOST/SMTP_FROM` + `SMTP_USERNAME/SMTP_PASSWORD` + `SMTP_USE_TLS|SMTP_START_TLS`（二选一）、S3 四项；`DEV_*` 开关一律禁止。任一缺失/非法即启动失败。`MIGRATION_DATABASE_URL` **不注入 API/Worker**，仅迁移 Job 使用；该角色需超级用户或 `BYPASSRLS`。
+- **平台开通能力**：平台运行角色对 `users/roles/role_permissions/user_roles` 零权限；申请单仅 SELECT+INSERT、审核记录仅 SELECT、租户仅 SELECT + 列级 `UPDATE(status,status_reason)`。开通/审核只能 `EXECUTE review_registration_request(...)`（`SECURITY DEFINER`，函数内锁申请、写审核记录与审计）。该函数 owner 必须是超级用户或 `BYPASSRLS`（自检与迁移都会强制），否则写入会被 FORCE RLS 拒绝。
 
 ## 7. Langfuse 独立主机
 

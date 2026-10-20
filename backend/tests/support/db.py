@@ -139,6 +139,9 @@ async def clean_test_data(engine: AsyncEngine) -> None:
         await conn.execute(text("ALTER TABLE audit_logs DISABLE TRIGGER audit_logs_no_truncate"))
         try:
             await conn.execute(text("TRUNCATE audit_logs"))
+            await conn.execute(
+                text("TRUNCATE school_review_records, tenant_registration_requests CASCADE")
+            )
             for table in TENANT_TABLES:
                 await conn.execute(text(f"TRUNCATE {table} CASCADE"))
             await conn.execute(text("TRUNCATE platform_user_roles CASCADE"))

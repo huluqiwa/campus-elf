@@ -72,12 +72,13 @@ Thumbs.db
 # 日志与临时文件
 *.log
 logs/
-tmp/
+/tmp/
 temp/
 .cache/
 uploads/
-storage/
-data/
+# 只忽略数据目录（避免误伤源码包 backend/app/storage/）
+/storage/
+/data/
 test-data/
 test-output/
 
