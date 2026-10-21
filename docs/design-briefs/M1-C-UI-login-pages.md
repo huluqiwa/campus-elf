@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 日期 | 2026-10-21 |
-| 状态 | **待确认**（§3 三项细节需用户拍板；范围边界见 §1） |
+| 状态 | **已确认并实现**（2026-10-21：三项全部按推荐——HttpOnly Cookie、admin 单页身份切换 + campus 登录页、统一 401/403 拦截；后端已补 Cookie 支持） |
 | 关联功能点 | M1-C-UI（M1-C 的前端部分，TD-103）：三端登录页、首登强制改密页、路由守卫与令牌存储、401/403 统一处理 |
 | 验收引用 | `docs/spec.md` §3.3 AUTH-01/02（登录返回 access/refresh、tenant_id、角色、must_change_password；首登未改密 403）；`docs/test-plan.md` §8 E2E（三端登录主路径） |
 | 不在本简报范围 | **会话设备管理（AUTH-06 / M1-C2）**：其"数据 → 会话服务 → 3 个接口"属 M1-C2；"登录设备页"在 M1-C2 后端完成后再并入前端（见 §6 顺序建议） |
@@ -80,6 +80,14 @@
 
 认证前端涉及令牌存储与跳转逻辑，属高风险：编码前需确认 §3.1–3.3。审查重点：令牌是否可能落日志/URL/本地明文（按选定方案核对）、401/403 分流是否会造成"假登录"或死循环、刷新单飞是否正确、守卫是否存在绕过路径（直接输入 URL）、是否有敏感信息渲染。
 
-## 8. 实现结果
+## 8. 实现结果（2026-10-21）
 
-待编码后回填。
+- **后端**：`app/api/auth.py` 增加 HttpOnly 刷新 Cookie（登录/刷新/改密下发、刷新与登出可从 Cookie 读取、登出无条件清除）；`app/config.py` 新增 `AUTH_COOKIE_*` 与 `AUTH_REFRESH_TOKEN_IN_BODY`：**staging/production 强制 `AUTH_COOKIE_SECURE=true`、`AUTH_REFRESH_TOKEN_IN_BODY=false`（响应体省略 refresh，只走 Cookie）**，开发/测试保留 body 回显供自动化测试使用。
+- **api-client**：`packages/api-client/src/auth.ts` 新增 `createAuthSession`（内存 access、`credentials: include`、401 单飞刷新后重放、403 分流"首登必须改密"/其它、restore 静默恢复、登录/登出/改密/me）；`auth.test.ts` 8 条用例覆盖单飞、重放、失败清空、403 分流、restore 静默。
+- **admin**：`session.ts` 单例（回调在 main.ts 绑定，避免循环依赖）、Pinia `stores/auth.ts`、`LoginView.vue`（身份切换 校方/平台运营）、`ChangePasswordView.vue`、`HomeView.vue`（身份/权限、改密入口、登出）、路由守卫（Cookie 静默恢复 → 未登录进登录页 → 首登强制改密）。
+- **campus**：同等结构（Vant）：登录页、强制改密页、首页（健康/身份/改密/登出）、守卫。
+- **E2E（Playwright，接口 mock，**有状态**）**：`admin-login.spec.ts`（未登录跳转、校方首登改密全链路、平台登录、错误文案）、`admin-logout.spec.ts`（登出回到登录页）、`campus-login.spec.ts`（登录、首登改密）、`helpers/auth-mock.ts`（登录后才返回 /auth/me、改密后解除门禁、登出后回到 401）、`helpers/locators.ts`（兼容 Element Plus/Vant 的 testid 落点）；既有 admin/campus/health 基线适配受保护首页。**12 条 E2E 全绿**；CI/本地新增"用例数下限"守卫（防 testMatch 写错导致静默不收集）。
+- **单测/构建**：api-client **20 passed**（含改密必带 Authorization、仅 Cookie 登出、/auth/me 刷新重放、X-Auth-Error 分流、令牌事件）；`pnpm lint/format:check/typecheck/build` 全绿；后端全量 **238 passed**。
+- **第一轮独立审查修复（2026-10-21）**：Blocker B1（改密请求未带 Authorization → 首登改密不可用）→ `changePassword` 走带鉴权请求并补回归单测；MA1（改密未下发新 Cookie → 改密后刷新即掉线）→ 后端改密响应 Set-Cookie + 测试；MA2（登出仅在有 access 时才调后端 → 过期后退出无效）→ 登出支持仅凭 Cookie、任何路径都清 Cookie、审计标注 self_revoked + 测试；MA3（响应体回显 refresh 抵消 HttpOnly）→ 新增 `AUTH_REFRESH_TOKEN_IN_BODY`，staging/production 强制 false 且响应省略该字段；MA4（campus 用例未被收集）→ testMatch 修正 + 用例数下限守卫；Minor：store 以库值判断门禁、令牌刷新事件同步 store、/auth/me 允许刷新重放、403 按 `X-Auth-Error` 机器码分流、提交防重、去掉未用表单 ref、Cookie 路径与 API_PREFIX 联动校验、非开发环境禁止 SameSite=none、`components.d.ts` 入库、登出 E2E 与 mock 语义对齐。
+- **第二轮独立审查（通过，0 Blocker/0 Major，6 Minor）**：Minor 1（改密未接入 401 刷新重放）→ 改密改走 `request()`；Minor 2/3（设计文档与 `.env.example` 未随 MA3 更新）→ 已补 `AUTH_REFRESH_TOKEN_IN_BODY` 说明与示例项；Minor 4（登出 E2E 重复 route 遮蔽状态迁移）→ 去掉重复 route 并补"登出后再访问受保护页被拦回登录页"断言；Minor 5（有状态 mock 的 must_change_password/tenant_id 与后端不一致）→ mock 按状态生成、平台场景省略 tenant_id；Minor 6（网络错误露出技术文案、`OptionalPrincipal = None` 冗余默认值）→ 新增 `toUserMessage` 兜底并用于四个视图、去掉冗余默认值。
+- **未包含（登记 TD-110）**：真实后端的全栈 E2E（当前 E2E 用接口 mock 保证确定性；全栈版本放到 M1 验收时以专用 compose 栈运行）。

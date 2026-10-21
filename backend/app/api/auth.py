@@ -11,12 +11,13 @@
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, model_validator
 
 from app.auth import revocation, service, tokens
-from app.auth.principal import CurrentPrincipal
+from app.auth.principal import CurrentPrincipal, OptionalPrincipal
 from app.auth.service import AuthError
+from app.config import get_settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -52,7 +53,8 @@ class TokenResponse(BaseModel):
     """
 
     access_token: str
-    refresh_token: str
+    # 仅开发/测试回显（AUTH_REFRESH_TOKEN_IN_BODY）；staging/production 只走 HttpOnly Cookie
+    refresh_token: str | None = None
     token_type: Literal["bearer"] = "bearer"
     expires_in: int
     realm: Literal["tenant", "platform"]
@@ -62,13 +64,16 @@ class TokenResponse(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    """刷新请求。"""
+    """刷新请求。
 
-    refresh_token: str = Field(min_length=16, max_length=512)
+    `refresh_token` 可省略：浏览器端使用 HttpOnly Cookie，仅非浏览器客户端在 body 传值。
+    """
+
+    refresh_token: str | None = Field(default=None, min_length=16, max_length=512)
 
 
 class LogoutRequest(BaseModel):
-    """登出请求（可选携带刷新令牌以撤销整个家族）。"""
+    """登出请求（可选携带刷新令牌以撤销整个家族；浏览器端从 Cookie 读取）。"""
 
     refresh_token: str | None = Field(default=None, max_length=512)
 
@@ -104,12 +109,48 @@ def _http_error(exc: AuthError) -> HTTPException:
     return HTTPException(status_code=exc.http_status, detail=exc.message, headers=headers)
 
 
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    """下发 HttpOnly 刷新令牌 Cookie（JS 不可读；路径限定在认证接口）。"""
+
+    settings = get_settings()
+    response.set_cookie(
+        key=settings.auth_cookie_name,
+        value=refresh_token,
+        max_age=settings.refresh_token_ttl_seconds,
+        path=settings.auth_cookie_path,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    """清除刷新令牌 Cookie（登出）。"""
+
+    settings = get_settings()
+    response.delete_cookie(
+        key=settings.auth_cookie_name,
+        path=settings.auth_cookie_path,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+    )
+
+
+def _cookie_refresh_token(request: Request) -> str | None:
+    """从 Cookie 读取刷新令牌（浏览器端）。"""
+
+    value = request.cookies.get(get_settings().auth_cookie_name)
+    return value or None
+
+
 def _token_response(pair: service.TokenPair) -> TokenResponse:
     """TokenPair → 响应模型。"""
 
+    settings = get_settings()
     return TokenResponse(
         access_token=pair.access_token,
-        refresh_token=pair.refresh_token,
+        refresh_token=pair.refresh_token if settings.auth_refresh_token_in_body else None,
         expires_in=pair.expires_in,
         realm=pair.realm,
         must_change_password=pair.must_change_password,
@@ -118,8 +159,8 @@ def _token_response(pair: service.TokenPair) -> TokenResponse:
     )
 
 
-@router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest, request: Request) -> TokenResponse:
+@router.post("/login", response_model=TokenResponse, response_model_exclude_none=True)
+async def login(payload: LoginRequest, request: Request, response: Response) -> TokenResponse:
     """三端登录。
 
     异常:
@@ -149,61 +190,91 @@ async def login(payload: LoginRequest, request: Request) -> TokenResponse:
             )
     except AuthError as exc:
         raise _http_error(exc) from exc
+    _set_refresh_cookie(response, pair.refresh_token)
     return _token_response(pair)
 
 
-@router.post("/refresh", response_model=TokenResponse)
-async def refresh(payload: RefreshRequest, request: Request) -> TokenResponse:
-    """刷新访问令牌（轮换；重用检测）。"""
+@router.post("/refresh", response_model=TokenResponse, response_model_exclude_none=True)
+async def refresh(payload: RefreshRequest, request: Request, response: Response) -> TokenResponse:
+    """刷新访问令牌（轮换；重用检测）。
 
+    刷新令牌优先取 body，其次取 HttpOnly Cookie；两者都没有 → 401。
+    """
+
+    refresh_token = payload.refresh_token or _cookie_refresh_token(request)
+    if not refresh_token:
+        raise HTTPException(
+            status_code=401,
+            detail="缺少刷新令牌",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         pair = await service.refresh_tokens(
-            refresh_token=payload.refresh_token,
+            refresh_token=refresh_token,
             ip=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
             request_id=getattr(request.state, "request_id", None),
         )
     except AuthError as exc:
         raise _http_error(exc) from exc
+    _set_refresh_cookie(response, pair.refresh_token)
     return _token_response(pair)
 
 
 @router.post("/logout", response_model=OkResponse)
 async def logout(
-    principal: CurrentPrincipal,
     request: Request,
+    response: Response,
+    principal: OptionalPrincipal,
     payload: LogoutRequest | None = None,
 ) -> OkResponse:
-    """登出：撤销刷新令牌家族并立即失效当前访问令牌。"""
+    """登出：撤销刷新令牌家族、立即失效当前访问令牌并清除 Cookie。
+
+    主体**可选**：access 过期（停留超 15 分钟）或仅剩 Cookie 时同样必须能登出；
+    安全性由"刷新令牌哈希比对"保证——不解码、不匹配就不会撤销任何人（审查 MA2）。
+    无论成功与否都清除 Cookie；主体缺失时审计由撤销路径写入（metadata.self_revoked=true）。
+    """
 
     request_id = getattr(request.state, "request_id", None)
-    if payload is not None and payload.refresh_token:
-        # 校验刷新令牌哈希后撤销家族；令牌不匹配按未知处理（不泄露、不误撤销）
-        await service.revoke_refresh_family(
-            refresh_token=payload.refresh_token,
-            actor_user_id=principal.user_id,
-            actor_realm=principal.realm,
-            request_id=request_id,
+    try:
+        provided_refresh = (payload.refresh_token if payload else None) or _cookie_refresh_token(
+            request
         )
-    await revocation.revoke(
-        str(principal.jti), principal.expires_at, realm=principal.realm
-    )
-    await service.record_logout(
-        actor_user_id=principal.user_id,
-        actor_realm=principal.realm,
-        tenant_id=principal.tenant_id,
-        request_id=request_id,
-        ip_hash=tokens.hash_client_fingerprint(
-            request.client.host if request.client else None
-        ),
-        ua_hash=tokens.hash_client_fingerprint(request.headers.get("user-agent")),
-    )
+        if provided_refresh:
+            # 校验刷新令牌哈希后撤销家族；令牌不匹配按未知处理（不泄露、不误撤销）
+            await service.revoke_refresh_family(
+                refresh_token=provided_refresh,
+                actor_user_id=principal.user_id if principal else None,
+                actor_realm=principal.realm if principal else None,
+                request_id=request_id,
+            )
+        if principal is not None:
+            await revocation.revoke(
+                str(principal.jti), principal.expires_at, realm=principal.realm
+            )
+            await service.record_logout(
+                actor_user_id=principal.user_id,
+                actor_realm=principal.realm,
+                tenant_id=principal.tenant_id,
+                request_id=request_id,
+                ip_hash=tokens.hash_client_fingerprint(
+                    request.client.host if request.client else None
+                ),
+                ua_hash=tokens.hash_client_fingerprint(request.headers.get("user-agent")),
+            )
+    finally:
+        _clear_refresh_cookie(response)
     return OkResponse()
 
 
-@router.post("/change-password", response_model=TokenResponse)
+@router.post(
+    "/change-password", response_model=TokenResponse, response_model_exclude_none=True
+)
 async def change_password(
-    payload: ChangePasswordRequest, principal: CurrentPrincipal, request: Request
+    payload: ChangePasswordRequest,
+    principal: CurrentPrincipal,
+    request: Request,
+    response: Response,
 ) -> TokenResponse:
     """修改密码（首登改密也走这里）；成功后返回新令牌。"""
 
@@ -220,6 +291,8 @@ async def change_password(
         )
     except AuthError as exc:
         raise _http_error(exc) from exc
+    # 改密会撤销全部旧家族：必须同时下发新刷新 Cookie，否则浏览器刷新即掉线（审查 MA1）
+    _set_refresh_cookie(response, pair.refresh_token)
     return _token_response(pair)
 
 

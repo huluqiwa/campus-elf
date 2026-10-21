@@ -835,8 +835,8 @@ async def record_logout(
 async def revoke_refresh_family(
     *,
     refresh_token: str,
-    actor_user_id: UUID,
-    actor_realm: Realm,
+    actor_user_id: UUID | None,
+    actor_realm: Realm | None,
     request_id: str | None = None,
 ) -> bool:
     """登出：撤销该刷新令牌所属家族。
@@ -890,8 +890,8 @@ async def _revoke_by_jti(
     jti: UUID,
     expected_hash: str,
     reason: str,
-    actor_user_id: UUID,
-    actor_realm: Realm,
+    actor_user_id: UUID | None,
+    actor_realm: Realm | None,
     request_id: str | None,
 ) -> bool:
     """按 jti 撤销所在家族（校验令牌哈希；审计记录真实操作者）。"""
@@ -906,12 +906,14 @@ async def _revoke_by_jti(
         session,
         action="auth.logout",
         resource_type="auth",
-        actor_realm=actor_realm,
-        actor_id=actor_user_id,
+        actor_realm=actor_realm or realm,
+        actor_id=actor_user_id or row["user_id"],
         tenant_id=tenant_id,
         metadata={
             "family_id": str(row["family_id"]),
             "subject_user_id": str(row["user_id"]),
+            # 无 Bearer 主体（仅 Cookie 登出）时标注，便于审计区分"本人操作"与"凭 Cookie 撤销"
+            "self_revoked": actor_user_id is None,
         },
         request_id=request_id,
     )

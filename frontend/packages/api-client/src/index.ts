@@ -43,3 +43,15 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     },
   };
 }
+
+export {
+  createAuthSession,
+  toUserMessage,
+  type AuthSession,
+  type AuthSessionOptions,
+  type AuthTokens,
+  type AuthUser,
+  type PlatformLoginInput,
+  type Realm,
+  type TenantLoginInput,
+} from "./auth";

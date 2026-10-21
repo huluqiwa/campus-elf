@@ -242,6 +242,15 @@
 - 第三轮 Minor 收口：自检去掉未使用形参（可读性）、补 staging/占位值密钥测试（参数化三态）；启动自检逐租户串行开会话的容量前瞻登记 TD-109。
 - 最终门禁：222 passed、ruff/mypy 全绿、`alembic check` 无漂移、head=`c8e2f4a6b1d3`、本地 `scripts/ci.sh` 全绿。
 
+### M1-C-UI 三端登录页与强制改密页：实现完成，待独立审查（2026-10-21）
+
+- 实现：后端 HttpOnly 刷新 Cookie（staging/production 强制 secure）+ api-client 认证会话（401 单飞刷新/403 分流）+ admin/campus 登录与改密页、路由守卫；E2E 9 条（接口 mock）与 api-client 13 条单测全绿；后端全量 236 passed。
+- 第一轮独立审查：**不通过**（1 Blocker + 4 Major + 11 Minor）。Blocker：改密请求未带 Authorization，首登改密必然 401；Major：改密未换 Cookie（改密后刷新即掉线）、登出在 access 过期时不清 Cookie（共享设备"退出"无效且家族未撤销）、响应体仍回显 refresh 令牌（抵消 HttpOnly）、campus 的 E2E 未被 Playwright 收集（文档误报覆盖）。
+- 修复：见 `docs/design-briefs/M1-C-UI-login-pages.md` §8 的修复清单（含新增回归：改密带鉴权头、仅 Cookie 登出、改密换 Cookie、X-Auth-Error 分流、有状态 mock、E2E 用例数下限守卫）。
+- 复测：api-client **20 passed**、Playwright **12 passed**、后端全量 **238 passed**、lint/format/typecheck/build 全绿。
+- 第二轮：**通过**（0 Blocker / 0 Major / 6 Minor）。实测确认：改密带 Bearer 且下发新 Cookie、仅凭 Cookie 可刷新；登出四种凭证形态（有效 Bearer / 仅 Cookie / 伪造 Bearer + 有效 Cookie / 无凭证）都安全且清 Cookie、不误撤销他人；staging 实测响应体不含 refresh 且 Cookie 带 Secure；E2E 收集 12 条（含 campus-login）并有用例数下限守卫。
+- 第二轮 Minor 收口：改密接入 401 刷新重放；设计文档与 `.env.example` 补 `AUTH_REFRESH_TOKEN_IN_BODY`；登出 E2E 去掉重复 route 并补拦截断言；有状态 mock 的 must_change_password/tenant_id 与后端对齐；新增 `toUserMessage` 统一网络错误兜底；去掉 `OptionalPrincipal` 冗余默认值。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

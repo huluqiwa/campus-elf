@@ -127,6 +127,8 @@ if [[ "${WITH_FRONTEND}" -eq 1 ]]; then
     step "frontend: format:check" bash -c "cd frontend && pnpm format:check"
     step "frontend: build" bash -c "cd frontend && pnpm build"
     step "frontend: audit" audit_frontend
+    # e2e 用例数下限守卫：Playwright 的 testMatch 写错会静默不收集用例（M1-C-UI 审查 MA4）
+    step "frontend: e2e 用例数下限" bash -c "cd frontend && pnpm exec playwright test --list | tail -1 | grep -qE 'Total: (1[2-9]|[2-9][0-9]) tests'"
     if [[ "${WITH_E2E}" -eq 1 ]]; then
       step "frontend: e2e" bash -c "cd frontend && pnpm test:e2e"
     else

@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     jwt_active_kid: str = "k1"
     access_token_ttl_seconds: int = 900
     refresh_token_ttl_seconds: int = 604800
+    # 浏览器端刷新令牌走 HttpOnly Cookie（JS 读不到）；非浏览器客户端仍可用响应体字段
+    auth_cookie_name: str = "campus_refresh_token"
+    auth_cookie_path: str = "/api/v1/auth"
+    auth_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    # 是否要求 HTTPS 才发送 Cookie；staging/production 强制 true（见校验器）
+    auth_cookie_secure: bool = False
+    # 是否在响应体回显刷新令牌：仅开发/测试需要（自动化测试与非浏览器客户端）；
+    # staging/production 必须 false——否则 XSS 可读走长期凭证，抵消 HttpOnly 的意义（审查 MA3）
+    auth_refresh_token_in_body: bool = True
 
     # 邮件（开发用 MailHog：127.0.0.1:1025；生产由 SMTP 服务商提供）
     smtp_host: str = "127.0.0.1"
@@ -105,6 +114,46 @@ class Settings(BaseSettings):
         if self.app_env in {"development", "test"}:
             return self
 
+        # 开发专用开关在非开发环境一律禁止（staging 也按真实部署对待）
+        if self.dev_skeleton_loop_enabled:
+            raise ValueError(
+                f"{self.app_env} 环境禁止开启 DEV_SKELETON_LOOP_ENABLED（空壳 Loop 无认证）"
+            )
+        if self.dev_skip_school_review:
+            raise ValueError(
+                f"{self.app_env} 环境禁止开启 DEV_SKIP_SCHOOL_REVIEW（学校资质必须审核）"
+            )
+
+        if self.app_env == "production":
+            missing = [
+                name
+                for name, value in (
+                    ("DATABASE_URL", self.database_url),
+                    ("PLATFORM_DATABASE_URL", self.platform_database_url),
+                    ("QDRANT_URL", self.qdrant_url),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(f"production 环境缺少必需配置: {', '.join(missing)}")
+
+        # 浏览器 Cookie 必须只能走 HTTPS（本地开发/测试放行，便于 http://127.0.0.1 调试）
+        if not self.auth_cookie_secure:
+            raise ValueError(f"{self.app_env} 环境必须开启 AUTH_COOKIE_SECURE（Cookie 仅走 HTTPS）")
+        if self.auth_refresh_token_in_body:
+            raise ValueError(
+                f"{self.app_env} 环境必须关闭 AUTH_REFRESH_TOKEN_IN_BODY"
+                "（刷新令牌只走 HttpOnly Cookie，避免 XSS 读取）"
+            )
+        if self.auth_cookie_samesite == "none":
+            raise ValueError(f"{self.app_env} 环境禁止 AUTH_COOKIE_SAMESITE=none（跨站请求风险）")
+        expected_cookie_path = f"{self.api_prefix.rstrip('/')}/auth"
+        if self.auth_cookie_path.rstrip("/") != expected_cookie_path:
+            raise ValueError(
+                f"AUTH_COOKIE_PATH 必须为 {expected_cookie_path}（与 API_PREFIX 联动），"
+                f"当前为 {self.auth_cookie_path}"
+            )
+
         # staging/production 都按真实部署对待：密钥必须具备最低强度（TD-073 自检同样对 staging 生效）
         secret = self.jwt_secret.get_secret_value()
         lowered = secret.lower()
@@ -117,25 +166,6 @@ class Settings(BaseSettings):
 
         if self.app_env != "production":
             return self
-
-        if self.dev_skeleton_loop_enabled:
-            raise ValueError(
-                "production 环境禁止开启 DEV_SKELETON_LOOP_ENABLED（空壳 Loop 无认证）"
-            )
-        if self.dev_skip_school_review:
-            raise ValueError("production 环境禁止开启 DEV_SKIP_SCHOOL_REVIEW（学校资质必须审核）")
-
-        missing = [
-            name
-            for name, value in (
-                ("DATABASE_URL", self.database_url),
-                ("PLATFORM_DATABASE_URL", self.platform_database_url),
-                ("QDRANT_URL", self.qdrant_url),
-            )
-            if not value
-        ]
-        if missing:
-            raise ValueError(f"production 环境缺少必需配置: {', '.join(missing)}")
         if not self.smtp_host or self.smtp_host in {"127.0.0.1", "localhost", "mailhog"}:
             raise ValueError("production 环境必须配置真实 SMTP_HOST（禁止本机 MailHog）")
         if not self.smtp_from or self.smtp_from.endswith("@campus-elf.local"):

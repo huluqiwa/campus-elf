@@ -243,6 +243,7 @@ async def get_current_principal(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="首次登录必须修改密码后才能使用其他功能",
+            headers={"X-Auth-Error": "PASSWORD_CHANGE_REQUIRED"},
         )
 
     return Principal(
@@ -258,6 +259,26 @@ async def get_current_principal(
 
 
 CurrentPrincipal = Annotated[Principal, Depends(get_current_principal)]
+
+
+async def get_optional_principal(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> Principal | None:
+    """可选主体：无/无效令牌时返回 None（供"仅凭 HttpOnly Cookie 登出"这类接口使用）。
+
+    注意：这类接口**不得**依赖主体做安全判定——真正凭证是刷新令牌（哈希比对后才撤销）。
+    """
+
+    if not authorization:
+        return None
+    try:
+        return await get_current_principal(request, authorization)
+    except HTTPException:
+        return None
+
+
+OptionalPrincipal = Annotated[Principal | None, Depends(get_optional_principal)]
 
 
 def require_permission(code: str, *, realm: Realm | None = None) -> object:

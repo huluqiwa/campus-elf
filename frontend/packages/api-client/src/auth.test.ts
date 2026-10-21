@@ -1,0 +1,368 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { createAuthSession, toUserMessage } from "./auth";
+
+/** 构造可编排的 fetch 替身：按 URL 后缀匹配处理器，并记录调用顺序。 */
+function fetchStub(
+  handlers: Array<{ match: string; respond: () => Response | Promise<Response> }>,
+): {
+  fetchImpl: typeof fetch;
+  calls: string[];
+} {
+  const calls: string[] = [];
+  const fetchImpl = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    calls.push(url);
+    for (const handler of handlers) {
+      if (url.includes(handler.match)) {
+        return await handler.respond();
+      }
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  return { fetchImpl, calls };
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  } as Response;
+}
+
+function tokenBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    access_token: "access-1",
+    refresh_token: "refresh-1",
+    token_type: "bearer",
+    expires_in: 900,
+    realm: "tenant",
+    must_change_password: false,
+    tenant_id: "11111111-1111-1111-1111-111111111111",
+    roles: ["student"],
+    ...overrides,
+  };
+}
+
+describe("createAuthSession", () => {
+  it("登录成功后发送带 Cookie 的凭据请求并保存内存令牌", async () => {
+    const { fetchImpl, calls } = fetchStub([
+      { match: "/api/v1/auth/login", respond: () => jsonResponse(200, tokenBody()) },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const tokens = await session.loginTenant({
+      schoolCode: "SCH-1",
+      loginId: "S-1",
+      password: "pw",
+    });
+
+    expect(tokens.accessToken).toBe("access-1");
+    expect(tokens.roles).toEqual(["student"]);
+    expect(session.getAccessToken()).toBe("access-1");
+    expect(calls).toEqual(["http://api/api/v1/auth/login"]);
+  });
+
+  it("401 时先刷新一次再重放原请求", async () => {
+    let protectedCalls = 0;
+    const { fetchImpl, calls } = fetchStub([
+      {
+        match: "/api/v1/platform/tenants",
+        respond: () => {
+          protectedCalls += 1;
+          return protectedCalls === 1
+            ? jsonResponse(401, { detail: "登录已过期" })
+            : jsonResponse(200, { items: [] });
+        },
+      },
+      { match: "/api/v1/auth/refresh", respond: () => jsonResponse(200, tokenBody()) },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const result = await session.request<{ items: unknown[] }>("/api/v1/platform/tenants");
+
+    expect(result).toEqual({ items: [] });
+    expect(calls).toEqual([
+      "http://api/api/v1/platform/tenants",
+      "http://api/api/v1/auth/refresh",
+      "http://api/api/v1/platform/tenants",
+    ]);
+  });
+
+  it("并发 401 只触发一次刷新（单飞）", async () => {
+    let refreshCalls = 0;
+    let protectedCalls = 0;
+    const { fetchImpl } = fetchStub([
+      {
+        match: "/api/v1/platform/tenants",
+        respond: () => {
+          protectedCalls += 1;
+          return protectedCalls <= 2
+            ? jsonResponse(401, { detail: "登录已过期" })
+            : jsonResponse(200, { ok: true });
+        },
+      },
+      {
+        match: "/api/v1/auth/refresh",
+        respond: () => {
+          refreshCalls += 1;
+          return jsonResponse(200, tokenBody({ access_token: `access-${refreshCalls + 1}` }));
+        },
+      },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    await Promise.all([
+      session.request("/api/v1/platform/tenants"),
+      session.request("/api/v1/platform/tenants"),
+    ]);
+
+    expect(refreshCalls).toBe(1);
+  });
+
+  it("刷新失败：清空令牌并回调 onUnauthorized，不再重放", async () => {
+    const onUnauthorized = vi.fn();
+    let protectedCalls = 0;
+    const { fetchImpl } = fetchStub([
+      {
+        match: "/api/v1/platform/tenants",
+        respond: () => {
+          protectedCalls += 1;
+          return jsonResponse(401, { detail: "登录已过期" });
+        },
+      },
+      { match: "/api/v1/auth/refresh", respond: () => jsonResponse(401, { detail: "登录已失效" }) },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl, onUnauthorized });
+
+    await expect(session.request("/api/v1/platform/tenants")).rejects.toThrow("过期");
+    expect(protectedCalls).toBe(1);
+    expect(session.getAccessToken()).toBeNull();
+    expect(onUnauthorized).toHaveBeenCalledOnce();
+  });
+
+  it("403 含改密提示 → 回调 onPasswordChangeRequired；其它 403 → onForbidden", async () => {
+    const onPasswordChangeRequired = vi.fn();
+    const onForbidden = vi.fn();
+    const { fetchImpl } = fetchStub([
+      {
+        match: "/api/v1/platform/tenants",
+        respond: () => jsonResponse(403, { detail: "首次登录必须修改密码后才能使用其他功能" }),
+      },
+      {
+        match: "/api/v1/school/teachers",
+        respond: () => jsonResponse(403, { detail: "缺少权限：school.personnel.view" }),
+      },
+    ]);
+    const session = createAuthSession({
+      baseUrl: "http://api",
+      fetchImpl,
+      onPasswordChangeRequired,
+      onForbidden,
+    });
+
+    await expect(session.request("/api/v1/platform/tenants")).rejects.toThrow("修改密码");
+    await expect(session.request("/api/v1/school/teachers")).rejects.toThrow("缺少权限");
+
+    expect(onPasswordChangeRequired).toHaveBeenCalledOnce();
+    expect(onForbidden).toHaveBeenCalledOnce();
+  });
+
+  it("restore：Cookie 静默恢复；无 Cookie 时返回 null 且不回调未授权", async () => {
+    const onUnauthorized = vi.fn();
+    const okStub = fetchStub([
+      { match: "/api/v1/auth/refresh", respond: () => jsonResponse(200, tokenBody()) },
+    ]);
+    const okSession = createAuthSession({
+      baseUrl: "http://api",
+      fetchImpl: okStub.fetchImpl,
+      onUnauthorized,
+    });
+    await expect(okSession.restore()).resolves.toMatchObject({ accessToken: "access-1" });
+
+    const failStub = fetchStub([
+      { match: "/api/v1/auth/refresh", respond: () => jsonResponse(401, { detail: "无 Cookie" }) },
+    ]);
+    const failSession = createAuthSession({
+      baseUrl: "http://api",
+      fetchImpl: failStub.fetchImpl,
+      onUnauthorized,
+    });
+    await expect(failSession.restore()).resolves.toBeNull();
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it("登出调用接口并清空内存令牌（即使接口失败）", async () => {
+    const { fetchImpl } = fetchStub([
+      { match: "/api/v1/auth/login", respond: () => jsonResponse(200, tokenBody()) },
+      { match: "/api/v1/auth/logout", respond: () => jsonResponse(500, { detail: "boom" }) },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+    await session.loginTenant({ schoolCode: "SCH-1", loginId: "S-1", password: "pw" });
+
+    await session.logout();
+
+    expect(session.getAccessToken()).toBeNull();
+  });
+
+  it("改密成功后用新令牌替换内存令牌", async () => {
+    const { fetchImpl } = fetchStub([
+      {
+        match: "/api/v1/auth/change-password",
+        respond: () =>
+          jsonResponse(200, tokenBody({ access_token: "access-2", must_change_password: false })),
+      },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const tokens = await session.changePassword("old-password", "New-Password-123");
+
+    expect(tokens.accessToken).toBe("access-2");
+    expect(session.getAccessToken()).toBe("access-2");
+  });
+});
+
+describe("createAuthSession（审查修复回归）", () => {
+  it("改密请求必须带 Authorization 头（B1）", async () => {
+    const seen: Array<{ url: string; auth: string | undefined }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers ?? {});
+      seen.push({ url: String(input), auth: headers.get("authorization") ?? undefined });
+      if (String(input).includes("/auth/login")) {
+        return jsonResponse(200, tokenBody());
+      }
+      return jsonResponse(200, tokenBody({ access_token: "access-2" }));
+    }) as typeof fetch;
+
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+    await session.loginTenant({ schoolCode: "SCH-1", loginId: "S-1", password: "pw" });
+    await session.changePassword("old", "New-Password-123");
+
+    const change = seen.find((item) => item.url.includes("/auth/change-password"));
+    expect(change?.auth).toBe("Bearer access-1");
+    const login = seen.find((item) => item.url.includes("/auth/login"));
+    expect(login?.auth).toBeUndefined();
+  });
+
+  it("无本地令牌时登出仍调用后端（Cookie 才是凭证）", async () => {
+    const calls: string[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return jsonResponse(200, { status: "ok" });
+    }) as typeof fetch;
+
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+    await session.logout();
+
+    expect(calls).toEqual(["http://api/api/v1/auth/logout"]);
+  });
+
+  it("/auth/me 在 access 过期时先刷新再重放（Minor 3）", async () => {
+    let meCalls = 0;
+    const { fetchImpl } = fetchStub([
+      {
+        match: "/api/v1/auth/me",
+        respond: () => {
+          meCalls += 1;
+          return meCalls === 1
+            ? jsonResponse(401, { detail: "登录已过期" })
+            : jsonResponse(200, {
+                user_id: "u-1",
+                realm: "tenant",
+                tenant_id: null,
+                must_change_password: false,
+                roles: [],
+                permissions: [],
+              });
+        },
+      },
+      { match: "/api/v1/auth/refresh", respond: () => jsonResponse(200, tokenBody()) },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const me = await session.me();
+
+    expect(me.userId).toBe("u-1");
+    expect(meCalls).toBe(2);
+  });
+
+  it("403 携带 X-Auth-Error 时优先按机器码分流（Minor 4）", async () => {
+    const onPasswordChangeRequired = vi.fn();
+    const fetchImpl = (async () =>
+      ({
+        ok: false,
+        status: 403,
+        headers: new Headers({ "X-Auth-Error": "PASSWORD_CHANGE_REQUIRED" }),
+        json: async () => ({ detail: "some-translated-message" }),
+      }) as Response) as typeof fetch;
+    const session = createAuthSession({
+      baseUrl: "http://api",
+      fetchImpl,
+      onPasswordChangeRequired,
+    });
+
+    await expect(session.request("/api/v1/school/teachers")).rejects.toThrow(
+      "some-translated-message",
+    );
+    expect(onPasswordChangeRequired).toHaveBeenCalledOnce();
+  });
+
+  it("令牌更新触发 onTokensRefreshed（供 UI 同步）", async () => {
+    const onTokensRefreshed = vi.fn();
+    const { fetchImpl } = fetchStub([
+      { match: "/api/v1/auth/login", respond: () => jsonResponse(200, tokenBody()) },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl, onTokensRefreshed });
+
+    await session.loginTenant({ schoolCode: "SCH-1", loginId: "S-1", password: "pw" });
+
+    expect(onTokensRefreshed).toHaveBeenCalledOnce();
+    expect(onTokensRefreshed.mock.calls[0][0].accessToken).toBe("access-1");
+  });
+});
+
+describe("改密 401 刷新重放（第二轮 Minor 1）", () => {
+  it("改密遇 401 时先刷新再重放，且重放带新令牌", async () => {
+    const calls: string[] = [];
+    const authHeaders: Array<string | null> = [];
+    let changeCalls = 0;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(url);
+      const headers = new Headers(init?.headers ?? {});
+      if (url.includes("/auth/login")) {
+        return jsonResponse(200, tokenBody({ access_token: "stale-access" }));
+      }
+      if (url.includes("/auth/refresh")) {
+        return jsonResponse(200, tokenBody({ access_token: "fresh-access" }));
+      }
+      if (url.includes("/auth/change-password")) {
+        changeCalls += 1;
+        authHeaders.push(headers.get("authorization"));
+        return changeCalls === 1
+          ? jsonResponse(401, { detail: "登录已过期" })
+          : jsonResponse(200, tokenBody({ access_token: "after-change" }));
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+    await session.loginTenant({ schoolCode: "SCH-1", loginId: "S-1", password: "pw" });
+    const tokens = await session.changePassword("old", "New-Password-123");
+
+    expect(tokens.accessToken).toBe("after-change");
+    expect(calls.filter((url) => url.includes("/auth/refresh"))).toHaveLength(1);
+    expect(changeCalls).toBe(2);
+    expect(authHeaders).toEqual(["Bearer stale-access", "Bearer fresh-access"]);
+  });
+
+  it("toUserMessage：网络/技术文案走兜底，业务文案原样返回", () => {
+    expect(toUserMessage(new Error("Failed to fetch"), "登录失败，请检查网络后重试")).toBe(
+      "登录失败，请检查网络后重试",
+    );
+    expect(toUserMessage(new Error("学校编号、账号或密码不正确"), "兜底")).toBe(
+      "学校编号、账号或密码不正确",
+    );
+  });
+});

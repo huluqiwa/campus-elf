@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { createApiClient } from "@campus-elf/api-client";
 import { onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 
+import { useAuthStore } from "../stores/auth";
+
+const router = useRouter();
+const auth = useAuthStore();
 const health = ref("检测中…");
-// 默认空 baseUrl = 同源相对路径，由 Vite/Nginx 代理 /health 与 /api 到后端。
-const api = createApiClient({
-  baseUrl: import.meta.env.VITE_API_BASE_URL ?? "",
-});
+const api = createApiClient({ baseUrl: import.meta.env.VITE_API_BASE_URL ?? "" });
 
 onMounted(async () => {
   try {
@@ -16,33 +18,51 @@ onMounted(async () => {
     health.value = "后端未连接（M0 脚手架）";
   }
 });
+
+async function logout(): Promise<void> {
+  await auth.logout();
+  await router.replace({ name: "login" });
+}
 </script>
 
 <template>
-  <div class="page">
-    <h1>校园陪伴精灵 · C 端 H5 脚手架</h1>
-    <p>AI 对话、知识库问答、请假与消息将在后续里程碑接入。</p>
+  <div class="campus-page">
+    <van-nav-bar title="校园陪伴精灵" />
+    <h1>C 端 H5 脚手架</h1>
     <van-cell-group inset>
       <van-cell title="后端健康" :value="health" />
+      <van-cell title="当前用户" :value="auth.user?.userId ?? '-'" />
     </van-cell-group>
+    <div class="actions">
+      <van-button
+        round
+        block
+        plain
+        data-testid="go-change-password"
+        @click="router.push({ name: 'change-password' })"
+      >
+        修改密码
+      </van-button>
+      <van-button round block type="primary" class="logout" data-testid="logout" @click="logout">
+        退出登录
+      </van-button>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.page {
-  padding: 24px 16px;
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
+.campus-page {
+  padding-bottom: 32px;
 }
 h1 {
-  font-size: 20px;
-  margin-bottom: 8px;
+  text-align: center;
+  font-size: 18px;
+  margin: 16px 0;
 }
-p {
-  color: #666;
-  margin-bottom: 24px;
+.actions {
+  padding: 16px;
+}
+.logout {
+  margin-top: 12px;
 }
 </style>

@@ -361,7 +361,8 @@ async def test_bs_m1c_login_response_contains_tenant_and_roles(client: AsyncClie
         json={"realm": "platform", "account": "ops-full", "password": TEST_PLATFORM_PASSWORD},
     )
     assert platform_body.status_code == 200
-    assert platform_body.json()["tenant_id"] is None
+    # 平台令牌没有 tenant_id：响应按 exclude_none 省略该字段
+    assert platform_body.json().get("tenant_id") is None
     # roles 是角色码（不是权限码）；平台账号必须至少有一个角色
     assert platform_body.json()["roles"], platform_body.json()
     me = await client.get(
@@ -563,3 +564,97 @@ async def test_bs_m1c_tenant_token_cannot_reach_platform_routes(client: AsyncCli
             ).scalars().all()
         )
     assert any("realm_mismatch" in item for item in reasons)
+
+
+async def test_bs_m1c_refresh_cookie_flow(client: AsyncClient) -> None:
+    """M1-C-UI：刷新令牌走 HttpOnly Cookie——登录下发、仅凭 Cookie 可刷新、登出清除。"""
+
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={
+            "realm": "tenant",
+            "school_code": SCHOOL_CODE,
+            "login_id": "S-9001",
+            "password": TENANT_PASSWORD,
+        },
+    )
+    assert login.status_code == 200, login.text
+    set_cookie = login.headers.get("set-cookie", "")
+    assert "campus_refresh_token=" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert login.cookies.get("campus_refresh_token")
+
+    # 不传 body、仅凭 Cookie 刷新（默认 httpx 客户端会在同一 cookie jar 内自动携带）
+    refreshed = await client.post("/api/v1/auth/refresh", json={})
+    assert refreshed.status_code == 200, refreshed.text
+    assert "campus_refresh_token=" in refreshed.headers.get("set-cookie", "")
+
+    access = refreshed.json()["access_token"]
+    logout = await client.post(
+        "/api/v1/auth/logout",
+        json={},
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert logout.status_code == 200
+    # 清除 Cookie：Set-Cookie 中 max-age=0 或 expires 在过去
+    cleared = logout.headers.get("set-cookie", "").lower()
+    assert "campus_refresh_token=" in cleared and ("max-age=0" in cleared or "expires=" in cleared)
+
+
+async def test_bs_m1c_refresh_without_token_is_rejected(client: AsyncClient) -> None:
+    """既无 body 也无 Cookie 的刷新请求 → 401（不误用他人凭证）。"""
+
+    client.cookies.clear()
+    response = await client.post("/api/v1/auth/refresh", json={})
+    assert response.status_code == 401
+
+
+async def test_bs_m1c_change_password_refreshes_cookie(client: AsyncClient) -> None:
+    """MA1：改密响应必须下发新的刷新 Cookie，且随后仅凭 Cookie 可刷新。"""
+
+    body = await _tenant_login(client)
+    access = str(body["access_token"])
+
+    changed = await client.post(
+        "/api/v1/auth/change-password",
+        json={"current_password": TENANT_PASSWORD, "new_password": NEW_PASSWORD},
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert changed.status_code == 200, changed.text
+    assert "campus_refresh_token=" in changed.headers.get("set-cookie", "")
+
+    refreshed = await client.post("/api/v1/auth/refresh", json={})
+    assert refreshed.status_code == 200, refreshed.text
+
+
+async def test_bs_m1c_logout_with_cookie_only(client: AsyncClient) -> None:
+    """MA2：access 过期/缺失时，仅凭 Cookie 也必须能登出并撤销家族、清除 Cookie。"""
+
+    await _tenant_login(client)
+    assert client.cookies.get("campus_refresh_token")
+
+    # 不带 Authorization（模拟 access 已过期）
+    logout = await client.post("/api/v1/auth/logout", json={})
+    assert logout.status_code == 200, logout.text
+    cleared = logout.headers.get("set-cookie", "").lower()
+    assert "campus_refresh_token=" in cleared
+    assert "max-age=0" in cleared or "expires=" in cleared
+
+    # 家族已撤销：Cookie 里的刷新令牌不再可用
+    after = await client.post("/api/v1/auth/refresh", json={})
+    assert after.status_code == 401
+
+    actions = await _audit_actions()
+    assert "auth.logout" in actions
+
+
+async def test_bs_m1c_gate_403_carries_machine_readable_header(client: AsyncClient) -> None:
+    """Minor 4：首登门禁的 403 带 X-Auth-Error 头，前端按机器码分流。"""
+
+    body = await _tenant_login(client)
+    gated = await client.get(
+        "/api/v1/platform/tenants",
+        headers={"Authorization": f"Bearer {body['access_token']}"},
+    )
+    assert gated.status_code == 403
+    assert gated.headers.get("x-auth-error") == "PASSWORD_CHANGE_REQUIRED"

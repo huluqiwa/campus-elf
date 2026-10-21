@@ -71,6 +71,8 @@ def _production_settings(**overrides: object) -> Settings:
         "app_env": "production",
         "redis_url": "redis://127.0.0.1:6379/0",
         "jwt_secret": "production-test-jwt-secret-0123456789abcdef",
+        "auth_cookie_secure": True,
+        "auth_refresh_token_in_body": False,
         "database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
         "platform_database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
         "migration_database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
@@ -149,6 +151,8 @@ def _staging_settings(**overrides: object) -> Settings:
         "platform_database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
         "qdrant_url": "http://127.0.0.1:6333",
         "jwt_secret": "9f" * 32,
+        "auth_cookie_secure": True,
+        "auth_refresh_token_in_body": False,
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
@@ -183,3 +187,35 @@ def test_development_skips_jwt_strength_check() -> None:
     )
 
     assert settings.app_env == "development"
+
+
+def test_staging_requires_secure_refresh_cookie() -> None:
+    """staging/production 的刷新令牌 Cookie 必须仅走 HTTPS（本地开发/测试除外）。"""
+
+    with pytest.raises(ValidationError, match="AUTH_COOKIE_SECURE"):
+        _staging_settings(auth_cookie_secure=False)
+
+    with pytest.raises(ValidationError, match="AUTH_COOKIE_SECURE"):
+        _production_settings(auth_cookie_secure=False)
+
+
+def test_staging_requires_refresh_token_only_in_cookie() -> None:
+    """staging/production 不得在响应体回显刷新令牌，且禁止 SameSite=none、Cookie 路径需联动。"""
+
+    with pytest.raises(ValidationError, match="AUTH_REFRESH_TOKEN_IN_BODY"):
+        _staging_settings(auth_refresh_token_in_body=True)
+
+    with pytest.raises(ValidationError, match="SAMESITE"):
+        _staging_settings(auth_cookie_samesite="none")
+
+    with pytest.raises(ValidationError, match="AUTH_COOKIE_PATH"):
+        _staging_settings(auth_cookie_path="/auth")
+
+
+def test_production_cookie_settings_defaults_are_valid() -> None:
+    """默认 Cookie 配置（lax + /api/v1/auth + 不回显）可通过生产校验。"""
+
+    settings = _production_settings()
+
+    assert settings.auth_refresh_token_in_body is False
+    assert settings.auth_cookie_path == "/api/v1/auth"

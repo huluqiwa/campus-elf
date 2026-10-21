@@ -352,6 +352,7 @@ audit_logs: 仅追加，prev_hash/hash 链
 **令牌契约**
 - 访问令牌：HS256 JWT，15 分钟；claim `sub/realm/tenant_id/jti/token_version/must_change_password/iss/aud/exp`；`aud` 按 realm 区分（`campus-elf-tenant` / `campus-elf-platform`），跨 realm 混用直接拒绝（TD-074）。
 - 刷新令牌：`v1t.<tenant_id>.<jti>.<secret>`（租户）/ `v1p.<jti>.<secret>`（平台），仅存 SHA-256 哈希；7 天有效，每次刷新轮换。
+- 浏览器端刷新令牌走 **HttpOnly + Secure(staging/production) + SameSite=Lax Cookie**（路径限定 `/api/v1/auth`，JS 不可读）；登录/刷新下发、刷新与登出可仅凭 Cookie。响应体**仅在开发/测试**回显 refresh（`AUTH_REFRESH_TOKEN_IN_BODY=true`）；staging/production 强制关闭，避免 XSS 读走长期凭证（M1-C-UI 审查 MA3）。
 - 会话与设备（A31）：登录链即"会话"（family）；访问令牌增加 `sid`（会话 id）。服务端用 Redis 会话标记 `{prefix}:auth:session:{realm}:{sid}`（TTL=刷新令牌有效期）判定会话是否仍有效——登出/被踢/下线即删除标记，**下一次请求立刻 401**，不等 15 分钟。同账号同时在线设备数按 realm 受限（默认 C 端 3、校方 3、平台 2，配置化）；超限登录踢"最久未使用"的会话并审计 `auth.session.kicked`。设备标签由 UA 在服务端粗粒度解析（如"Chrome / Windows"），IP/UA 只存哈希，接口不回显明文。
 - 撤销：登出/改密即时失效——`token_version` 自增使所有旧访问令牌失效，刷新令牌按家族撤销；登出的访问令牌另写 Redis 撤销标记（TTL=剩余有效期）。
 - 身份/权限每次请求从数据库读取（不缓存快照）：停用账号、权限变更、`token_version` 变化立即生效。

@@ -21,7 +21,7 @@ export default defineConfig({
     },
     {
       name: "campus",
-      testMatch: /campus\.spec\.ts/,
+      testMatch: /campus.*\.spec\.ts/,
       use: {
         ...devices["Pixel 5"],
         channel: "chrome",
