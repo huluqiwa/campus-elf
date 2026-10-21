@@ -4,25 +4,23 @@
 
 ## 当前状态
 
-**当前阶段：M0 进行中。**
+**当前阶段：M1 租户与身份进行中。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
 
 已完成：
 
-- 需求对齐与逐项澄清（A1–A29、H1–H4、S1–S2、R1–R8、L1–L6、K1–K3）
-- 第二阶段文档
-- 配置模板与 Git 忽略规则
-- 文档确认
-- **M0-A：Git 初始化、Python 3.13 后端最小骨架、健康检查、测试、代码审查**
-- **M0-B：Docker Compose core/rag 依赖栈**——PostgreSQL 16、Redis 7.4、MinIO（源码构建固定 RELEASE）、MailHog、ClamAV、Qdrant 1.19.2、TEI 1.9.4 embed/rerank 全部 healthy；TEI 返回 1024 维向量与重排分数。
-- **M0-C：Harness 骨架**——契约、能力/工具注册表、工具执行器（租户/权限/只读/可用性/数据范围/schema/超时）、trace 脱敏、HMAC 审计链、版本化 Prompt 注册表；48 个测试全绿，两轮独立审查 Major 已修复。
+- **M0 基座**（M0-A~M0-F）：Git/后端骨架/健康检查、Compose 依赖栈（PG 16 / Redis 7.4 / MinIO / MailHog / ClamAV / Qdrant 1.19.2 / TEI 1.9.4）、Harness 骨架、前端脚手架、兼容性与外部组件验证（MinerU 4.0.12 三档真实解析、Langfuse 4.63.0 自托管冒烟、Arq 3.13 兼容）、独立测试栈与 4 条 GitHub Actions、CPU 嵌入/重排基准。验收报告：`docs/m0-acceptance.md`。
+- **M1-A 租户基座**：13 张表 + 复合外键、RLS（FORCE + 按角色策略 + fail-closed）、三连接与双应用角色分离、仓储/请求上下文/中间件、审计仅追加；两轮独立审查通过。
+- **M1-B 学校注册与平台审核（TEN-01/02/03）**：公开注册（multipart 资质凭证）、平台审核与原子开通（`SECURITY DEFINER` 审核函数）、学校编号、超管账号与初始密码邮件、审核记录与审计；五轮独立审查通过（含跨租后门、TEMP 表遮蔽、PUBLIC 授权等修复）。
+- **M1-C 三端登录与令牌后端（AUTH-01/02）**：JWT 15 分钟 + 刷新令牌 7 天轮换、重用检测撤销家族、登出/改密即时失效、realm↔数据库连接强制绑定、首登改密门禁、平台审核改真实账号鉴权（删除开发令牌）、注册提交收进函数、过期令牌清理任务；三轮独立审查通过。
+- **M1-C-UI 三端登录页与强制改密页**：admin（身份切换）+ campus 登录页、强制改密页、路由守卫、HttpOnly 刷新 Cookie（生产强制 Secure / 不回显 refresh / 禁 SameSite=none）、统一 401/403 处理；两轮独立审查通过。前端 20 单测 + 12 Playwright 全绿。
 
-- **M0-D：前端脚手架**——pnpm workspace、apps/admin（Element Plus）、apps/campus（Vant 4）、packages/api-client/ui/config；`pnpm build`/`typecheck` 通过，Playwright 冒烟 2 passed。
+当前门禁：后端 **238 passed**、前端 **20 单测 + 12 E2E 全绿**、本地 `bash scripts/ci.sh` 与远端 4 条工作流全绿。
 
-- **M0-E：兼容性与外部组件验证**——分组依赖（web/db、rag、agent、auth）导入与版本断言通过；Ragas/Langfuse 隔离到独立 `evals/` uv 项目（`langchain-community<0.4`）；Arq 0.28 在真实 Redis 上执行任务通过；Langfuse 4.63.0 自托管栈健康并可用 `evals/scripts/langfuse_smoke.py` 复现 trace 证据；MinerU 4.0.12 自定义镜像（非 root、模型源 `auto`、VLM llama-cpp）standard/basic/flash 三档真实解析通过，6GB 显存占用 <500MiB 未降级。
+进行中/待做：
 
-- **M0-F：测试基础设施与 M0 收口**——`/health/ready` 逐项探活（PG/Redis/Qdrant，失败 503）、structlog/uvicorn 统一单行 JSON、空壳 Loop SSE（`meta/step/done` + `stop_reason` + 本地 trace 必发，生产默认关）；独立测试栈（`deploy/docker-compose.test.yml` + `scripts/test-stack.sh`）与业务场景骨架 BS-M0-01；4 个 GitHub Actions 工作流 + 本地等效 `scripts/ci.sh`；CPU 嵌入/重排基准（`docs/benchmarks-m0.md`，暴露重排延迟风险 TD-056）；前端 ESLint/Prettier/Vitest（5 passed）/Element Plus 按需（admin JS 1.03MB→112KB、CSS 361KB→8.94KB）/e2e mock 失败态（5 passed）；后端 84 passed；依赖安全审计清零（cryptography 50.0.2、pytest 9.1.1、aiosmtplib 5.1.3）。**M0 验收报告：`docs/m0-acceptance.md`。**
-
-待完成：M1 租户与身份（下一里程碑）。
+- **M1-C2 会话设备管理（AUTH-06，策略 C）**：决策与四项细节已确认（限量 + 退出其它设备 + 被踢立即失效），设计简报 `docs/design-briefs/M1-C2-session-devices.md`，**待实现**。
+- **M1-D** 密码策略/历史/重置、失败锁定、MFA；**M1-E** RBAC 与数据范围；**M1-F** 审计哈希链；随后出 **M1 验收报告**（含真实后端全栈 E2E，TD-110）。
+- **M2/M3/M4** 未开始；其中 SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。
 
 ## 技术栈（已锁定）
 
