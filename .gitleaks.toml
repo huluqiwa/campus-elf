@@ -21,4 +21,10 @@ regexes = [
   # 历史提交里的测试假密钥（M0-C 时期的内联常量，后已集中到 tests/support/fakes.py；
   # 历史无法改写，故按精确字符串放行）。
   "test-secret-key-123456",
+  # M1-C 认证业务测试的测试口令常量（仅用于测试种子账号；非真实凭证）。
+  # 仍按精确字符串放行，不做目录豁免。
+  "Student-Init-Pass-1",
+  "Student-New-Pass-22",
+  "Tenant-Test-Pass-1",
+  "Platform-Test-Pass-1",
 ]

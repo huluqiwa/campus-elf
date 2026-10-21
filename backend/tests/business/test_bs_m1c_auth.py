@@ -1,7 +1,10 @@
 """业务场景 BS-M1-C：三端登录、首登改密门禁、刷新重用、登出即时失效、平台审核鉴权。"""
 
 import os
+import shutil
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -82,6 +85,14 @@ async def client(
     monkeypatch.setenv("DATABASE_URL", database_url("tenant"))
     monkeypatch.setenv("PLATFORM_DATABASE_URL", database_url("platform"))
     monkeypatch.setenv("REDIS_URL", os.environ["TEST_REDIS_URL"])
+    # 测试栈 SMTP/MailHog 与本地对象存储：不依赖 127.0.0.1:1025 等本机默认端口
+    monkeypatch.setenv("SMTP_HOST", os.environ["TEST_SMTP_HOST"])
+    monkeypatch.setenv("SMTP_PORT", os.environ["TEST_SMTP_PORT"])
+    monkeypatch.setenv("SMTP_FROM", "no-reply@campus-elf.test")
+    object_dir = Path(os.environ["TEST_OBJECT_STORE_DIR"]) / uuid4().hex
+    object_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("OBJECT_STORE_BACKEND", "local")
+    monkeypatch.setenv("OBJECT_STORE_DIR", str(object_dir))
     monkeypatch.setenv("DEV_SKIP_SCHOOL_REVIEW", "false")
     get_settings.cache_clear()
     await revocation.reset_client()
@@ -93,6 +104,7 @@ async def client(
     await revocation.reset_client()
     await dispose_engine()
     get_settings.cache_clear()
+    shutil.rmtree(object_dir, ignore_errors=True)
 
 
 async def _tenant_login(client: AsyncClient, *, password: str = TENANT_PASSWORD) -> dict[str, object]:
