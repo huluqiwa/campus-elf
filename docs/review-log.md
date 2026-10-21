@@ -249,6 +249,7 @@
 - 修复：见 `docs/design-briefs/M1-C-UI-login-pages.md` §8 的修复清单（含新增回归：改密带鉴权头、仅 Cookie 登出、改密换 Cookie、X-Auth-Error 分流、有状态 mock、E2E 用例数下限守卫）。
 - 复测：api-client **20 passed**、Playwright **12 passed**、后端全量 **238 passed**、lint/format/typecheck/build 全绿。
 - 第二轮：**通过**（0 Blocker / 0 Major / 6 Minor）。实测确认：改密带 Bearer 且下发新 Cookie、仅凭 Cookie 可刷新；登出四种凭证形态（有效 Bearer / 仅 Cookie / 伪造 Bearer + 有效 Cookie / 无凭证）都安全且清 Cookie、不误撤销他人；staging 实测响应体不含 refresh 且 Cookie 带 Secure；E2E 收集 12 条（含 campus-login）并有用例数下限守卫。
+- 远端 CI：frontend 工作流修了两处自身缺陷（守卫步骤的 YAML 标量、testMatch 被仓库路径误命中），最终四条工作流全绿。
 - 第二轮 Minor 收口：改密接入 401 刷新重放；设计文档与 `.env.example` 补 `AUTH_REFRESH_TOKEN_IN_BODY`；登出 E2E 去掉重复 route 并补拦截断言；有状态 mock 的 must_change_password/tenant_id 与后端对齐；新增 `toUserMessage` 统一网络错误兜底；去掉 `OptionalPrincipal` 冗余默认值。
 
 ## 高风险功能复审记录
