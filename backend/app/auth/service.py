@@ -134,16 +134,16 @@ _SQL: dict[Realm, dict[str, str]] = {
             "     or locked_until is not null)"
         ),
         "select_password_history": (
-            "select password_hash from password_history "
+            "select password_hash from password_history "  # nosec B105 - SQL 文本，非口令
             "where tenant_id = :tid and user_id = :uid "
             "order by created_at desc, id desc limit :limit"
         ),
         "insert_password_history": (
-            "insert into password_history (tenant_id, user_id, password_hash) "
+            "insert into password_history (tenant_id, user_id, password_hash) "  # nosec B105
             "values (:tid, :uid, :hash)"
         ),
         "trim_password_history": (
-            "delete from password_history "
+            "delete from password_history "  # nosec B105 - SQL 文本，非口令
             "where tenant_id = :tid and user_id = :uid and id not in ("
             "  select id from password_history "
             "  where tenant_id = :tid and user_id = :uid "
@@ -171,11 +171,11 @@ _SQL: dict[Realm, dict[str, str]] = {
             "order by created_at desc, id desc limit 1"
         ),
         "invalidate_reset_tokens": (
-            "update password_reset_tokens set used_at = now() "
+            "update password_reset_tokens set used_at = now() "  # nosec B105 - SQL 文本，非口令
             "where tenant_id = :tid and user_id = :uid and used_at is null"
         ),
         "insert_reset_token": (
-            "insert into password_reset_tokens "
+            "insert into password_reset_tokens "  # nosec B105 - SQL 文本，非口令
             "(tenant_id, user_id, token_hash, expires_at, request_ip_hash) "
             "values (:tid, :uid, :hash, :expires_at, :ip_hash)"
         ),
@@ -184,7 +184,7 @@ _SQL: dict[Realm, dict[str, str]] = {
             "where tenant_id = :tid and token_hash = :hash"
         ),
         "consume_reset_token": (
-            "update password_reset_tokens set used_at = now() "
+            "update password_reset_tokens set used_at = now() "  # nosec B105 - SQL 文本，非口令
             "where tenant_id = :tid and id = :id and used_at is null returning id"
         ),
     },
@@ -244,16 +244,16 @@ _SQL: dict[Realm, dict[str, str]] = {
             "     or locked_until is not null)"
         ),
         "select_password_history": (
-            "select password_hash from platform_password_history "
+            "select password_hash from platform_password_history "  # nosec B105 - SQL 文本，非口令
             "where platform_user_id = :uid "
             "order by created_at desc, id desc limit :limit"
         ),
         "insert_password_history": (
-            "insert into platform_password_history (platform_user_id, password_hash) "
+            "insert into platform_password_history (platform_user_id, password_hash) "  # nosec B105
             "values (:uid, :hash)"
         ),
         "trim_password_history": (
-            "delete from platform_password_history "
+            "delete from platform_password_history "  # nosec B105 - SQL 文本，非口令
             "where platform_user_id = :uid and id not in ("
             "  select id from platform_password_history "
             "  where platform_user_id = :uid "
@@ -279,11 +279,11 @@ _SQL: dict[Realm, dict[str, str]] = {
             "order by created_at desc, id desc limit 1"
         ),
         "invalidate_reset_tokens": (
-            "update platform_password_reset_tokens set used_at = now() "
+            "update platform_password_reset_tokens set used_at = now() "  # nosec B105 - SQL 文本，非口令
             "where platform_user_id = :uid and used_at is null"
         ),
         "insert_reset_token": (
-            "insert into platform_password_reset_tokens "
+            "insert into platform_password_reset_tokens "  # nosec B105 - SQL 文本，非口令
             "(platform_user_id, token_hash, expires_at, request_ip_hash) "
             "values (:uid, :hash, :expires_at, :ip_hash)"
         ),
@@ -292,7 +292,7 @@ _SQL: dict[Realm, dict[str, str]] = {
             "from platform_password_reset_tokens where token_hash = :hash"
         ),
         "consume_reset_token": (
-            "update platform_password_reset_tokens set used_at = now() "
+            "update platform_password_reset_tokens set used_at = now() "  # nosec B105 - SQL 文本，非口令
             "where id = :id and used_at is null returning id"
         ),
     },
