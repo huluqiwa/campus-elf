@@ -285,6 +285,7 @@
 - 第五轮复审：**通过**（0 Blocker / 0 Major / 3 Minor）。实测：白名单外伪造 XFF 被忽略、白名单内取首值、畸形头回退；申请/确认超限均在审计/建令牌/解析前拦截，失败审计计数 2→2；429 带 `Retry-After`；长账号 CLI 可创建且初始密码不含账号，改邮箱与作废令牌同事务；迁移 downgrade 先归一化再恢复 CHECK，RLS/授权齐备，`alembic check` 无漂移；令牌 SHA-256/30 分钟/单次/并发一胜/三类变更作废；锁定并发 5 失败 + 1 锁定。
 - 第五轮 Minor 收口：删除 `service.py` 未使用的 bcrypt 长度辅助函数；spec/design 中“初始密码 12 位”改为“默认 12 位、平台账号按账号长度加长”；`Retry-After` 采用整窗秒数（保守值）记入 TD-121，待 M6 网关限流统一返回精确剩余 TTL。
 - 最终门禁：后端 **348 passed**、`ruff check`/`mypy`（106 文件）/`alembic check` 全绿；前端 **25 单测 + 22 E2E**、lint/format/typecheck/build 全绿。
+- 远端 CI：`backend` #39669833089 success、`frontend` #39669067278 success、`security` #39669833371 success（首轮 #39669067241 因 bandit 将 10 条密码表 SQL 字面量误报 B105 失败；仅对这些 SQL 行加 `# nosec B105` 后通过）；`evals` 未触发（无相关路径改动）。
 
 ## 高风险功能复审记录
 

@@ -254,3 +254,4 @@
 - 结论：**通过**（0 Blocker / 0 Major / 3 Minor）。代理 IP 信任模型、申请/确认超限不写审计、429 `Retry-After`、长账号 CLI、迁移往返、令牌生命周期、锁定并发与文档计数均实测成立。
 - Minor 收口：删除未使用的 bcrypt 长度辅助函数；spec/design 初始密码表述改为“默认 12 位、平台账号按账号长度加长”；`Retry-After` 精确剩余 TTL 记入 TD-121（M6 网关限流统一处理）。
 - 最终门禁：后端 348 passed、ruff/mypy/alembic 全绿；前端 25 单测 + 22 E2E、lint/format/typecheck/build 全绿。
+- 远端 CI：backend/frontend/security 均绿；security 首轮 bandit 将密码表 SQL 误报 B105，精确注解后通过。

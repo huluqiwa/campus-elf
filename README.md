@@ -16,7 +16,7 @@
 - **M1-C2 会话设备管理（AUTH-06，策略 C）**：访问令牌 `sid` + Redis 会话标记实现被踢即时失效；租户 3 / 平台 2 台设备上限、超限踢最久未用；设备列表、单台/退出其它设备；跨用户/跨租统一 404 并写 `auth.session.revoke_denied`；登出按 family 去重审计、Redis 故障 best-effort；五轮独立审查通过（迁移 `d4e6f8a0b2c1`）。
 - **M1-D1 密码与锁定（AUTH-03 员工/平台、AUTH-05）**：密码策略（10~128 字符且 ≤72 UTF-8 字节、3 类字符、不含登录名）、最近 5 次历史、bcrypt cost 12；5 次失败锁 15 分钟；员工/平台邮件重置（30 分钟单次令牌、fragment 链接、申请/确认 IP 限流、后台发信、并发单次消费）；平台账号用 `python -m app.platform_admin` 初始化/维护邮箱；admin/campus 忘记密码与重置页；迁移 `b2d4f6a8c0e1`。学生校管重置按计划 M2 交付。
 
-当前门禁：后端 **348 passed**、前端 **25 单测 + 22 E2E 全绿**、`ruff`/`mypy`/`alembic check` 全绿；M1-D1 第五轮独立复审已通过，待提交与远端 CI。
+当前门禁：后端 **348 passed**、前端 **25 单测 + 22 E2E 全绿**、`ruff`/`mypy`/`alembic check` 全绿；M1-D1 已通过第五轮独立复审与远端 CI。
 
 进行中/待做：
 

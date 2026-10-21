@@ -16,7 +16,7 @@
 | M1 | M1-C 三端登录与令牌**后端**（AUTH-01/02） | ✅ 完成（三轮审查通过） |
 | M1 | M1-C-UI 三端登录页/强制改密页/守卫/HttpOnly 刷新 Cookie | ✅ 完成（两轮审查通过） |
 | M1 | M1-C2 会话设备管理（AUTH-06，策略 C） | ✅ 完成（五轮审查通过；设备限额/列表/下线/退出其它/被踢即时失效；简报 `docs/design-briefs/M1-C2-session-devices.md`） |
-| M1 | M1-D1 密码策略/历史/邮件重置、失败锁定（AUTH-03 员工/平台部分、AUTH-05） | 🔄 第五轮复审通过（348 passed），待提交/远端 CI（简报 `docs/design-briefs/M1-D1-password-lockout.md`） |
+| M1 | M1-D1 密码策略/历史/邮件重置、失败锁定（AUTH-03 员工/平台部分、AUTH-05） | ✅ 已完成（第五轮复审通过、348 passed、远端 CI 绿；简报 `docs/design-briefs/M1-D1-password-lockout.md`） |
 | M1 | M1-D2 MFA（AUTH-04） | ⏳ 未开始（独立简报） |
 | M1 | M1-E RBAC 与数据范围（RBAC-01/02/03） | ⏳ 未开始 |
 | M1 | M1-F 审计落库与哈希链（AUD-01） | ⏳ 未开始 |
