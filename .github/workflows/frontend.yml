@@ -90,7 +90,10 @@ jobs:
         run: pnpm test:e2e
 
       - name: e2e 用例数下限守卫（防 testMatch 写错导致静默不收集）
-        run: pnpm exec playwright test --list | tail -1 | grep -qE 'Total: (1[2-9]|[2-9][0-9]) tests' 
+        # 注意：值里含 "Total: " 会破坏普通标量，必须用块标量
+        run: |
+          pnpm exec playwright test --list | tail -1 | grep -qE 'Total: (1[2-9]|[2-9][0-9]) tests'
+
 
       - name: 上传失败产物（截图/trace 落在 test-results/）
         if: failure()
