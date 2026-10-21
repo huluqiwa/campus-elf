@@ -110,7 +110,8 @@
 **测试与门禁**
 
 - 新增/更新单元（标签、`sid`、配置、Redis 失联 fail-open）、集成（限额、踢出、列表、单台/他人/跨租下线、平台 realm、刷新续期、并发登录、撤销/改密与在途刷新竞态、踢出后 rotated 重放、reuse 标记删除）、业务场景 BS-48（HTTP 全链路、强制改密门禁、平台限制、无刷新令牌登出、Redis 故障登出、重复审计）与迁移回滚测试。
-- 最终门禁：后端 **290 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（99 文件）无问题、`alembic check` 无漂移、head=`d4e6f8a0b2c1`。
+- 最终门禁：后端 **290 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（99 文件）无问题、`alembic check` 无漂移、head=`d4e6f8a0b2c1`、本地 `scripts/ci.sh` 全绿。
+- 远端 CI（`692e867`）：`backend` #39639721352 success、`security` #39639721255 success；`frontend`/`evals` 未触发（无对应路径改动）。
 
 **独立审查**
 

@@ -15,7 +15,7 @@
 - **M1-C-UI 三端登录页与强制改密页**：admin（身份切换）+ campus 登录页、强制改密页、路由守卫、HttpOnly 刷新 Cookie（生产强制 Secure / 不回显 refresh / 禁 SameSite=none）、统一 401/403 处理；两轮独立审查通过。前端 20 单测 + 12 Playwright 全绿。
 - **M1-C2 会话设备管理（AUTH-06，策略 C）**：访问令牌 `sid` + Redis 会话标记实现被踢即时失效；租户 3 / 平台 2 台设备上限、超限踢最久未用；设备列表、单台/退出其它设备；跨用户/跨租统一 404 并写 `auth.session.revoke_denied`；登出按 family 去重审计、Redis 故障 best-effort；五轮独立审查通过（迁移 `d4e6f8a0b2c1`）。
 
-当前门禁：后端 **290 passed**、前端 **20 单测 + 12 E2E 全绿**、本地 `bash scripts/ci.sh` 与远端 4 条工作流全绿。
+当前门禁：后端 **290 passed**、前端 **20 单测 + 12 E2E 全绿**、本地 `bash scripts/ci.sh` 全绿；远端 `backend` 与 `security` 工作流对 `692e867` 全绿（`frontend`/`evals` 未触发：无对应路径改动）。
 
 进行中/待做：
 

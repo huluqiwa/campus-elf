@@ -261,7 +261,8 @@
 - 第三轮修复：文档与台账回填；`family_revoked` 补 `uid` 过滤；`revoke_refresh_family` 返回实际撤销结果并用于审计；`session_scope` 缺 `tenant_id` 直接报错；TD-116 补充 bcrypt 排队放大面；新增自然过期重放、标记缺失过滤、踢出 vs 在途刷新、改密后 rotated 重放、限额下调多踢、HTTP 双 family 登出审计真值、迁移回填与并发 barrier 用例。
 - 第四轮：**不通过**（0 Blocker + 1 Major + 5 Minor）。Major：Bearer 属租户 A、刷新令牌属租户 B（或同租户他人）时，撤销审计落在 A 且丢失 `subject_user_id`。修复：`FamilyRevocation` 携带 `realm/tenant_id/subject_user_id`；第二台设备的审计写入归属租户并带 subject，主操作者 realm 保持不变。Minor：并发 barrier 实际未加、`session_scope` 无回归测试、过期 rotated 语义未入决策记录且引用错、文档提前写"通过"、Redis 会话键无租户段、同 family 登出未断言 `family_revoked`。已补 barrier/单元断言/决策记录/引用/TD-117/审计真值断言，并新增"家族活跃但旧令牌过期"用例。
 - 第五轮（最终复审）：**通过**（0 Blocker / 0 Major / 5 Minor）。实测跨租/跨用户审计落在 subject 租户且 `actor_id` 为操作者、同 family 去重、已撤销 family 真值、过期 rotated 语义、`session_scope` fail-closed 均成立；全量 290 passed、ruff/mypy/alembic 全绿。Minor 收口：并发 barrier 改为按任务首次获取加屏障、补审计 actor 断言、引用改 §4 第 7 条；跨 family 审计非原子与跨 realm 矩阵登记 TD-118；Redis 键租户段登记 TD-117。
-- 最终门禁：后端 **290 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（99 文件）无问题、`alembic check` 无漂移、head=`d4e6f8a0b2c1`。
+- 最终门禁：后端 **290 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（99 文件）无问题、`alembic check` 无漂移、head=`d4e6f8a0b2c1`、本地 `scripts/ci.sh` 全绿。
+- 远端 CI（`692e867`）：`backend` #39639721352 success、`security` #39639721255 success；`frontend`/`evals` 未触发（无对应路径改动）。
 
 ## 高风险功能复审记录
 
