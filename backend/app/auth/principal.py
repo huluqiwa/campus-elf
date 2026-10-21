@@ -50,6 +50,7 @@ class Principal:
     realm: Realm
     tenant_id: UUID | None
     jti: UUID
+    session_id: UUID
     expires_at: datetime
     must_change_password: bool
     roles: frozenset[str]
@@ -202,8 +203,10 @@ async def get_current_principal(
     except TokenError as exc:
         raise _unauthorized(exc.message) from exc
 
-    if await revocation.is_revoked(str(claims.jti), realm=claims.realm):
-        raise _unauthorized("登录已失效，请重新登录")
+    if not await revocation.is_active(
+        str(claims.jti), claims.session_id, realm=claims.realm
+    ):
+        raise _unauthorized("该设备已被退出登录")
 
     must_change_password = claims.must_change_password
     if claims.realm == "tenant":
@@ -252,6 +255,7 @@ async def get_current_principal(
         tenant_id=claims.tenant_id,
         must_change_password=must_change_password,
         jti=claims.jti,
+        session_id=claims.session_id,
         expires_at=claims.expires_at,
         roles=roles,
         permissions=permissions,

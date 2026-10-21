@@ -45,6 +45,7 @@ class TestAccessToken:
             tenant_id=tenant_id,
             token_version=3,
             must_change_password=True,
+            family_id=uuid4(),
         )
 
         decoded = decode_access_token(settings, token)
@@ -67,6 +68,7 @@ class TestAccessToken:
             tenant_id=None,
             token_version=0,
             must_change_password=False,
+            family_id=uuid4(),
         )
 
         decoded = decode_access_token(settings, token)
@@ -86,6 +88,7 @@ class TestAccessToken:
                 tenant_id=None,
                 token_version=0,
                 must_change_password=False,
+                family_id=uuid4(),
             )
         with pytest.raises(ValueError):
             create_access_token(
@@ -95,6 +98,7 @@ class TestAccessToken:
                 tenant_id=uuid4(),
                 token_version=0,
                 must_change_password=False,
+                family_id=uuid4(),
             )
 
     def test_audience_mismatch_is_rejected(self) -> None:
@@ -108,6 +112,7 @@ class TestAccessToken:
             tenant_id=None,
             token_version=0,
             must_change_password=False,
+            family_id=uuid4(),
         )
 
         # 用租户 audience 的配置解析平台令牌 → 拒绝
@@ -129,6 +134,7 @@ class TestAccessToken:
             tenant_id=uuid4(),
             token_version=0,
             must_change_password=False,
+            family_id=uuid4(),
             now=datetime.now(UTC) - timedelta(seconds=5),
         )
 
@@ -147,6 +153,7 @@ class TestAccessToken:
             tenant_id=uuid4(),
             token_version=0,
             must_change_password=False,
+            family_id=uuid4(),
         )
 
         with pytest.raises(TokenError) as excinfo:

@@ -75,11 +75,11 @@ class RefreshToken(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
         Index("ix_refresh_tokens_tenant_id_user_id", "tenant_id", "user_id"),
         Index("ix_refresh_tokens_expires_at", "expires_at"),
         UniqueConstraint("token_hash", name="uq_refresh_tokens_token_hash"),
-        # 撤销原因取值（logout/password_change/reuse_detected/admin_revoke/account_deleted/expired）
+        # 撤销原因取值（轮换、登出、改密、重用、超限踢出、用户下线等）
         CheckConstraint(
             "revoked_reason IS NULL OR revoked_reason IN "
-            "('logout', 'password_change', 'reuse_detected', 'admin_revoke', "
-            "'account_deleted', 'expired')",
+            "('logout', 'password_change', 'reuse_detected', 'rotated', 'admin_revoke', "
+            "'account_deleted', 'expired', 'session_kicked', 'session_revoked')",
             name="revoked_reason_valid",
         ),
         # 复合外键：令牌只能属于同租户用户
@@ -101,6 +101,10 @@ class RefreshToken(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # "最久未用"排序依据：登录/刷新时写入（粗粒度，约刷新周期）
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # 粗粒度设备标签（如 `Chrome / Windows`）；明文 UA 仍只存 ua_hash
+    device_label: Mapped[str | None] = mapped_column(String(64))
     rotated_to_jti: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_reason: Mapped[str | None] = mapped_column(String(32))
@@ -120,7 +124,8 @@ class PlatformRefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "revoked_reason IS NULL OR revoked_reason IN "
             "('logout', 'password_change', 'reuse_detected', 'rotated', "
-            "'admin_revoke', 'account_deleted', 'expired')",
+            "'admin_revoke', 'account_deleted', 'expired', 'session_kicked', "
+            "'session_revoked')",
             name="revoked_reason_valid",
         ),
         ForeignKeyConstraint(
@@ -139,6 +144,8 @@ class PlatformRefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    device_label: Mapped[str | None] = mapped_column(String(64))
     rotated_to_jti: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_reason: Mapped[str | None] = mapped_column(String(32))

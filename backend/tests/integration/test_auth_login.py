@@ -306,6 +306,10 @@ async def test_principal_uses_realm_specific_connection(
 
     monkeypatch.setattr(principal_module, "db_session", _spy)
 
+    tenant_session = uuid4()
+    platform_session = uuid4()
+    await revocation.register_session(tenant_session, realm="tenant")
+    await revocation.register_session(platform_session, realm="platform")
     tenant_token, _ = create_access_token(
         settings,
         user_id=user_id,
@@ -313,6 +317,7 @@ async def test_principal_uses_realm_specific_connection(
         tenant_id=tenant_id,
         token_version=0,
         must_change_password=False,
+        family_id=tenant_session,
     )
     platform_token, _ = create_access_token(
         settings,
@@ -321,6 +326,7 @@ async def test_principal_uses_realm_specific_connection(
         tenant_id=None,
         token_version=0,
         must_change_password=False,
+        family_id=platform_session,
     )
 
     def _request() -> Request:
@@ -385,9 +391,9 @@ async def test_cleanup_refresh_tokens_respects_retention(auth_env: None) -> None
                 text(
                     "insert into refresh_tokens "
                     "(tenant_id, user_id, jti, family_id, token_hash, expires_at, "
-                    " revoked_at, revoked_reason) "
+                    " last_seen_at, revoked_at, revoked_reason) "
                     "values (:tenant_id, :user_id, :jti, :family_id, :hash, "
-                    " now() - interval '40 days', null, null)"
+                    " now() - interval '40 days', now() - interval '40 days', null, null)"
                 ),
                 {**base, "jti": uuid4(), "hash": "a" * 64},
             )
@@ -395,9 +401,10 @@ async def test_cleanup_refresh_tokens_respects_retention(auth_env: None) -> None
                 text(
                     "insert into refresh_tokens "
                     "(tenant_id, user_id, jti, family_id, token_hash, expires_at, "
-                    " revoked_at, revoked_reason) "
+                    " last_seen_at, revoked_at, revoked_reason) "
                     "values (:tenant_id, :user_id, :jti, :family_id, :hash, "
-                    " now() + interval '1 day', now() - interval '40 days', 'logout')"
+                    " now() + interval '1 day', now() - interval '1 day', "
+                    " now() - interval '40 days', 'logout')"
                 ),
                 {**base, "jti": uuid4(), "hash": "b" * 64},
             )
@@ -405,18 +412,20 @@ async def test_cleanup_refresh_tokens_respects_retention(auth_env: None) -> None
                 text(
                     "insert into refresh_tokens "
                     "(tenant_id, user_id, jti, family_id, token_hash, expires_at, "
-                    " revoked_at, revoked_reason) "
+                    " last_seen_at, revoked_at, revoked_reason) "
                     "values (:tenant_id, :user_id, :jti, :family_id, :hash, "
-                    " now() + interval '1 day', now() - interval '1 day', 'logout')"
+                    " now() + interval '1 day', now() - interval '1 day', "
+                    " now() - interval '1 day', 'logout')"
                 ),
                 {**base, "jti": uuid4(), "hash": "c" * 64},
             )
             await session.execute(
                 text(
                     "insert into refresh_tokens "
-                    "(tenant_id, user_id, jti, family_id, token_hash, expires_at) "
+                    "(tenant_id, user_id, jti, family_id, token_hash, expires_at, "
+                    " last_seen_at) "
                     "values (:tenant_id, :user_id, :jti, :family_id, :hash, "
-                    " now() + interval '7 days')"
+                    " now() + interval '7 days', now())"
                 ),
                 {**base, "jti": uuid4(), "hash": "d" * 64},
             )
@@ -462,7 +471,7 @@ async def test_logout_requires_valid_refresh_secret(auth_env: None) -> None:
     revoked = await service.revoke_refresh_family(
         refresh_token=forged, actor_user_id=uuid4(), actor_realm="tenant"
     )
-    assert revoked is False
+    assert revoked is None
 
     # 真实刷新令牌仍然可用（未被伪造请求撤销）
     refreshed = await service.refresh_tokens(refresh_token=pair.refresh_token)

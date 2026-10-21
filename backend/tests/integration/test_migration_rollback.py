@@ -21,6 +21,7 @@ from tests.support.dsn import assert_test_database_dsn
 pytestmark = [pytest.mark.integration]
 
 M1A_REVISION = "779f731db342"
+M1C2_PREVIOUS_REVISION = "c8e2f4a6b1d3"
 
 
 def _alembic_config(url: str) -> Config:
@@ -509,4 +510,153 @@ def test_selfcheck_detects_permissive_policy_on_users() -> None:
 
         get_settings.cache_clear()
         asyncio.run(dispose_engine())
+        asyncio.run(_drop_database(dsn, temp_database))
+
+
+async def _seed_m1c2_reasons(dsn: str) -> None:
+    """写入租户/平台刷新令牌行，覆盖 rotated 与两种会话撤销原因。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        tenant_id = await connection.fetchval(
+            "insert into tenants (school_code, name, status, activated_at) "
+            "values ('SCH-M1C2ROLL', '会话回滚中学', 'active', now()) returning id"
+        )
+        user_id = await connection.fetchval(
+            "insert into users (tenant_id, user_type, login_id, password_hash, "
+            "status, must_change_password, mfa_enabled) "
+            "values ($1, 'student', 'm1c2-rollback@school.edu', '$2b$12$fake', "
+            "'active', false, false) returning id",
+            tenant_id,
+        )
+        for index, reason in enumerate(
+            ("rotated", "session_kicked", "session_revoked", "logout")
+        ):
+            await connection.execute(
+                "insert into refresh_tokens (tenant_id, user_id, jti, family_id, "
+                "token_hash, expires_at, last_seen_at, revoked_at, revoked_reason) "
+                "values ($1, $2, gen_random_uuid(), gen_random_uuid(), $3, "
+                "now() + interval '1 day', now(), now(), $4)",
+                tenant_id,
+                user_id,
+                f"{index:064x}",
+                reason,
+            )
+
+        platform_user_id = await connection.fetchval(
+            "insert into platform_users (account, password_hash, status, "
+            "must_change_password, mfa_enabled) "
+            "values ('m1c2-rollback-ops', '$2b$12$fake', 'active', false, false) "
+            "returning id"
+        )
+        for index, reason in enumerate(
+            ("rotated", "session_kicked", "session_revoked", "logout")
+        ):
+            await connection.execute(
+                "insert into platform_refresh_tokens (platform_user_id, jti, family_id, "
+                "token_hash, expires_at, last_seen_at, revoked_at, revoked_reason) "
+                "values ($1, gen_random_uuid(), gen_random_uuid(), $2, "
+                "now() + interval '1 day', now(), now(), $3)",
+                platform_user_id,
+                f"{index + 10:064x}",
+                reason,
+            )
+    finally:
+        await connection.close()
+
+
+async def _m1c2_rollback_state(dsn: str) -> tuple[list[str], list[str], list[str], str]:
+    """返回两表撤销原因、新列名与 last_seen_at 可空性。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        tenant_reasons = [
+            str(row["revoked_reason"])
+            for row in await connection.fetch(
+                "select revoked_reason from refresh_tokens order by token_hash"
+            )
+        ]
+        platform_reasons = [
+            str(row["revoked_reason"])
+            for row in await connection.fetch(
+                "select revoked_reason from platform_refresh_tokens order by token_hash"
+            )
+        ]
+        columns = [
+            f"{row['table_name']}.{row['column_name']}"
+            for row in await connection.fetch(
+                "select table_name, column_name from information_schema.columns "
+                "where table_name in ('refresh_tokens', 'platform_refresh_tokens') "
+                "and column_name in ('last_seen_at', 'device_label') "
+                "order by table_name, column_name"
+            )
+        ]
+        nullable = await connection.fetchval(
+            "select is_nullable from information_schema.columns "
+            "where table_name = 'refresh_tokens' and column_name = 'last_seen_at'"
+        )
+        return tenant_reasons, platform_reasons, columns, str(nullable)
+    finally:
+        await connection.close()
+
+
+async def _m1c2_backfill_mismatches(dsn: str) -> int:
+    """升级后 last_seen_at 必须由 issued_at 回填（存量行不得为空或错值）。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        tenant = await connection.fetchval(
+            "select count(*) from refresh_tokens "
+            "where last_seen_at is distinct from issued_at"
+        )
+        platform = await connection.fetchval(
+            "select count(*) from platform_refresh_tokens "
+            "where last_seen_at is distinct from issued_at"
+        )
+        return int(tenant) + int(platform)
+    finally:
+        await connection.close()
+
+
+def test_m1c2_downgrade_with_session_reasons_then_upgrade() -> None:
+    """含 rotated/session_* 行时可安全 downgrade（rotated 保留），再 upgrade。"""
+
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL 未设置；先运行 scripts/test-stack.sh up 并导出 TEST_*")
+    assert_test_database_dsn(admin_url)
+
+    dsn, database = _admin_dsn(admin_url)
+    temp_database = f"{database}_m1c2rollback"
+    temp_dsn = dsn.rsplit("/", 1)[0] + f"/{temp_database}"
+    temp_url = admin_url.rsplit("/", 1)[0] + f"/{temp_database}"
+
+    asyncio.run(_create_database(dsn, temp_database))
+    try:
+        config = _alembic_config(temp_url)
+        command.upgrade(config, "head")
+        asyncio.run(_seed_m1c2_reasons(temp_dsn))
+
+        command.downgrade(config, M1C2_PREVIOUS_REVISION)
+
+        tenant_reasons, platform_reasons, columns, _nullable = asyncio.run(
+            _m1c2_rollback_state(temp_dsn)
+        )
+        assert tenant_reasons == ["rotated", "logout", "logout", "logout"]
+        assert platform_reasons == ["rotated", "logout", "logout", "logout"]
+        assert columns == []
+
+        command.upgrade(config, "head")
+        _tenant_after, _platform_after, columns_after, nullable_after = asyncio.run(
+            _m1c2_rollback_state(temp_dsn)
+        )
+        assert columns_after == [
+            "platform_refresh_tokens.device_label",
+            "platform_refresh_tokens.last_seen_at",
+            "refresh_tokens.device_label",
+            "refresh_tokens.last_seen_at",
+        ]
+        assert nullable_after == "NO"
+        assert asyncio.run(_m1c2_backfill_mismatches(temp_dsn)) == 0
+    finally:
         asyncio.run(_drop_database(dsn, temp_database))

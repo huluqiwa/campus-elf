@@ -9,12 +9,14 @@
 令牌明文只在响应体出现，不写日志/审计（`docs/AGENTS.md` 安全红线）。
 """
 
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, model_validator
 
-from app.auth import revocation, service, tokens
+from app.auth import revocation, service, sessions, tokens
 from app.auth.principal import CurrentPrincipal, OptionalPrincipal
 from app.auth.service import AuthError
 from app.config import get_settings
@@ -100,6 +102,28 @@ class OkResponse(BaseModel):
     """通用成功响应。"""
 
     status: Literal["ok"] = "ok"
+
+
+class SessionItem(BaseModel):
+    """登录设备（不含明文 IP/UA）。"""
+
+    session_id: UUID
+    device_label: str
+    last_seen_at: datetime
+    current: bool
+
+
+class SessionListResponse(BaseModel):
+    """当前账号的登录设备列表。"""
+
+    sessions: list[SessionItem]
+
+
+class RevokeOthersResponse(BaseModel):
+    """退出其它设备的结果。"""
+
+    status: Literal["ok"] = "ok"
+    revoked_count: int
 
 
 def _http_error(exc: AuthError) -> HTTPException:
@@ -240,28 +264,69 @@ async def logout(
         provided_refresh = (payload.refresh_token if payload else None) or _cookie_refresh_token(
             request
         )
+        refresh_revocation: service.FamilyRevocation | None = None
         if provided_refresh:
             # 校验刷新令牌哈希后撤销家族；令牌不匹配按未知处理（不泄露、不误撤销）
-            await service.revoke_refresh_family(
+            refresh_revocation = await service.revoke_refresh_family(
                 refresh_token=provided_refresh,
                 actor_user_id=principal.user_id if principal else None,
                 actor_realm=principal.realm if principal else None,
                 request_id=request_id,
+                audit=principal is None,
             )
         if principal is not None:
-            await revocation.revoke(
+            # 先撤销数据库家族（Redis 故障也不得让登出失败），再 best-effort 写 jti 撤销
+            family_revoked = await service.revoke_session_by_id(
+                realm=principal.realm,
+                tenant_id=principal.tenant_id,
+                user_id=principal.user_id,
+                session_id=principal.session_id,
+            )
+            access_revoked = await revocation.revoke(
                 str(principal.jti), principal.expires_at, realm=principal.realm
             )
+            # 刷新令牌与 Bearer 属同一 family 时只写一条（family 已由刷新令牌撤销）；
+            # 不同 family（如多标签）则每个 family 各记一条，避免漏审（复审 m1）。
             await service.record_logout(
                 actor_user_id=principal.user_id,
                 actor_realm=principal.realm,
                 tenant_id=principal.tenant_id,
+                family_id=principal.session_id,
+                family_revoked=(
+                    family_revoked
+                    or (
+                        refresh_revocation is not None
+                        and refresh_revocation.family_id == principal.session_id
+                        and refresh_revocation.revoked
+                    )
+                ),
+                access_revoked=access_revoked,
+                subject_user_id=principal.user_id,
                 request_id=request_id,
                 ip_hash=tokens.hash_client_fingerprint(
                     request.client.host if request.client else None
                 ),
                 ua_hash=tokens.hash_client_fingerprint(request.headers.get("user-agent")),
             )
+            if (
+                refresh_revocation is not None
+                and refresh_revocation.family_id != principal.session_id
+            ):
+                await service.record_logout(
+                    actor_user_id=principal.user_id,
+                    actor_realm=principal.realm,
+                    tenant_id=refresh_revocation.tenant_id,
+                    scope_realm=refresh_revocation.realm,
+                    family_id=refresh_revocation.family_id,
+                    family_revoked=refresh_revocation.revoked,
+                    access_revoked=False,
+                    subject_user_id=refresh_revocation.subject_user_id,
+                    request_id=request_id,
+                    ip_hash=tokens.hash_client_fingerprint(
+                        request.client.host if request.client else None
+                    ),
+                    ua_hash=tokens.hash_client_fingerprint(request.headers.get("user-agent")),
+                )
     finally:
         _clear_refresh_cookie(response)
     return OkResponse()
@@ -294,6 +359,69 @@ async def change_password(
     # 改密会撤销全部旧家族：必须同时下发新刷新 Cookie，否则浏览器刷新即掉线（审查 MA1）
     _set_refresh_cookie(response, pair.refresh_token)
     return _token_response(pair)
+
+
+@router.get("/sessions", response_model=SessionListResponse)
+async def list_my_sessions(principal: CurrentPrincipal) -> SessionListResponse:
+    """列出当前账号仍有效的登录设备（按最近使用倒序）。"""
+
+    items = await sessions.list_sessions(
+        realm=principal.realm,
+        tenant_id=principal.tenant_id,
+        user_id=principal.user_id,
+        current_session_id=principal.session_id,
+    )
+    return SessionListResponse(
+        sessions=[
+            SessionItem(
+                session_id=item.session_id,
+                device_label=item.device_label,
+                last_seen_at=item.last_seen_at,
+                current=item.current,
+            )
+            for item in items
+        ]
+    )
+
+
+@router.post("/sessions/revoke-others", response_model=RevokeOthersResponse)
+async def revoke_other_sessions(
+    principal: CurrentPrincipal, request: Request
+) -> RevokeOthersResponse:
+    """退出除当前设备外的全部登录设备。"""
+
+    revoked_count = await sessions.revoke_others(
+        realm=principal.realm,
+        tenant_id=principal.tenant_id,
+        user_id=principal.user_id,
+        current_session_id=principal.session_id,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    return RevokeOthersResponse(revoked_count=revoked_count)
+
+
+@router.delete("/sessions/{session_id}", response_model=OkResponse)
+async def revoke_my_session(
+    session_id: UUID,
+    principal: CurrentPrincipal,
+    request: Request,
+    response: Response,
+) -> OkResponse:
+    """下线本人的一台设备；不存在/非本人统一 404（不泄露会话归属）。"""
+
+    removed = await sessions.revoke_session(
+        realm=principal.realm,
+        tenant_id=principal.tenant_id,
+        user_id=principal.user_id,
+        session_id=session_id,
+        current_session_id=principal.session_id,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    if not removed:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if session_id == principal.session_id:
+        _clear_refresh_cookie(response)
+    return OkResponse()
 
 
 @router.get("/me", response_model=MeResponse)

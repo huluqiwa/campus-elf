@@ -6,7 +6,7 @@
 
 ---
 
-## 1. 当前状态（截至 2026-10-21）
+## 1. 当前状态（截至 2026-10-22）
 
 | 里程碑 | 功能点 | 状态 |
 |---|---|---|
@@ -15,18 +15,18 @@
 | M1 | M1-B 学校注册与平台审核（TEN-01/02/03） | ✅ 完成（五轮审查通过） |
 | M1 | M1-C 三端登录与令牌**后端**（AUTH-01/02） | ✅ 完成（三轮审查通过） |
 | M1 | M1-C-UI 三端登录页/强制改密页/守卫/HttpOnly 刷新 Cookie | ✅ 完成（两轮审查通过） |
-| M1 | **M1-C2 会话设备管理（AUTH-06，策略 C）** | 📌 决策与四项细节已确认（简报 `docs/design-briefs/M1-C2-session-devices.md`），**待实现** |
+| M1 | M1-C2 会话设备管理（AUTH-06，策略 C） | ✅ 完成（五轮审查通过；设备限额/列表/下线/退出其它/被踢即时失效；简报 `docs/design-briefs/M1-C2-session-devices.md`） |
 | M1 | M1-D 密码策略/历史/重置、失败锁定、MFA（AUTH-03/04/05） | ⏳ 未开始 |
 | M1 | M1-E RBAC 与数据范围（RBAC-01/02/03） | ⏳ 未开始 |
 | M1 | M1-F 审计落库与哈希链（AUD-01） | ⏳ 未开始 |
 | M1 | M1 验收报告 | ⏳ 未开始（需含 TD-110 真实后端全栈 E2E） |
 | M2/M3/M4 | 组织与人员 / 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 ORG-05、KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M1-C2 → M1-D → M1-E → M1-F → M1 验收报告 → M2 → M3 → M4。
-- 最近提交：`main` = `e4b277d`（M1-C-UI 收口）；工作树应保持干净。
+- **建议的下一步顺序**：M1-D → M1-E → M1-F → M1 验收报告 → M2 → M3 → M4。
+- 最近提交：`main` = `63274d6`（M1-C-UI 收口与接手清单；M1-C2 提交后更新）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
-- 数据库迁移 head：`c8e2f4a6b1d3`；`alembic check` 应无漂移。
+- 数据库迁移 head：`d4e6f8a0b2c1`（M1-C2）；`alembic check` 应无漂移。
 
 ---
 
@@ -45,7 +45,7 @@ cd backend
 uv sync --frozen
 uv run ruff check app tests
 uv run mypy --no-incremental app tests
-REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 238 passed）
+REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 290 passed）
 uv run alembic -x db_url="$TEST_DATABASE_URL" check   # 迁移漂移检查
 
 # 3) 前端

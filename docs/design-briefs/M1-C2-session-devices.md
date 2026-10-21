@@ -61,7 +61,21 @@
    - 集成：第 4 台登录踢第 1 台（Redis 标记删除 + 家族作废 + 审计 `auth.session.kicked`）；被踢设备下一请求 401；`list_sessions` 只列本人且标记当前设备；单台下线不影响其它设备；`revoke-others` 只保留当前；改密仍全设备下线；刷新会更新 `last_seen_at` 并延长会话标记 TTL；
    - 业务场景：BS-48（HTTP 全链路：四台设备登录 → 最旧设备 401 → 查看设备列表 → 退出其它设备 → 新设备可用）；
    - E2E（M1-C-UI 阶段）：设备列表页与"退出其它设备"。
-7. **并发与边界**：同一设备并发刷新不重复注册会话；踢出与"设备正在刷新"竞争时以条件更新（`revoked_at is null`）判定，输者按被踢处理（401 而非 reuse_detected，避免误报盗用）。
+7. **并发与边界**：同一设备并发刷新不重复注册会话；踢出与"设备正在刷新"竞争时以条件更新（`revoked_at is null`）判定，输者按被踢处理（401 而非 reuse_detected，避免误报盗用）。已轮换旧令牌若**自身已过期**，即使家族仍活跃也按已失效处理、不触发家族撤销（过期凭证不可用；避免正常设备长期使用后的旧令牌被误报为泄漏）；未过期重放仍按 reuse 撤销家族。
+
+### 4.1 开工核对后的实现细节（2026-10-21，不改变 §3 已确认策略）
+
+1. **`sid` 为必需 claim**：访问令牌必须携带 `sid`（= `family_id`），缺失/非法一律 401。升级后旧令牌（无 `sid`）需重新登录；当前仅开发环境，可接受。
+2. **迁移**：`refresh_tokens` / `platform_refresh_tokens` 增加 `last_seen_at timestamptz`、`device_label varchar(64)`；存量行 `last_seen_at = issued_at`。`revoked_reason` 新增 `session_kicked`（超限踢出）与 `session_revoked`（用户下线/退出其它）。
+3. **family 级聚合**：轮换时新行写入 `last_seen_at=now()`、`device_label`（按本次 UA 重新解析）；设备列表按 `family_id` 取最新有效行，按 `last_seen_at` 倒序；只列 `revoked_at is null and expires_at > now()` 且 Redis 标记存在的 family。
+4. **并发串行化**：同一账号的登录/刷新/撤销/改密共享事务级 `pg_advisory_xact_lock(hashtextextended('{realm}:session:{user_id}', 0))`；撤销提交后，等待中的刷新获得锁并**重新读取**数据库，从而看到已撤销的 family（不以登录前的旧快照判定）。登录按活跃 family 数计算需踢数量 `count - limit + 1`（配置下调时可一次踢多台），按非空 `last_seen_at`（存量已回填 `issued_at`）升序踢最久未用；审计逐台写 `auth.session.kicked`。实现中未使用 `SELECT ... FOR UPDATE`（advisory lock 同样串行化，且避免与空结果行锁的边界）。
+5. **Redis 语义**：鉴权时用一次 `MGET` 同时检查 jti 撤销键与会话标记键；jti 已撤销或会话标记缺失 → 401。Redis 不可用时按 §6 降级：跳过会话存在性检查（仍校验 token_version/账号状态），记录告警；标记删除失败会留下最长 15 分钟的失效窗口，登记 TD 跟踪。登录/刷新/改密的会话标记在**数据库事务内**登记（随提交生效），避免“提交后补写”把并发撤销的会话复活；撤销提交后再删除标记，删除失败仅产生最长 15 分钟的窗口。
+6. **接口契约**：
+   - `GET /api/v1/auth/sessions` → `{"sessions": [{"session_id": UUID, "device_label": str, "last_seen_at": datetime, "current": bool}]}`；不含明文 IP/UA。
+   - `DELETE /api/v1/auth/sessions/{session_id}` → `200 {"status":"ok"}`；仅本人会话，不存在/非本人一律 404；删除当前设备时清除刷新 Cookie。
+   - `POST /api/v1/auth/sessions/revoke-others` → `200 {"status":"ok","revoked_count": int}`；保留当前 `sid`。
+   - 三个接口均要求已登录；首登改密门禁期间仍按 spec 只放行改密/登出/me，会话管理接口需改密后使用。
+7. **审计动作**：`auth.session.kicked`（metadata 含被踢 family/设备标签/原因）、`auth.session.revoked`（单台下线）、`auth.session.revoked_others`（数量与当前 family）。审计与数据库撤销同事务；不记录明文 UA/IP。
 
 ## 5. 测试策略
 
@@ -81,6 +95,29 @@
 
 认证/会话属高风险功能：编码前需确认 §3 四项细节。实现后按门禁执行：单元/集成/业务场景全绿 → 独立代码审查（重点：越权查看/下线他人会话、跨租隔离、Redis 键边界、审计完整性、并发踢出）→ 修复复测 → 复审通过后提交推送，并把结果回填本简报。
 
-## 8. 实现结果
+## 8. 实现结果（2026-10-21）
 
-待编码后回填。
+**交付内容**
+
+- **迁移** `d4e6f8a0b2c1`（down_revision `c8e2f4a6b1d3`）：两张刷新令牌表新增 `last_seen_at`（存量回填 `issued_at`、NOT NULL）与 `device_label`；`revoked_reason` 扩展 `session_kicked` / `session_revoked`。downgrade 把会话类原因归一化为 `logout`（保留 `rotated`）后删除新列，`upgrade → downgrade → upgrade` 往返测试通过；`alembic check` 无漂移。
+- **令牌**：访问令牌新增必需 `sid`（= `family_id`），缺失/非法一律 401；升级后旧令牌需重新登录。鉴权用一次 `MGET` 同时检查 jti 撤销键与会话标记。
+- **会话服务**：按 realm 配置上限（租户 3 / 平台 2，`.env` 可调）；登录超限踢最久未用（`count - limit + 1`），逐台审计 `auth.session.kicked`；设备标签为粗粒度 UA（未知 → “未知设备”），IP/UA 仍只存哈希。
+- **接口**：`GET /auth/sessions`、`DELETE /auth/sessions/{id}`（他人/不存在统一 404，撤当前设备清刷新 Cookie）、`POST /auth/sessions/revoke-others`（`returning` 计数、保留当前 sid）；首登改密门禁期间三个接口均 403。
+- **登出**：带 Bearer 时即使没有刷新令牌也按 `sid` 撤销数据库 family；Redis jti 撤销改为 best-effort（故障不产生 500，审计记录真实 `access_revoked`）；同一 family 的 Bearer+刷新令牌只写一条 `auth.logout`，不同 family 各记一条。
+- **并发/一致性**：登录、刷新、撤销、改密共享用户级事务 advisory lock，锁后重读；reuse 家族撤销同样取锁并在提交后删除会话标记，避免在途刷新插入的行逃过撤销。会话标记在数据库事务内登记（随提交生效），撤销/登出后删除；Redis 故障按 TD-102/TD-111 降级。
+- **审计**：`auth.session.kicked` / `auth.session.revoked` / `auth.session.revoked_others` 与数据库撤销同事务，metadata 含 family/设备标签/数量，不含明文 UA/IP。
+
+**测试与门禁**
+
+- 新增/更新单元（标签、`sid`、配置、Redis 失联 fail-open）、集成（限额、踢出、列表、单台/他人/跨租下线、平台 realm、刷新续期、并发登录、撤销/改密与在途刷新竞态、踢出后 rotated 重放、reuse 标记删除）、业务场景 BS-48（HTTP 全链路、强制改密门禁、平台限制、无刷新令牌登出、Redis 故障登出、重复审计）与迁移回滚测试。
+- 最终门禁：后端 **290 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（99 文件）无问题、`alembic check` 无漂移、head=`d4e6f8a0b2c1`。
+
+**独立审查**
+
+- 第一轮：**不通过**（1 Blocker + 4 Major + 3 Minor），集中在撤销与在途刷新竞态（标记提交后补写可能复活已踢会话）、条件更新失败后的 reuse 误报、无刷新令牌登出未撤销 family、迁移 downgrade 约束不可往返、租户 SQL 纵深过滤；已逐项修复并补并发回归测试。
+- 第二轮（聚焦复审）：**不通过**（0 Blocker + 3 Major + 2 Minor）：Redis 故障时 Bearer-only 登出 500 且未撤销 family；设备被踢后重放已 rotated 旧令牌误报 reuse；reuse 家族撤销未取锁/未删会话标记；Bearer+刷新令牌重复审计；文档未回填。对应修复：jti 撤销 best-effort + 先撤 DB family；family 级撤销状态判定；reuse 撤销取锁并删标记；按 family 去重审计；本 §8、handoff、README、tech-debt 回填。
+- 第三轮（修复复审）：**不通过**（0 Blocker + 1 Major + 7 Minor）。Major 为 handoff/README/review-log 未回填；Minor 为租户 `family_revoked` 缺 `user_id`、已撤销 family 的登出审计误报 `family_revoked=true`、`session_scope` 静默回退平台连接、bcrypt 在锁内的放大面未登记、并发/迁移/安全回归缺口。修复：文档回填；SQL 补 `uid`；`revoke_refresh_family` 返回实际撤销结果；`session_scope` fail-closed；TD-116 扩写；新增自然过期重放、标记缺失过滤、踢出 vs 在途刷新（barrier）、改密后 rotated 重放、限额下调多踢、双 family 登出审计真值、迁移回填断言。
+- 第四轮：**不通过**（0 Blocker + 1 Major + 5 Minor）。Major 为跨租/跨用户登出时审计落在操作者租户且丢失 subject；修复为 `FamilyRevocation` 携带归属（realm/tenant_id/subject_user_id），第二台设备审计写入归属租户并带 subject，新增跨租与同租他人用例。Minor 已收口：并发 barrier、`session_scope` 回归、过期 rotated 决策记录与用例、引用修正、TD-117、同 family 审计真值断言。
+- 第五轮（最终复审）：**通过**（0 Blocker / 0 Major / 5 Minor）。剩余 Minor 已收口：barrier 按任务首次获取、审计 actor 断言、引用修正；跨 family 审计非原子与跨 realm 矩阵登记 TD-118。
+
+**取舍与技术债**：TD-111（Redis 故障/标记删除失败的失效窗口）、TD-112（`last_seen_at` 刷新粒度）、TD-113（上限配置需重启）、TD-114（多标签/隐私模式占额度）、TD-115（新设备通知，M5）、TD-116（锁内 bcrypt/Redis 写入的排队放大面）、TD-117（Redis 键不含租户段的既有取舍，M6 统一收敛）、TD-118（跨 family 登出审计非原子与跨 realm 矩阵缺口）。

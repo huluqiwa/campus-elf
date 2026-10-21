@@ -1,8 +1,9 @@
 """访问令牌（JWT）与刷新令牌（不透明随机串）。
 
-- **访问令牌**：HS256 JWT，15 分钟；claim 含 `sub/realm/tenant_id/jti/token_version/
-  must_change_password/iss/aud/exp/kid`。校验时校验签名、`iss`、`exp` 与**按 realm 对应的
-  audience**（TD-074：租户与平台令牌不可混用）。
+- **访问令牌**：HS256 JWT，15 分钟；claim 含 `sub/realm/tenant_id/jti/sid/token_version/
+  must_change_password/iss/aud/exp/kid`。`sid` 是刷新令牌家族 id（会话），用于被踢/下线
+  后立即失效。校验时校验签名、`iss`、`exp` 与**按 realm 对应的 audience**
+  （TD-074：租户与平台令牌不可混用）。
 - **刷新令牌**：`secrets.token_urlsafe(48)` 随机串，数据库只存 SHA-256 十六进制哈希；
   对外只出现一次（响应体），不落日志/审计。
 """
@@ -48,6 +49,7 @@ class AccessClaims:
     realm: Realm
     tenant_id: UUID | None
     jti: UUID
+    session_id: UUID
     token_version: int
     must_change_password: bool
     expires_at: datetime
@@ -65,6 +67,7 @@ def create_access_token(
     user_id: UUID,
     realm: Realm,
     tenant_id: UUID | None,
+    family_id: UUID,
     token_version: int,
     must_change_password: bool,
     now: datetime | None = None,
@@ -76,6 +79,7 @@ def create_access_token(
         user_id: 用户主体（租户用户或平台账号 id）。
         realm: `tenant` 或 `platform`。
         tenant_id: 租户 realm 必填；平台 realm 必须为 None。
+        family_id: 刷新令牌家族 id（访问令牌 `sid`，用于会话级即时失效）。
         token_version: 用户当前版本号（权限/状态变更后自增，旧令牌立即失效）。
         must_change_password: 是否处于"首登必须改密"状态。
         now: 可选当前时间（测试注入）。
@@ -100,6 +104,7 @@ def create_access_token(
         "realm": realm,
         "tenant_id": str(tenant_id) if tenant_id else None,
         "jti": str(jti),
+        "sid": str(family_id),
         "token_version": token_version,
         "must_change_password": must_change_password,
         "iss": settings.jwt_issuer,
@@ -118,6 +123,7 @@ def create_access_token(
         realm=realm,
         tenant_id=tenant_id,
         jti=jti,
+        session_id=family_id,
         token_version=token_version,
         must_change_password=must_change_password,
         expires_at=expires_at,
@@ -148,7 +154,7 @@ def decode_access_token(settings: Settings, token: str) -> AccessClaims:
             # aud 在下面按 realm 手工校验：解码前不知道 realm（PyJWT 在 aud 存在但未传
             # audience 时会直接报 InvalidAudienceError，故先关闭内置校验）
             options={
-                "require": ["exp", "iss", "aud", "sub", "jti"],
+                "require": ["exp", "iss", "aud", "sub", "jti", "sid"],
                 "verify_aud": False,
             },
         )
@@ -180,6 +186,7 @@ def decode_access_token(settings: Settings, token: str) -> AccessClaims:
             realm=realm,
             tenant_id=tenant_id,
             jti=UUID(str(payload["jti"])),
+            session_id=UUID(str(payload["sid"])),
             token_version=int(payload.get("token_version", -1)),
             must_change_password=bool(payload.get("must_change_password", True)),
             expires_at=datetime.fromtimestamp(int(payload["exp"]), tz=UTC),

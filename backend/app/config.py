@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录的 .env（与 .env.example 同目录）；不读取 backend/.env，避免双份配置。
@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     jwt_active_kid: str = "k1"
     access_token_ttl_seconds: int = 900
     refresh_token_ttl_seconds: int = 604800
+    # 同一账号同时保持登录的设备上限：超限踢最久未用（平台账号权限更大，默认更严）
+    max_sessions_per_user_tenant: int = Field(default=3, ge=1)
+    max_sessions_per_user_platform: int = Field(default=2, ge=1)
     # 浏览器端刷新令牌走 HttpOnly Cookie（JS 读不到）；非浏览器客户端仍可用响应体字段
     auth_cookie_name: str = "campus_refresh_token"
     auth_cookie_path: str = "/api/v1/auth"
