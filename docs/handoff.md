@@ -108,6 +108,21 @@ cd .. && bash scripts/ci.sh            # 或 bash scripts/ci.sh --with-e2e
 | `docs/deployment.md` | 部署、三连接角色、生产强制配置、启动自检 |
 | `docs/m0-acceptance.md`、`docs/benchmarks-m0.md` | M0 验收与基准 |
 
+### 4.1 阅读范围建议（省上下文，别全读）
+
+**第一档 · 必读且以它为准**（接手时一次读完）：
+`AGENTS.md`（规则源头）→ `docs/handoff.md`（本文件，现状与操作）→ `docs/milestone.md`（下一步范围与退出标准）→ `docs/spec.md` + `docs/design.md` 的对应章节 → `docs/tech-debt.md`（未处置条目）→ `docs/review-log.md`（最近审查结论）→ **正在做的那个功能点的** `docs/design-briefs/<ID>.md`。
+
+**第二档 · 按需查**（做相关功能时才打开）：
+`docs/test-plan.md`（写测试/业务场景矩阵时）、`docs/rbac-matrix.md`（权限）、`docs/state-machines.md`（状态流转）、`docs/tenant-isolation.md`（隔离与 A23 矩阵）、`docs/deployment.md`（部署/生产配置/自检）、`docs/compliance.md`（留存与合规）、`docs/observability-langfuse.md`（观测）。
+
+**第三档 · 仅供参考，接手时不必读**：
+已完成功能点的简报（只读在做的那个）、`docs/m0-acceptance.md`、`docs/benchmarks-m0.md`、`docs/spec-changes/README` 之外的提案（已确认的当作决策查，不必通读）。
+
+**要求新工具汇报时明确说清**（这样你能一眼看出它有没有读对）：
+1. 读了哪几份文档；2. 下一步的依据是哪一份（例如"依据 milestone §5 + 简报 M1-C2"）；3. 哪些文档它认为仅供参考；4. 有没有互相矛盾或与代码不一致的地方。
+**发现文档互相冲突时不得自行决定**：按 `AGENTS.md` §12 的优先级（requirements → spec → design → milestone → test-plan，用户最新确认优先）停下来向你报告。
+
 ---
 
 ## 5. 不可逾越的红线（详见 AGENTS.md §3~§5）
