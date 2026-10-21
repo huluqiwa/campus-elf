@@ -344,11 +344,15 @@ audit_logs: 仅追加，prev_hash/hash 链
 | POST | `/api/v1/auth/logout` | 撤销刷新令牌家族（可选 body 携带 refresh_token）+ 当前访问令牌 jti 立即进入撤销集合 |
 | POST | `/api/v1/auth/change-password` | 首登改密/主动改密；自增 `token_version` + 撤销全部家族 + 返回新令牌 |
 | GET | `/api/v1/auth/me` | 当前主体、realm、权限码（前端菜单用；服务端仍逐请求校验） |
+| GET | `/api/v1/auth/sessions` | 我的登录设备列表（设备标签、最近使用、是否当前；只显示自己的） |
+| DELETE | `/api/v1/auth/sessions/{session_id}` | 下线指定设备（仅限本人会话） |
+| POST | `/api/v1/auth/sessions/revoke-others` | 退出其它设备（保留当前） |
 | POST | `/auth/password-reset/request` | 员工邮件重置（M1-D） |
 
 **令牌契约**
 - 访问令牌：HS256 JWT，15 分钟；claim `sub/realm/tenant_id/jti/token_version/must_change_password/iss/aud/exp`；`aud` 按 realm 区分（`campus-elf-tenant` / `campus-elf-platform`），跨 realm 混用直接拒绝（TD-074）。
 - 刷新令牌：`v1t.<tenant_id>.<jti>.<secret>`（租户）/ `v1p.<jti>.<secret>`（平台），仅存 SHA-256 哈希；7 天有效，每次刷新轮换。
+- 会话与设备（A31）：登录链即"会话"（family）；访问令牌增加 `sid`（会话 id）。服务端用 Redis 会话标记 `{prefix}:auth:session:{realm}:{sid}`（TTL=刷新令牌有效期）判定会话是否仍有效——登出/被踢/下线即删除标记，**下一次请求立刻 401**，不等 15 分钟。同账号同时在线设备数按 realm 受限（默认 C 端 3、校方 3、平台 2，配置化）；超限登录踢"最久未使用"的会话并审计 `auth.session.kicked`。设备标签由 UA 在服务端粗粒度解析（如"Chrome / Windows"），IP/UA 只存哈希，接口不回显明文。
 - 撤销：登出/改密即时失效——`token_version` 自增使所有旧访问令牌失效，刷新令牌按家族撤销；登出的访问令牌另写 Redis 撤销标记（TTL=剩余有效期）。
 - 身份/权限每次请求从数据库读取（不缓存快照）：停用账号、权限变更、`token_version` 变化立即生效。
 - 首登改密门禁：`must_change_password` 为真时只放行 `/auth/change-password`、`/auth/logout`、`/auth/me`，其余接口 403。
