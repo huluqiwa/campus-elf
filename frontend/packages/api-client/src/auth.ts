@@ -39,6 +39,52 @@ export interface PlatformLoginInput {
   password: string;
 }
 
+/** 重置申请：沿用登录的 realm 语义；tenant 需要学校编号 + 登录名，platform 需要账号。 */
+export interface PasswordResetRequestInput {
+  realm: Realm;
+  schoolCode?: string;
+  loginId?: string;
+  account?: string;
+}
+
+const MIN_PASSWORD_LENGTH = 10;
+const MAX_PASSWORD_LENGTH = 128;
+const MAX_PASSWORD_BYTES = 72;
+const MIN_LOGIN_ID_FOR_CONTAINMENT = 3;
+// 用 Unicode 二元属性对齐 Python 的 isupper/islower（含 Other_Uppercase/Lowercase）
+const HAS_UPPER = /\p{Uppercase}/u;
+const HAS_LOWER = /\p{Lowercase}/u;
+// Python str.isdigit 还接受上/下标数字（No）；服务端仍为最终权威
+const HAS_DIGIT = /[\p{Nd}\u00B2\u00B3\u00B9\u2070-\u2079\u2080-\u2089]/u;
+// Python 的 str.isalnum 覆盖 Unicode 字母/数字；中文属于 alnum，不算符号
+const HAS_SYMBOL = /[^\p{L}\p{N}\s]/u;
+
+/**
+ * 与后端 AUTH-03 同口径的本地预校验：返回错误文案，`null` 表示通过。
+ * 登录名可选（申请/重置页拿不到）；服务端仍会做最终校验。
+ */
+export function passwordPolicyError(password: string, loginId?: string): string | null {
+  // 按 Unicode 码点计数，与后端 len() 一致（emoji 不会被算成两个字符）
+  const length = Array.from(password).length;
+  if (length < MIN_PASSWORD_LENGTH || length > MAX_PASSWORD_LENGTH) {
+    return `密码长度需在 ${MIN_PASSWORD_LENGTH}~${MAX_PASSWORD_LENGTH} 个字符之间`;
+  }
+  if (new TextEncoder().encode(password).length > MAX_PASSWORD_BYTES) {
+    return `密码不能超过 ${MAX_PASSWORD_BYTES} 字节（一个汉字约 3 字节）`;
+  }
+  const classes = [HAS_UPPER, HAS_LOWER, HAS_DIGIT, HAS_SYMBOL].filter((pattern) =>
+    pattern.test(password),
+  ).length;
+  if (classes < 3) {
+    return "密码需至少包含大写字母、小写字母、数字、符号中的 3 类";
+  }
+  const login = (loginId ?? "").trim().toLowerCase();
+  if (login.length >= MIN_LOGIN_ID_FOR_CONTAINMENT && password.toLowerCase().includes(login)) {
+    return "密码不能包含学号/工号或账号";
+  }
+  return null;
+}
+
 export interface AuthSessionOptions {
   /** API 根地址；空串表示同源相对路径（Vite/Nginx 代理）。 */
   baseUrl: string;
@@ -63,6 +109,10 @@ export interface AuthSession {
   refresh(): Promise<AuthTokens>;
   logout(): Promise<void>;
   changePassword(currentPassword: string, newPassword: string): Promise<AuthTokens>;
+  /** 申请重置：后端固定 202（不暴露账号是否存在），调用方只需展示统一提示。 */
+  requestPasswordReset(input: PasswordResetRequestInput): Promise<void>;
+  /** 确认重置：成功返回 204，旧会话全部失效，需要重新登录。 */
+  confirmPasswordReset(token: string, newPassword: string): Promise<void>;
   me(): Promise<AuthUser>;
   /** 带鉴权的通用请求：401 自动刷新一次并重放。 */
   request<T>(path: string, init?: RequestInit): Promise<T>;
@@ -110,12 +160,20 @@ export function toUserMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-/** 从错误响应中取出可读信息（FastAPI 的错误体是 {detail: "..."}）。 */
+/** 从错误响应中取出可读信息（FastAPI 的错误体是 {detail: "..."} 或校验错误数组）。 */
 async function readErrorDetail(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { detail?: unknown };
     if (typeof body.detail === "string" && body.detail) {
       return body.detail;
+    }
+    if (Array.isArray(body.detail)) {
+      const messages = body.detail
+        .map((item) => (item && typeof item === "object" && "msg" in item ? String(item.msg) : ""))
+        .filter(Boolean);
+      if (messages.length) {
+        return messages.join("；");
+      }
     }
   } catch {
     /* 非 JSON 响应：忽略 */
@@ -161,6 +219,19 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
       throw new Error(await readErrorDetail(response));
     }
     return (await response.json()) as T;
+  }
+
+  /** 公开 POST：只关心成功/失败，不解析响应体（申请 202、确认 204）。 */
+  async function postEmpty(path: string, body: unknown): Promise<void> {
+    const response = await fetchImpl(`${baseUrl}${path}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    });
+    if (!response.ok) {
+      throw new Error(await readErrorDetail(response));
+    }
   }
 
   async function refresh(): Promise<AuthTokens> {
@@ -297,6 +368,22 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
         body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
       });
       return setTokens(toTokens(payload));
+    },
+
+    async requestPasswordReset(input: PasswordResetRequestInput): Promise<void> {
+      await postEmpty("/api/v1/auth/password-reset/request", {
+        realm: input.realm,
+        ...(input.realm === "tenant"
+          ? { school_code: input.schoolCode ?? "", login_id: input.loginId ?? "" }
+          : { account: input.account ?? "" }),
+      });
+    },
+
+    async confirmPasswordReset(token: string, newPassword: string): Promise<void> {
+      await postEmpty("/api/v1/auth/password-reset/confirm", {
+        token,
+        new_password: newPassword,
+      });
     },
 
     async me(): Promise<AuthUser> {

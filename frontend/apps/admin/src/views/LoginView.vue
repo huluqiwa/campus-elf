@@ -118,6 +118,14 @@ async function submit(): Promise<void> {
         >
           登录
         </el-button>
+
+        <router-link
+          class="forgot"
+          :to="{ name: 'forgot-password' }"
+          data-testid="forgot-password-link"
+        >
+          忘记密码？
+        </router-link>
       </el-form>
     </el-card>
   </main>
@@ -140,5 +148,13 @@ async function submit(): Promise<void> {
 .error {
   color: var(--el-color-danger);
   margin: 0 0 8px;
+}
+.forgot {
+  display: block;
+  margin-top: 12px;
+  text-align: center;
+  color: var(--el-color-primary);
+  text-decoration: none;
+  font-size: 14px;
 }
 </style>

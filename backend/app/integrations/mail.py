@@ -31,9 +31,7 @@ class SmtpMailer:
         self._start_tls = settings.smtp_start_tls
         self._username = settings.smtp_username
         self._password = (
-            settings.smtp_password.get_secret_value()
-            if settings.smtp_password
-            else None
+            settings.smtp_password.get_secret_value() if settings.smtp_password else None
         )
 
     async def send(self, *, to: str, subject: str, body: str) -> None:
@@ -75,6 +73,24 @@ def build_mailer(settings: Settings) -> Mailer:
     """按配置构造邮件实现。"""
 
     return SmtpMailer(settings)
+
+
+def render_password_reset_email(*, reset_url: str, expires_minutes: int) -> tuple[str, str]:
+    """渲染"重置密码"邮件（主题, 正文）。
+
+    令牌只出现在链接里；正文不含登录名/邮箱，避免误投递时泄露账号信息。
+    """
+
+    subject = "【校园陪伴精灵】密码重置"
+    body = (
+        "你好：\n\n"
+        "我们收到了重置校园陪伴精灵账号密码的请求。请在有效期内打开以下链接设置新密码：\n\n"
+        f"  {reset_url}\n\n"
+        f"链接 {expires_minutes} 分钟内有效，且只能使用一次。\n"
+        "如果这不是你本人的操作，请忽略本邮件，原密码仍然有效。\n\n"
+        "—— 校园陪伴精灵平台"
+    )
+    return subject, body
 
 
 def render_tenant_approved_email(

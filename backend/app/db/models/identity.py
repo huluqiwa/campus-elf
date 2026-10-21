@@ -14,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -44,12 +45,15 @@ class User(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
         CheckConstraint(
             "status IN ('active', 'locked', 'disabled', 'deleted')", name="status_valid"
         ),
+        CheckConstraint("failed_login_attempts >= 0", name="failed_login_attempts_nonnegative"),
     )
 
     user_type: Mapped[str] = mapped_column(String(16), nullable=False)
     # 登录标识：学号或工号（可含字母数字）
     login_id: Mapped[str] = mapped_column(String(254), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(200))
+    # 密码重置收件地址；校方管理员由 login_id（注册邮箱）回填/写入
+    email: Mapped[str | None] = mapped_column(String(254))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     # 无 server_default：初始密码账号必须由创建方显式置 true（fail-loud）
@@ -62,6 +66,12 @@ class User(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     password_changed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # 失败锁定窗口（AUTH-05）：每用户 advisory lock 内读改写
+    failed_login_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    failed_login_window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RefreshToken(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
@@ -79,7 +89,8 @@ class RefreshToken(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
         CheckConstraint(
             "revoked_reason IS NULL OR revoked_reason IN "
             "('logout', 'password_change', 'reuse_detected', 'rotated', 'admin_revoke', "
-            "'account_deleted', 'expired', 'session_kicked', 'session_revoked')",
+            "'account_deleted', 'expired', 'session_kicked', 'session_revoked', "
+            "'password_reset')",
             name="revoked_reason_valid",
         ),
         # 复合外键：令牌只能属于同租户用户
@@ -125,7 +136,7 @@ class PlatformRefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "revoked_reason IS NULL OR revoked_reason IN "
             "('logout', 'password_change', 'reuse_detected', 'rotated', "
             "'admin_revoke', 'account_deleted', 'expired', 'session_kicked', "
-            "'session_revoked')",
+            "'session_revoked', 'password_reset')",
             name="revoked_reason_valid",
         ),
         ForeignKeyConstraint(
@@ -151,3 +162,115 @@ class PlatformRefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     revoked_reason: Mapped[str | None] = mapped_column(String(32))
     ua_hash: Mapped[str | None] = mapped_column(String(64))
     ip_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+class PasswordHistory(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
+    """租户用户最近使用过的密码哈希（改密/重置时写入，保留最近 N 条）。"""
+
+    __tablename__ = "password_history"
+    __table_args__ = (
+        Index(
+            "ix_password_history_tenant_id_user_id",
+            "tenant_id",
+            "user_id",
+            "created_at",
+        ),
+        ForeignKeyConstraint(
+            ["user_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_password_history_user_id_tenant_id_users",
+            ondelete="CASCADE",
+        ),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PasswordResetToken(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
+    """租户密码重置令牌（只存 SHA-256 摘要；单次使用、30 分钟过期）。"""
+
+    __tablename__ = "password_reset_tokens"
+    __table_args__ = (
+        Index(
+            "ix_password_reset_tokens_tenant_user_created_at",
+            "tenant_id",
+            "user_id",
+            "created_at",
+        ),
+        Index("ix_password_reset_tokens_expires_at", "expires_at"),
+        UniqueConstraint("token_hash", name="uq_password_reset_tokens_token_hash"),
+        ForeignKeyConstraint(
+            ["user_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_password_reset_tokens_user_id_tenant_id_users",
+            ondelete="CASCADE",
+        ),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    request_ip_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+class PlatformPasswordHistory(UUIDPrimaryKeyMixin, Base):
+    """平台账号最近使用过的密码哈希。"""
+
+    __tablename__ = "platform_password_history"
+    __table_args__ = (
+        Index(
+            "ix_platform_password_history_user_created_at",
+            "platform_user_id",
+            "created_at",
+        ),
+        ForeignKeyConstraint(
+            ["platform_user_id"],
+            ["platform_users.id"],
+            name="fk_platform_password_history_platform_user_id_platform_users",
+            ondelete="CASCADE",
+        ),
+    )
+
+    platform_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PlatformPasswordResetToken(UUIDPrimaryKeyMixin, Base):
+    """平台密码重置令牌（只存 SHA-256 摘要；单次使用、30 分钟过期）。"""
+
+    __tablename__ = "platform_password_reset_tokens"
+    __table_args__ = (
+        Index(
+            "ix_platform_password_reset_tokens_user_created_at",
+            "platform_user_id",
+            "created_at",
+        ),
+        Index("ix_platform_password_reset_tokens_expires_at", "expires_at"),
+        UniqueConstraint("token_hash", name="uq_platform_password_reset_tokens_token_hash"),
+        ForeignKeyConstraint(
+            ["platform_user_id"],
+            ["platform_users.id"],
+            name="fk_platform_password_reset_tokens_user",
+            ondelete="CASCADE",
+        ),
+    )
+
+    platform_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    request_ip_hash: Mapped[str | None] = mapped_column(String(64))

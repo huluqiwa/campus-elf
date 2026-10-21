@@ -13,9 +13,10 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
+from app.api.client_ip import resolve_client_ip
 from app.auth import revocation, service, sessions, tokens
 from app.auth.principal import CurrentPrincipal, OptionalPrincipal
 from app.auth.service import AuthError
@@ -87,6 +88,39 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=1, max_length=128)
 
 
+class PasswordResetRequest(BaseModel):
+    """重置申请：租户填学校编号 + 登录名，平台填账号。"""
+
+    realm: Literal["tenant", "platform"]
+    school_code: str | None = Field(default=None, max_length=32)
+    login_id: str | None = Field(default=None, max_length=254)
+    account: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "PasswordResetRequest":
+        """按 realm 校验必填字段。"""
+
+        if self.realm == "tenant":
+            if not (self.school_code or "").strip() or not (self.login_id or "").strip():
+                raise ValueError("租户重置需要 school_code 与 login_id")
+        elif not (self.account or "").strip():
+            raise ValueError("平台重置需要 account")
+        return self
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    """重置确认请求（令牌来自邮件链接）。"""
+
+    token: str = Field(max_length=512)
+    new_password: str = Field(min_length=1, max_length=128)
+
+
+class AcceptedResponse(BaseModel):
+    """已受理响应（不透露账号是否存在/邮件是否发送）。"""
+
+    status: Literal["accepted"] = "accepted"
+
+
 class MeResponse(BaseModel):
     """当前主体。"""
 
@@ -127,9 +161,13 @@ class RevokeOthersResponse(BaseModel):
 
 
 def _http_error(exc: AuthError) -> HTTPException:
-    """业务错误 → HTTP 错误（401 带 WWW-Authenticate）。"""
+    """业务错误 → HTTP 错误（401 带 WWW-Authenticate，429 带 Retry-After）。"""
 
-    headers = {"WWW-Authenticate": "Bearer"} if exc.http_status == 401 else None
+    headers = None
+    if exc.http_status == 401:
+        headers = {"WWW-Authenticate": "Bearer"}
+    elif exc.http_status == 429:
+        headers = {"Retry-After": str(get_settings().password_reset_ip_window_seconds)}
     return HTTPException(status_code=exc.http_status, detail=exc.message, headers=headers)
 
 
@@ -192,7 +230,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     """
 
     request_id = getattr(request.state, "request_id", None)
-    client_ip = request.client.host if request.client else None
+    client_ip = resolve_client_ip(request)
     user_agent = request.headers.get("user-agent")
     try:
         if payload.realm == "tenant":
@@ -235,7 +273,7 @@ async def refresh(payload: RefreshRequest, request: Request, response: Response)
     try:
         pair = await service.refresh_tokens(
             refresh_token=refresh_token,
-            ip=request.client.host if request.client else None,
+            ip=resolve_client_ip(request),
             user_agent=request.headers.get("user-agent"),
             request_id=getattr(request.state, "request_id", None),
         )
@@ -303,9 +341,7 @@ async def logout(
                 access_revoked=access_revoked,
                 subject_user_id=principal.user_id,
                 request_id=request_id,
-                ip_hash=tokens.hash_client_fingerprint(
-                    request.client.host if request.client else None
-                ),
+                ip_hash=tokens.hash_client_fingerprint(resolve_client_ip(request)),
                 ua_hash=tokens.hash_client_fingerprint(request.headers.get("user-agent")),
             )
             if (
@@ -322,9 +358,7 @@ async def logout(
                     access_revoked=False,
                     subject_user_id=refresh_revocation.subject_user_id,
                     request_id=request_id,
-                    ip_hash=tokens.hash_client_fingerprint(
-                        request.client.host if request.client else None
-                    ),
+                    ip_hash=tokens.hash_client_fingerprint(resolve_client_ip(request)),
                     ua_hash=tokens.hash_client_fingerprint(request.headers.get("user-agent")),
                 )
     finally:
@@ -332,9 +366,7 @@ async def logout(
     return OkResponse()
 
 
-@router.post(
-    "/change-password", response_model=TokenResponse, response_model_exclude_none=True
-)
+@router.post("/change-password", response_model=TokenResponse, response_model_exclude_none=True)
 async def change_password(
     payload: ChangePasswordRequest,
     principal: CurrentPrincipal,
@@ -350,7 +382,7 @@ async def change_password(
             tenant_id=principal.tenant_id,
             current_password=payload.current_password,
             new_password=payload.new_password,
-            ip=request.client.host if request.client else None,
+            ip=resolve_client_ip(request),
             user_agent=request.headers.get("user-agent"),
             request_id=getattr(request.state, "request_id", None),
         )
@@ -359,6 +391,59 @@ async def change_password(
     # 改密会撤销全部旧家族：必须同时下发新刷新 Cookie，否则浏览器刷新即掉线（审查 MA1）
     _set_refresh_cookie(response, pair.refresh_token)
     return _token_response(pair)
+
+
+@router.post(
+    "/password-reset/request",
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_password_reset(
+    payload: PasswordResetRequest, request: Request, background_tasks: BackgroundTasks
+) -> AcceptedResponse:
+    """申请密码重置：恒返回 202（不暴露账号是否存在、是否有邮箱）。
+
+    邮件发送放到响应之后的背景任务，避免用响应耗时枚举账号是否存在；
+    202 在任务执行前返回，失败只留审计。
+    """
+
+    background_tasks.add_task(
+        service.request_password_reset,
+        realm=payload.realm,
+        school_code=payload.school_code,
+        login_id=payload.login_id,
+        account=payload.account,
+        ip=resolve_client_ip(request),
+        request_id=getattr(request.state, "request_id", None),
+    )
+    return AcceptedResponse()
+
+
+@router.post(
+    "/password-reset/confirm",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def confirm_password_reset(
+    payload: PasswordResetConfirmRequest, request: Request
+) -> Response:
+    """用邮件令牌设置新密码；成功后不签发令牌，客户端需重新登录。
+
+    异常:
+        HTTPException: 400 令牌无效/过期/已使用；422 新密码不合规。
+    """
+
+    try:
+        await service.confirm_password_reset(
+            token=payload.token,
+            new_password=payload.new_password,
+            ip=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except AuthError as exc:
+        raise _http_error(exc) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/sessions", response_model=SessionListResponse)

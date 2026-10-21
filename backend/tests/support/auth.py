@@ -4,7 +4,7 @@
 再通过 `/api/v1/auth/login` 走真实登录换取令牌（不绕过认证层）。
 """
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from httpx import AsyncClient
 from sqlalchemy import text
@@ -24,6 +24,7 @@ async def seed_platform_user(
     permissions: tuple[str, ...] = ("platform.tenant.review", "platform.tenant.view"),
     must_change_password: bool = False,
     status: str = "active",
+    email: str | None = None,
 ) -> str:
     """写入一个具备指定权限码的平台账号，返回账号名。
 
@@ -34,6 +35,7 @@ async def seed_platform_user(
         permissions: 期望授予的权限码。
         must_change_password: 是否处于首登改密状态。
         status: active/disabled。
+        email: 密码重置收件地址（None 表示未登记）。
 
     返回值:
         账号名。
@@ -44,11 +46,12 @@ async def seed_platform_user(
         user_id = await session.scalar(
             text(
                 "insert into platform_users "
-                "(account, password_hash, status, must_change_password, mfa_enabled) "
-                "values (:account, :hash, :status, :must_change, false) returning id"
+                "(account, email, password_hash, status, must_change_password, mfa_enabled) "
+                "values (:account, :email, :hash, :status, :must_change, false) returning id"
             ),
             {
                 "account": account,
+                "email": email,
                 "hash": hash_password(password),
                 "status": status,
                 "must_change": must_change_password,
@@ -56,9 +59,7 @@ async def seed_platform_user(
         )
         role_code = f"platform_test_role_{uuid4().hex[:8]}"
         role_id = await session.scalar(
-            text(
-                "insert into platform_roles (code, name) values (:code, :name) returning id"
-            ),
+            text("insert into platform_roles (code, name) values (:code, :name) returning id"),
             {"code": role_code, "name": role_code},
         )
         if permissions:
@@ -77,6 +78,52 @@ async def seed_platform_user(
             {"user_id": user_id, "role_id": role_id},
         )
     return account
+
+
+async def seed_tenant_user(
+    engine: AsyncEngine,
+    *,
+    school_code: str,
+    login_id: str,
+    password: str,
+    user_type: str = "school_admin",
+    email: str | None = None,
+    must_change_password: bool = False,
+    status: str = "active",
+) -> tuple[UUID, UUID]:
+    """写入租户与用户（复用已有同 school_code 的租户），返回 (tenant_id, user_id)。"""
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session, session.begin():
+        tenant_id = await session.scalar(
+            text("select id from tenants where school_code = :code"), {"code": school_code}
+        )
+        if tenant_id is None:
+            tenant_id = await session.scalar(
+                text(
+                    "insert into tenants (school_code, name, status, activated_at) "
+                    "values (:code, '认证测试中学', 'active', now()) returning id"
+                ),
+                {"code": school_code},
+            )
+        user_id = await session.scalar(
+            text(
+                "insert into users (tenant_id, user_type, login_id, display_name, email, "
+                "password_hash, status, must_change_password, mfa_enabled) "
+                "values (:tenant_id, :user_type, :login_id, '测试用户', :email, :hash, "
+                ":status, :must_change, false) returning id"
+            ),
+            {
+                "tenant_id": tenant_id,
+                "user_type": user_type,
+                "login_id": login_id,
+                "email": email,
+                "hash": hash_password(password),
+                "status": status,
+                "must_change": must_change_password,
+            },
+        )
+        return tenant_id, user_id
 
 
 async def login_platform(

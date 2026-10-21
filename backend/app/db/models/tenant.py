@@ -10,7 +10,7 @@
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import CheckConstraint, DateTime, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -46,9 +46,14 @@ class PlatformUser(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """SaaS 平台账号（不开放注册，由初始化脚本/平台超管创建）。"""
 
     __tablename__ = "platform_users"
-    __table_args__ = (CheckConstraint("status IN ('active', 'disabled')", name="status_valid"),)
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'disabled')", name="status_valid"),
+        CheckConstraint("failed_login_attempts >= 0", name="failed_login_attempts_nonnegative"),
+    )
 
     account: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # 密码重置收件地址（平台账号由超管维护）
+    email: Mapped[str | None] = mapped_column(String(254))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     # 无 server_default：初始密码账号必须由创建方显式置 true（fail-loud）
@@ -61,3 +66,9 @@ class PlatformUser(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     password_changed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # 失败锁定窗口（AUTH-05）
+    failed_login_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    failed_login_window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

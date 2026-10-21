@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** C 端强制改密页：首登必须改密后才能使用其他功能。 */
-import { toUserMessage } from "@campus-elf/api-client";
+import { passwordPolicyError, toUserMessage } from "@campus-elf/api-client";
 import { showToast } from "vant";
 import { reactive, ref } from "vue";
 import { useRouter } from "vue-router";
@@ -24,8 +24,9 @@ async function submit(): Promise<void> {
     errorMessage.value = "两次输入的新密码不一致";
     return;
   }
-  if (form.newPassword.length < 10) {
-    errorMessage.value = "新密码至少 10 位";
+  const policy = passwordPolicyError(form.newPassword);
+  if (policy) {
+    errorMessage.value = policy;
     return;
   }
   submitting.value = true;

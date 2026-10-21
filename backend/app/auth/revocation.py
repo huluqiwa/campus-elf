@@ -22,6 +22,7 @@ from app.config import get_settings
 # 键带 realm 与项目前缀，租户/平台互不干扰；TTL 与令牌剩余有效期一致，自动过期无需清理
 _KEY_TEMPLATE = "{prefix}:auth:revoked:{realm}:jti:{jti}"
 _SESSION_KEY_TEMPLATE = "{prefix}:auth:session:{realm}:{sid}"
+_RATE_LIMIT_KEY_TEMPLATE = "{prefix}:auth:ratelimit:{scope}:{identity}"
 _Realm = Literal["tenant", "platform"]
 _client: aioredis.Redis | None = None
 # Redis 异常不得拖垮已鉴权请求：连接/读写超时短且显式设置（TD-102）
@@ -57,9 +58,7 @@ def _session_key(session_id: UUID | str, realm: _Realm) -> str:
     )
 
 
-async def revoke(
-    jti: str, expires_at: datetime | None = None, *, realm: _Realm = "tenant"
-) -> bool:
+async def revoke(jti: str, expires_at: datetime | None = None, *, realm: _Realm = "tenant") -> bool:
     """把访问令牌 jti 加入撤销集合（best-effort）。
 
     Redis 故障时返回 False 并告警：调用方仍须完成数据库侧的家族撤销与审计，
@@ -140,9 +139,7 @@ async def session_ttl(session_id: UUID, *, realm: _Realm = "tenant") -> int:
     return max(int(ttl), 0)
 
 
-async def filter_active(
-    session_ids: list[UUID], *, realm: _Realm = "tenant"
-) -> set[UUID]:
+async def filter_active(session_ids: list[UUID], *, realm: _Realm = "tenant") -> set[UUID]:
     """过滤仍存在会话标记的 sid（一次 MGET；Redis 故障时全部保留）。"""
 
     if not session_ids:
@@ -152,9 +149,7 @@ async def filter_active(
     except RedisError as exc:
         logger.warning("会话标记批量查询失败（realm=%s）：%s", realm, exc)
         return set(session_ids)
-    return {
-        sid for sid, value in zip(session_ids, values, strict=False) if value is not None
-    }
+    return {sid for sid, value in zip(session_ids, values, strict=False) if value is not None}
 
 
 async def is_active(jti: str, session_id: UUID, *, realm: _Realm = "tenant") -> bool:
@@ -165,13 +160,45 @@ async def is_active(jti: str, session_id: UUID, *, realm: _Realm = "tenant") -> 
     """
 
     try:
-        values = await _redis().mget(
-            _key(jti, realm), _session_key(session_id, realm)
-        )
+        values = await _redis().mget(_key(jti, realm), _session_key(session_id, realm))
     except RedisError as exc:
         logger.warning("Redis 不可用，跳过会话存在性检查（realm=%s）：%s", realm, exc)
         return True
     return values[0] is None and values[1] is not None
+
+
+async def allow_rate_limit(scope: str, identity: str, *, limit: int, window_seconds: int) -> bool:
+    """固定窗口限流：窗口内计数未超上限返回 True。
+
+    Redis 故障时放行（fail-open）：限流是防滥用的附加层，不能把登录/重置
+    变成 Redis 的单点依赖（TD-102 同一降级语义）。
+    """
+
+    key = _RATE_LIMIT_KEY_TEMPLATE.format(
+        prefix=get_settings().redis_prefix, scope=scope, identity=identity
+    )
+    try:
+        async with _redis().pipeline(transaction=True) as pipe:
+            pipe.incr(key)
+            # 只在首次计数时设置 TTL，窗口从第一个请求开始
+            pipe.expire(key, max(int(window_seconds), 1), nx=True)
+            count, _ = await pipe.execute()
+    except RedisError as exc:
+        logger.warning("限流计数失败（scope=%s），本次放行：%s", scope, exc)
+        return True
+    return int(count) <= limit
+
+
+async def clear_rate_limit(scope: str, identity: str) -> None:
+    """删除限流计数（运维/测试解封用，Redis 故障只告警）。"""
+
+    key = _RATE_LIMIT_KEY_TEMPLATE.format(
+        prefix=get_settings().redis_prefix, scope=scope, identity=identity
+    )
+    try:
+        await _redis().delete(key)
+    except RedisError as exc:
+        logger.warning("限流计数清理失败（scope=%s）：%s", scope, exc)
 
 
 async def reset_client() -> None:

@@ -12,9 +12,11 @@
 """
 
 import hmac
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import anyio
@@ -24,29 +26,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.writer import append_audit
 from app.auth import revocation
 from app.auth import sessions as session_store
-from app.auth.passwords import hash_password, verify_password
+from app.auth.lockout import (
+    LockoutState,
+    is_account_locked,
+    register_login_failure,
+)
+from app.auth.passwords import (
+    MAX_PASSWORD_BYTES,
+    PasswordPolicyError,
+    hash_password,
+    is_password_reused,
+    validate_password_strength,
+    verify_password,
+)
 from app.auth.tokens import (
     Realm,
+    TokenError,
     create_access_token,
+    generate_password_reset_token,
     generate_refresh_token,
     hash_client_fingerprint,
+    hash_password_reset_token,
     hash_refresh_token,
+    parse_password_reset_token,
 )
 from app.config import Settings, get_settings
 from app.db.session import db_session
+from app.integrations.mail import build_mailer, render_password_reset_email
 
-# 新密码最小长度（完整策略在 M1-D：历史/复杂度/与学号工号比对）
-MIN_PASSWORD_LENGTH = 10
-MAX_PASSWORD_LENGTH = 128
+logger = logging.getLogger(__name__)
+
 # bcrypt 输入上限 72 字节（多字节按 UTF-8 计）：超长会抛 ValueError（500）。
 # 入口按字节拦截；改哈希方案（argon2/预哈希）见 TD-107。
-MAX_PASSWORD_BYTES = 72
 
-
-def _password_within_bcrypt_limit(password: str) -> bool:
-    """口令是否在 bcrypt 可处理范围内（UTF-8 字节数）。"""
-
-    return len(password.encode("utf-8")) <= MAX_PASSWORD_BYTES
 
 # 刷新令牌串的两类前缀（用于区分 realm；secret 才是凭证）
 _TENANT_REFRESH_KIND = "v1t"
@@ -57,9 +69,7 @@ INVALID_CREDENTIALS_MESSAGE = "学校编号、账号或密码不正确"
 # 账号不存在时用于"等时假比对"的占位摘要（bcrypt cost 12，与真实校验同耗时）：
 # 登录失败路径统一付出一次 bcrypt 开销，避免用响应时间枚举账号是否存在（审查 Minor 6）。
 # 该值不是任何账号的口令，仅用于消耗等价计算量。
-_TIMING_EQUALIZATION_HASH = (
-    "$2b$12$lmaZFg4Ynv/J4PEzLkCYlOkUhUL6H2ffvrAmrTHkoc14Q8Q.PuDEm"
-)
+_TIMING_EQUALIZATION_HASH = "$2b$12$lmaZFg4Ynv/J4PEzLkCYlOkUhUL6H2ffvrAmrTHkoc14Q8Q.PuDEm"
 
 # 按 realm 的字面量 SQL：表名不参与字符串拼接，便于审查"租户/平台各自访问哪些表"。
 _SQL: dict[Realm, dict[str, str]] = {
@@ -94,15 +104,54 @@ _SQL: dict[Realm, dict[str, str]] = {
             "where tenant_id = :tid and jti = :jti"
         ),
         "select_credentials": (
-            "select status, password_hash from users where tenant_id = :tid and id = :uid"
+            "select status, password_hash, login_id, failed_login_attempts, "
+            "failed_login_window_started_at, locked_until from users "
+            "where tenant_id = :tid and id = :uid"
         ),
         "set_credential_hash": (
             "update users set password_hash = :hash, must_change_password = false, "
             "password_changed_at = now(), token_version = token_version + 1, "
-            "updated_at = now() where tenant_id = :tid and id = :uid"
+            "failed_login_attempts = 0, failed_login_window_started_at = null, "
+            "locked_until = null, updated_at = now() "
+            "where tenant_id = :tid and id = :uid"
+        ),
+        "select_login": (
+            "select id, status, password_hash, token_version, must_change_password, "
+            "failed_login_attempts, failed_login_window_started_at, locked_until "
+            "from users where tenant_id = :tid and login_id = :login"
+        ),
+        "update_login_failure": (
+            "update users set failed_login_attempts = :attempts, "
+            "failed_login_window_started_at = :window_started, "
+            "locked_until = :locked_until, updated_at = now() "
+            "where tenant_id = :tid and id = :uid"
+        ),
+        "clear_login_failures": (
+            "update users set failed_login_attempts = 0, "
+            "failed_login_window_started_at = null, locked_until = null, updated_at = now() "
+            "where tenant_id = :tid and id = :uid "
+            "and (failed_login_attempts <> 0 or failed_login_window_started_at is not null "
+            "     or locked_until is not null)"
+        ),
+        "select_password_history": (
+            "select password_hash from password_history "
+            "where tenant_id = :tid and user_id = :uid "
+            "order by created_at desc, id desc limit :limit"
+        ),
+        "insert_password_history": (
+            "insert into password_history (tenant_id, user_id, password_hash) "
+            "values (:tid, :uid, :hash)"
+        ),
+        "trim_password_history": (
+            "delete from password_history "
+            "where tenant_id = :tid and user_id = :uid and id not in ("
+            "  select id from password_history "
+            "  where tenant_id = :tid and user_id = :uid "
+            "  order by created_at desc, id desc limit :keep"
+            ")"
         ),
         "revoke_user_tokens": (
-            "update refresh_tokens set revoked_at = now(), revoked_reason = 'password_change' "
+            "update refresh_tokens set revoked_at = now(), revoked_reason = :reason "
             "where tenant_id = :tid and user_id = :uid and revoked_at is null"
         ),
         "select_credential_version": (
@@ -111,6 +160,32 @@ _SQL: dict[Realm, dict[str, str]] = {
         "active_families": (
             "select distinct family_id from refresh_tokens "
             "where tenant_id = :tid and user_id = :uid and revoked_at is null"
+        ),
+        "select_reset_user_by_login": (
+            "select id, status, email, user_type from users "
+            "where tenant_id = :tid and login_id = :login"
+        ),
+        "latest_reset_created_at": (
+            "select created_at from password_reset_tokens "
+            "where tenant_id = :tid and user_id = :uid "
+            "order by created_at desc, id desc limit 1"
+        ),
+        "invalidate_reset_tokens": (
+            "update password_reset_tokens set used_at = now() "
+            "where tenant_id = :tid and user_id = :uid and used_at is null"
+        ),
+        "insert_reset_token": (
+            "insert into password_reset_tokens "
+            "(tenant_id, user_id, token_hash, expires_at, request_ip_hash) "
+            "values (:tid, :uid, :hash, :expires_at, :ip_hash)"
+        ),
+        "select_reset_by_hash": (
+            "select id, user_id, expires_at, used_at from password_reset_tokens "
+            "where tenant_id = :tid and token_hash = :hash"
+        ),
+        "consume_reset_token": (
+            "update password_reset_tokens set used_at = now() "
+            "where tenant_id = :tid and id = :id and used_at is null returning id"
         ),
     },
     "platform": {
@@ -130,8 +205,7 @@ _SQL: dict[Realm, dict[str, str]] = {
             "  and revoked_reason is distinct from 'rotated' limit 1"
         ),
         "select_user_state": (
-            "select status, token_version, must_change_password from platform_users "
-            "where id = :uid"
+            "select status, token_version, must_change_password from platform_users where id = :uid"
         ),
         "rotate_refresh": (
             "update platform_refresh_tokens set rotated_to_jti = :new_jti, revoked_at = now(), "
@@ -142,21 +216,84 @@ _SQL: dict[Realm, dict[str, str]] = {
             "select family_id, platform_user_id as user_id, token_hash "
             "from platform_refresh_tokens where jti = :jti"
         ),
-        "select_credentials": "select status, password_hash from platform_users where id = :uid",
+        "select_credentials": (
+            "select status, password_hash, account as login_id, failed_login_attempts, "
+            "failed_login_window_started_at, locked_until from platform_users where id = :uid"
+        ),
         "set_credential_hash": (
             "update platform_users set password_hash = :hash, must_change_password = false, "
             "password_changed_at = now(), token_version = token_version + 1, "
-            "updated_at = now() where id = :uid"
+            "failed_login_attempts = 0, failed_login_window_started_at = null, "
+            "locked_until = null, updated_at = now() where id = :uid"
+        ),
+        "select_login": (
+            "select id, status, password_hash, token_version, must_change_password, "
+            "failed_login_attempts, failed_login_window_started_at, locked_until "
+            "from platform_users where account = :login"
+        ),
+        "update_login_failure": (
+            "update platform_users set failed_login_attempts = :attempts, "
+            "failed_login_window_started_at = :window_started, "
+            "locked_until = :locked_until, updated_at = now() where id = :uid"
+        ),
+        "clear_login_failures": (
+            "update platform_users set failed_login_attempts = 0, "
+            "failed_login_window_started_at = null, locked_until = null, updated_at = now() "
+            "where id = :uid "
+            "and (failed_login_attempts <> 0 or failed_login_window_started_at is not null "
+            "     or locked_until is not null)"
+        ),
+        "select_password_history": (
+            "select password_hash from platform_password_history "
+            "where platform_user_id = :uid "
+            "order by created_at desc, id desc limit :limit"
+        ),
+        "insert_password_history": (
+            "insert into platform_password_history (platform_user_id, password_hash) "
+            "values (:uid, :hash)"
+        ),
+        "trim_password_history": (
+            "delete from platform_password_history "
+            "where platform_user_id = :uid and id not in ("
+            "  select id from platform_password_history "
+            "  where platform_user_id = :uid "
+            "  order by created_at desc, id desc limit :keep"
+            ")"
         ),
         "revoke_user_tokens": (
             "update platform_refresh_tokens set revoked_at = now(), "
-            "revoked_reason = 'password_change', updated_at = now() "
+            "revoked_reason = :reason, updated_at = now() "
             "where platform_user_id = :uid and revoked_at is null"
         ),
         "select_credential_version": "select token_version from platform_users where id = :uid",
         "active_families": (
             "select distinct family_id from platform_refresh_tokens "
             "where platform_user_id = :uid and revoked_at is null"
+        ),
+        "select_reset_user_by_login": (
+            "select id, status, email from platform_users where account = :login"
+        ),
+        "latest_reset_created_at": (
+            "select created_at from platform_password_reset_tokens "
+            "where platform_user_id = :uid "
+            "order by created_at desc, id desc limit 1"
+        ),
+        "invalidate_reset_tokens": (
+            "update platform_password_reset_tokens set used_at = now() "
+            "where platform_user_id = :uid and used_at is null"
+        ),
+        "insert_reset_token": (
+            "insert into platform_password_reset_tokens "
+            "(platform_user_id, token_hash, expires_at, request_ip_hash) "
+            "values (:uid, :hash, :expires_at, :ip_hash)"
+        ),
+        "select_reset_by_hash": (
+            "select id, platform_user_id as user_id, expires_at, used_at "
+            "from platform_password_reset_tokens where token_hash = :hash"
+        ),
+        "consume_reset_token": (
+            "update platform_password_reset_tokens set used_at = now() "
+            "where id = :id and used_at is null returning id"
         ),
     },
 }
@@ -218,6 +355,32 @@ class AuthError(Exception):
         self.code = code
         self.message = message
         self.http_status = http_status
+
+
+class _ResetFailure(Exception):
+    """内部信号：重置确认业务失败（事务回滚后由外层写审计并映射响应）。
+
+    `token_found` 表示失败时令牌行确实存在于该租户（用于区分真实失败与伪造 tenant_id，
+    后者只写平台审计，避免往任意租户的审计日志里灌数据）。
+    """
+
+    def __init__(
+        self, reason: str, *, message: str | None = None, token_found: bool = False
+    ) -> None:
+        """初始化失败信号。"""
+
+        super().__init__(reason)
+        self.reason = reason
+        self.message = message
+        self.token_found = token_found
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedReset:
+    """令牌已提交、待发送的重置邮件（明文令牌只在内存中短暂存在）。"""
+
+    email: str
+    token: str
 
 
 class _RefreshFailure(Exception):
@@ -369,6 +532,127 @@ def _scope_params(realm: Realm, tenant_id: UUID | None) -> dict[str, UUID]:
     return {}
 
 
+def _weak_password(message: str) -> AuthError:
+    """统一的新密码不合规错误（422）。"""
+
+    return AuthError("WEAK_PASSWORD", message, 422)
+
+
+def _validate_new_password(new_password: str, *, login_id: str) -> None:
+    """校验密码复杂度；策略错误映射为 422（不泄露内部规则细节之外的信息）。"""
+
+    try:
+        validate_password_strength(new_password, login_id=login_id)
+    except PasswordPolicyError as exc:
+        raise _weak_password(str(exc)) from exc
+
+
+async def _recent_password_hashes(
+    session: AsyncSession,
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    user_id: UUID,
+    limit: int,
+) -> list[str]:
+    """读取最近 N 条历史密码哈希（不含当前密码）。"""
+
+    params: dict[str, object] = {"uid": user_id, "limit": limit}
+    params.update(_scope_params(realm, tenant_id))
+    values: list[object] = list(
+        (await session.execute(text(_SQL[realm]["select_password_history"]), params))
+        .scalars()
+        .all()
+    )
+    return [str(value) for value in values]
+
+
+async def _ensure_password_not_reused(
+    session: AsyncSession,
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    user_id: UUID,
+    new_password: str,
+    current_hash: str,
+    history_size: int,
+) -> None:
+    """拒绝复用当前密码或最近 N 个旧密码。"""
+
+    hashes = [
+        current_hash,
+        *await _recent_password_hashes(
+            session, realm=realm, tenant_id=tenant_id, user_id=user_id, limit=history_size
+        ),
+    ]
+    reused = await anyio.to_thread.run_sync(is_password_reused, new_password, hashes)
+    if reused:
+        raise _weak_password("新密码不能与当前密码或最近使用过的密码相同")
+
+
+async def _record_password_history(
+    session: AsyncSession,
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    user_id: UUID,
+    old_hash: str,
+    keep: int,
+) -> None:
+    """把旧密码写入历史并裁剪到最近 N 条。"""
+
+    params: dict[str, object] = {"uid": user_id, "hash": old_hash}
+    params.update(_scope_params(realm, tenant_id))
+    await session.execute(text(_SQL[realm]["insert_password_history"]), params)
+    await session.execute(
+        text(_SQL[realm]["trim_password_history"]),
+        {"uid": user_id, "keep": keep, **_scope_params(realm, tenant_id)},
+    )
+
+
+async def _clear_login_failures(
+    session: AsyncSession, *, realm: Realm, tenant_id: UUID | None, user_id: UUID
+) -> None:
+    """成功登录后清零失败窗口与锁定（仅在有数据时更新）。"""
+
+    await session.execute(
+        text(_SQL[realm]["clear_login_failures"]),
+        {"uid": user_id, **_scope_params(realm, tenant_id)},
+    )
+
+
+async def _apply_login_failure(
+    session: AsyncSession,
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    user_id: UUID,
+    state: LockoutState,
+    settings: Settings,
+    now: datetime,
+) -> LockoutState:
+    """在同一事务内累加失败次数并按阈值锁定（调用方持有用户 advisory lock）。"""
+
+    updated = register_login_failure(
+        state,
+        now=now,
+        max_failures=settings.auth_max_login_failures,
+        window_seconds=settings.auth_login_failure_window_seconds,
+        lockout_seconds=settings.auth_lockout_seconds,
+    )
+    await session.execute(
+        text(_SQL[realm]["update_login_failure"]),
+        {
+            "uid": user_id,
+            "attempts": updated.failed_attempts,
+            "window_started": updated.window_started_at,
+            "locked_until": updated.locked_until,
+            **_scope_params(realm, tenant_id),
+        },
+    )
+    return updated
+
+
 async def _revoke_family(
     session: AsyncSession,
     *,
@@ -420,11 +704,15 @@ async def login_tenant(
 
     async with db_session(platform=True) as platform_session:
         tenant_row = (
-            await platform_session.execute(
-                text("select id, status from tenants where school_code = :code"),
-                {"code": code},
+            (
+                await platform_session.execute(
+                    text("select id, status from tenants where school_code = :code"),
+                    {"code": code},
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     if tenant_row is None or tenant_row["status"] != "active":
         async with db_session(platform=True) as audit_session:
@@ -442,6 +730,8 @@ async def login_tenant(
     tenant_id: UUID = tenant_row["id"]
     pair: TokenPair | None = None
     kicked: list[UUID] = []
+    failure_reason = "invalid_password"
+    failure_state: LockoutState | None = None
 
     async with db_session(tenant_id=tenant_id) as session:
         # 先取 id 再加锁，锁后重读：避免并发改密/停用后签发旧 token_version
@@ -452,24 +742,36 @@ async def login_tenant(
             )
         ).first()
         if user_id_row is not None:
-            await session_store.acquire_user_lock(
-                session, realm="tenant", user_id=user_id_row[0]
-            )
+            await session_store.acquire_user_lock(session, realm="tenant", user_id=user_id_row[0])
 
+        now = datetime.now(UTC)
         user_row = (
-            await session.execute(
-                text(
-                    "select id, status, password_hash, token_version, must_change_password "
-                    "from users where tenant_id = :tid and login_id = :login"
-                ),
-                {"tid": tenant_id, "login": login},
+            (
+                await session.execute(
+                    text(_SQL["tenant"]["select_login"]),
+                    {"tid": tenant_id, "login": login},
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
-        stored_hash = str(user_row["password_hash"]) if user_row is not None else _TIMING_EQUALIZATION_HASH
+        locked = user_row is not None and is_account_locked(
+            cast(datetime | None, user_row["locked_until"]), now
+        )
+        if user_row is None:
+            failure_reason = "unknown_account"
+        elif user_row["status"] != "active":
+            failure_reason = "account_unavailable"
+        elif locked:
+            failure_reason = "locked"
+
+        stored_hash = (
+            str(user_row["password_hash"]) if user_row is not None else _TIMING_EQUALIZATION_HASH
+        )
         password_ok = False
-        if _password_within_bcrypt_limit(password):
-            # 账号不存在时同样比对占位哈希：失败路径耗时一致（反账号枚举）
+        if len(password.encode("utf-8")) <= MAX_PASSWORD_BYTES:
+            # 账号不存在/锁定时同样比对：失败路径耗时一致（反账号枚举）
             password_ok = await anyio.to_thread.run_sync(verify_password, password, stored_hash)
 
         roles: frozenset[str] = frozenset()
@@ -478,7 +780,15 @@ async def login_tenant(
                 session, realm="tenant", tenant_id=tenant_id, user_id=user_row["id"]
             )
 
-        if user_row is not None and password_ok and user_row["status"] == "active":
+        if user_row is not None and password_ok and user_row["status"] == "active" and not locked:
+            if (
+                int(user_row["failed_login_attempts"])
+                or user_row["failed_login_window_started_at"] is not None
+                or user_row["locked_until"] is not None
+            ):
+                await _clear_login_failures(
+                    session, realm="tenant", tenant_id=tenant_id, user_id=user_row["id"]
+                )
             kicked = await session_store.enforce_limit(
                 session,
                 realm="tenant",
@@ -516,9 +826,34 @@ async def login_tenant(
             )
             # 标记在事务内登记：撤销方串行化后不会再被"提交后补写"复活
             await revocation.register_session(pair.session_id, realm="tenant")
+        elif failure_reason == "invalid_password" and user_row is not None:
+            failure_state = await _apply_login_failure(
+                session,
+                realm="tenant",
+                tenant_id=tenant_id,
+                user_id=user_row["id"],
+                state=LockoutState(
+                    failed_attempts=int(user_row["failed_login_attempts"]),
+                    window_started_at=cast(
+                        datetime | None, user_row["failed_login_window_started_at"]
+                    ),
+                    locked_until=cast(datetime | None, user_row["locked_until"]),
+                ),
+                settings=settings,
+                now=now,
+            )
 
     if pair is None:
         async with db_session(tenant_id=tenant_id) as audit_session:
+            metadata: dict[str, object] = {
+                "login_masked": login[:1] + "***",
+                "reason": failure_reason,
+                "ip_hash": ip_hash,
+                "ua_hash": ua_hash,
+            }
+            if failure_state is not None:
+                metadata["failed_attempts"] = failure_state.failed_attempts
+                metadata["lock_applied"] = failure_state.locked_until is not None
             await append_audit(
                 audit_session,
                 action="auth.login.failed",
@@ -526,11 +861,7 @@ async def login_tenant(
                 actor_realm="tenant",
                 tenant_id=tenant_id,
                 result="failure",
-                metadata={
-                    "login_masked": login[:1] + "***",
-                    "ip_hash": ip_hash,
-                    "ua_hash": ua_hash,
-                },
+                metadata=metadata,
                 request_id=request_id,
             )
         raise _invalid_credentials()
@@ -562,6 +893,8 @@ async def login_platform(
     device_label = session_store.device_label_from_user_agent(user_agent)
     pair: TokenPair | None = None
     kicked: list[UUID] = []
+    failure_reason = "invalid_password"
+    failure_state: LockoutState | None = None
 
     async with db_session(platform=True) as session:
         user_id_row = (
@@ -571,32 +904,43 @@ async def login_platform(
             )
         ).first()
         if user_id_row is not None:
-            await session_store.acquire_user_lock(
-                session, realm="platform", user_id=user_id_row[0]
-            )
+            await session_store.acquire_user_lock(session, realm="platform", user_id=user_id_row[0])
 
+        now = datetime.now(UTC)
         row = (
-            await session.execute(
-                text(
-                    "select id, status, password_hash, token_version, must_change_password "
-                    "from platform_users where account = :account"
-                ),
-                {"account": normalized},
-            )
-        ).mappings().one_or_none()
+            (await session.execute(text(_SQL["platform"]["select_login"]), {"login": normalized}))
+            .mappings()
+            .one_or_none()
+        )
+
+        locked = row is not None and is_account_locked(
+            cast(datetime | None, row["locked_until"]), now
+        )
+        if row is None:
+            failure_reason = "unknown_account"
+        elif row["status"] != "active":
+            failure_reason = "account_unavailable"
+        elif locked:
+            failure_reason = "locked"
 
         stored_hash = str(row["password_hash"]) if row is not None else _TIMING_EQUALIZATION_HASH
         password_ok = False
-        if _password_within_bcrypt_limit(password):
+        if len(password.encode("utf-8")) <= MAX_PASSWORD_BYTES:
             password_ok = await anyio.to_thread.run_sync(verify_password, password, stored_hash)
 
         roles: frozenset[str] = frozenset()
         if row is not None and row["status"] == "active":
-            roles = await _load_roles(
-                session, realm="platform", tenant_id=None, user_id=row["id"]
-            )
+            roles = await _load_roles(session, realm="platform", tenant_id=None, user_id=row["id"])
 
-        if row is not None and password_ok and row["status"] == "active":
+        if row is not None and password_ok and row["status"] == "active" and not locked:
+            if (
+                int(row["failed_login_attempts"])
+                or row["failed_login_window_started_at"] is not None
+                or row["locked_until"] is not None
+            ):
+                await _clear_login_failures(
+                    session, realm="platform", tenant_id=None, user_id=row["id"]
+                )
             kicked = await session_store.enforce_limit(
                 session,
                 realm="platform",
@@ -628,21 +972,40 @@ async def login_platform(
                 request_id=request_id,
             )
             await revocation.register_session(pair.session_id, realm="platform")
+        elif failure_reason == "invalid_password" and row is not None:
+            failure_state = await _apply_login_failure(
+                session,
+                realm="platform",
+                tenant_id=None,
+                user_id=row["id"],
+                state=LockoutState(
+                    failed_attempts=int(row["failed_login_attempts"]),
+                    window_started_at=cast(datetime | None, row["failed_login_window_started_at"]),
+                    locked_until=cast(datetime | None, row["locked_until"]),
+                ),
+                settings=settings,
+                now=now,
+            )
 
     if pair is None:
         async with db_session(platform=True) as audit_session:
+            metadata: dict[str, object] = {
+                "realm": "platform",
+                "account_masked": normalized[:1] + "***",
+                "reason": failure_reason,
+                "ip_hash": ip_hash,
+                "ua_hash": ua_hash,
+            }
+            if failure_state is not None:
+                metadata["failed_attempts"] = failure_state.failed_attempts
+                metadata["lock_applied"] = failure_state.locked_until is not None
             await append_audit(
                 audit_session,
                 action="auth.login.failed",
                 resource_type="auth",
                 actor_realm="platform",
                 result="failure",
-                metadata={
-                    "realm": "platform",
-                    "account_masked": normalized[:1] + "***",
-                    "ip_hash": ip_hash,
-                    "ua_hash": ua_hash,
-                },
+                metadata=metadata,
                 request_id=request_id,
             )
         raise _invalid_credentials()
@@ -723,7 +1086,9 @@ async def _tenant_exists(tenant_id: UUID) -> bool:
     """租户是否存在（平台连接查询，避免在租户会话内嵌套第二连接）。"""
 
     async with db_session(platform=True) as session:
-        return bool(await session.scalar(text("select 1 from tenants where id = :tid"), {"tid": tenant_id}))
+        return bool(
+            await session.scalar(text("select 1 from tenants where id = :tid"), {"tid": tenant_id})
+        )
 
 
 async def _record_refresh_failure(
@@ -748,17 +1113,11 @@ async def _record_refresh_failure(
         )
         return
 
-    if (
-        failure.reason == "reuse"
-        and failure.family_id is not None
-        and failure.user_id is not None
-    ):
+    if failure.reason == "reuse" and failure.family_id is not None and failure.user_id is not None:
         # 先独立提交家族撤销（安全动作优先），审计失败不得连带回滚（审查 Minor 9）；
         # 取同一把用户锁，避免在途刷新插入的新行逃过撤销（第二轮审查 M3）。
         async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
-            await session_store.acquire_user_lock(
-                session, realm=realm, user_id=failure.user_id
-            )
+            await session_store.acquire_user_lock(session, realm=realm, user_id=failure.user_id)
             await _revoke_family(
                 session,
                 realm=realm,
@@ -871,9 +1230,7 @@ async def _revoked_failure(
     if reuse:
         params: dict[str, object] = {"fid": row["family_id"], "uid": row["user_id"]}
         params.update(_scope_params(realm, tenant_id))
-        family_revoked = await session.scalar(
-            text(_SQL[realm]["family_revoked"]), params
-        )
+        family_revoked = await session.scalar(text(_SQL[realm]["family_revoked"]), params)
         if family_revoked is not None:
             reuse = False
     return _RefreshFailure(
@@ -906,11 +1263,15 @@ async def _rotate(
     """
 
     row = (
-        await session.execute(
-            text(_SQL[realm]["select_refresh"]),
-            {"jti": jti, **_scope_params(realm, tenant_id)},
+        (
+            await session.execute(
+                text(_SQL[realm]["select_refresh"]),
+                {"jti": jti, **_scope_params(realm, tenant_id)},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
 
     if row is None or not hmac.compare_digest(str(row["token_hash"]), expected_hash):
         raise _RefreshFailure("unknown_token")
@@ -918,36 +1279,40 @@ async def _rotate(
     # 与撤销/改密/其它刷新串行化；锁后重读，避免用旧快照轮换已撤销 family
     await session_store.acquire_user_lock(session, realm=realm, user_id=row["user_id"])
     row = (
-        await session.execute(
-            text(_SQL[realm]["select_refresh"]),
-            {"jti": jti, **_scope_params(realm, tenant_id)},
+        (
+            await session.execute(
+                text(_SQL[realm]["select_refresh"]),
+                {"jti": jti, **_scope_params(realm, tenant_id)},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None or not hmac.compare_digest(str(row["token_hash"]), expected_hash):
         raise _RefreshFailure("unknown_token")
 
     if row["revoked_at"] is not None:
-        raise await _revoked_failure(
-            session, realm=realm, tenant_id=tenant_id, row=row
-        )
+        raise await _revoked_failure(session, realm=realm, tenant_id=tenant_id, row=row)
 
     if row["expires_at"] <= datetime.now(UTC):
         raise _RefreshFailure("expired", family_id=row["family_id"], user_id=row["user_id"])
 
     user_row = (
-        await session.execute(
-            text(_SQL[realm]["select_user_state"]),
-            {"uid": row["user_id"], **_scope_params(realm, tenant_id)},
+        (
+            await session.execute(
+                text(_SQL[realm]["select_user_state"]),
+                {"uid": row["user_id"], **_scope_params(realm, tenant_id)},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if user_row is None or user_row["status"] != "active":
         raise _RefreshFailure(
             "account_unavailable", family_id=row["family_id"], user_id=row["user_id"]
         )
 
-    roles = await _load_roles(
-        session, realm=realm, tenant_id=tenant_id, user_id=row["user_id"]
-    )
+    roles = await _load_roles(session, realm=realm, tenant_id=tenant_id, user_id=row["user_id"])
     # 无 UA 的客户端刷新时保留原设备标签，避免把可识别设备降级成"未知设备"
     effective_label = (
         str(row["device_label"])
@@ -971,16 +1336,18 @@ async def _rotate(
         # 锁后仍失败：重读原因。被踢/下线/改密竞争输者按"已撤销"返回，
         # 只有真正 replay 已轮换令牌才按重用检测处理（简报 §4 第 7 条）。
         current = (
-            await session.execute(
-                text(_SQL[realm]["select_refresh"]),
-                {"jti": jti, **_scope_params(realm, tenant_id)},
+            (
+                await session.execute(
+                    text(_SQL[realm]["select_refresh"]),
+                    {"jti": jti, **_scope_params(realm, tenant_id)},
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if current is None:
             raise _RefreshFailure("unknown_token")
-        raise await _revoked_failure(
-            session, realm=realm, tenant_id=tenant_id, row=current
-        )
+        raise await _revoked_failure(session, realm=realm, tenant_id=tenant_id, row=current)
 
     params: dict[str, object] = {
         "user_id": row["user_id"],
@@ -1096,9 +1463,7 @@ async def record_logout(
                 "access_revoked": access_revoked,
                 "family_id": str(family_id) if family_id is not None else None,
                 "family_revoked": family_revoked,
-                "subject_user_id": (
-                    str(subject_user_id) if subject_user_id is not None else None
-                ),
+                "subject_user_id": (str(subject_user_id) if subject_user_id is not None else None),
                 "ip_hash": ip_hash,
                 "ua_hash": ua_hash,
             },
@@ -1191,22 +1556,30 @@ async def _revoke_by_jti(
     """
 
     row = (
-        await session.execute(
-            text(_SQL[realm]["family_by_jti"]),
-            {"jti": jti, **_scope_params(realm, tenant_id)},
+        (
+            await session.execute(
+                text(_SQL[realm]["family_by_jti"]),
+                {"jti": jti, **_scope_params(realm, tenant_id)},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None or not hmac.compare_digest(str(row["token_hash"]), expected_hash):
         return None
 
     # 与刷新串行化后重读：避免登出撤销与轮换交错时漏掉新插入的行
     await session_store.acquire_user_lock(session, realm=realm, user_id=row["user_id"])
     row = (
-        await session.execute(
-            text(_SQL[realm]["family_by_jti"]),
-            {"jti": jti, **_scope_params(realm, tenant_id)},
+        (
+            await session.execute(
+                text(_SQL[realm]["family_by_jti"]),
+                {"jti": jti, **_scope_params(realm, tenant_id)},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None or not hmac.compare_digest(str(row["token_hash"]), expected_hash):
         return None
 
@@ -1261,28 +1634,19 @@ async def change_password(
         AuthError: 旧密码错误（401）、新密码不合规（422）、账号不可用（401）。
     """
 
-    if not (MIN_PASSWORD_LENGTH <= len(new_password) <= MAX_PASSWORD_LENGTH):
-        raise AuthError(
-            "WEAK_PASSWORD",
-            f"新密码长度需在 {MIN_PASSWORD_LENGTH}~{MAX_PASSWORD_LENGTH} 之间",
-            422,
-        )
     if new_password == current_password:
-        raise AuthError("WEAK_PASSWORD", "新密码不能与当前密码相同", 422)
-    if not _password_within_bcrypt_limit(new_password):
-        raise AuthError(
-            "WEAK_PASSWORD",
-            f"新密码不能超过 {MAX_PASSWORD_BYTES} 字节（一个汉字约 3 字节）",
-            422,
-        )
+        raise _weak_password("新密码不能与当前密码相同")
 
     settings = get_settings()
     ip_hash = hash_client_fingerprint(ip)
     ua_hash = hash_client_fingerprint(user_agent)
     device_label = session_store.device_label_from_user_agent(user_agent)
 
-    try:
-        async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+    pair: TokenPair | None = None
+    old_families: list[UUID] = []
+    failure: _RefreshFailure | None = None
+    async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+        try:
             pair, old_families = await _change_password_in_session(
                 session,
                 settings=settings,
@@ -1296,7 +1660,11 @@ async def change_password(
                 device_label=device_label,
                 request_id=request_id,
             )
-    except _RefreshFailure as failure:
+        except _RefreshFailure as exc:
+            # 捕获后正常退出事务：失败计数必须随事务提交，不能被异常回滚
+            failure = exc
+
+    if failure is not None:
         await _record_password_failure(
             realm=realm,
             tenant_id=tenant_id,
@@ -1306,9 +1674,13 @@ async def change_password(
             ip_hash=ip_hash,
             ua_hash=ua_hash,
         )
-        if failure.reason == "password_mismatch":
+        if failure.reason in {"password_mismatch", "locked"}:
+            # 锁定与密码错误对外同文案，避免泄露账号锁定状态
             raise AuthError("INVALID_CREDENTIALS", "当前密码不正确", 401) from failure
         raise AuthError("ACCOUNT_UNAVAILABLE", "账号不可用，请联系管理员", 401) from failure
+
+    if pair is None:
+        raise RuntimeError("change_password 未返回令牌")
 
     # 事务已提交（新标记已在事务内登记）：删除全部旧设备标记
     await revocation.delete_sessions(old_families, realm=realm)
@@ -1361,29 +1733,73 @@ async def _change_password_in_session(
         (新令牌, 被撤销的旧 family id 列表)；后者用于事务提交后清理 Redis 标记。
     """
 
-    await session_store.acquire_user_lock(
-        session, realm=realm, user_id=principal_user_id
-    )
+    await session_store.acquire_user_lock(session, realm=realm, user_id=principal_user_id)
     row = (
-        await session.execute(
-            text(_SQL[realm]["select_credentials"]),
-            {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
+        (
+            await session.execute(
+                text(_SQL[realm]["select_credentials"]),
+                {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None or row["status"] != "active":
-        raise AuthError("ACCOUNT_UNAVAILABLE", "账号不可用，请联系管理员", 401)
+        raise _RefreshFailure("account_unavailable", user_id=principal_user_id)
+
+    now = datetime.now(UTC)
+    if is_account_locked(cast(datetime | None, row["locked_until"]), now):
+        # 锁定期间不再验证口令，也不继续累加（与登录侧一致）
+        raise _RefreshFailure("locked", user_id=principal_user_id)
 
     old_ok = await anyio.to_thread.run_sync(
         verify_password, current_password, str(row["password_hash"])
     )
     if not old_ok:
-        # 失败审计在回滚后由外层单独写：此处抛信号，不落库（否则会被回滚）
+        # 失败计数在同一事务内更新，由外层捕获信号后提交；审计在事务外单独写
+        await _apply_login_failure(
+            session,
+            realm=realm,
+            tenant_id=tenant_id,
+            user_id=principal_user_id,
+            state=LockoutState(
+                failed_attempts=int(row["failed_login_attempts"]),
+                window_started_at=cast(datetime | None, row["failed_login_window_started_at"]),
+                locked_until=cast(datetime | None, row["locked_until"]),
+            ),
+            settings=settings,
+            now=now,
+        )
         raise _RefreshFailure("password_mismatch", user_id=principal_user_id)
+
+    _validate_new_password(new_password, login_id=str(row["login_id"]))
+    await _ensure_password_not_reused(
+        session,
+        realm=realm,
+        tenant_id=tenant_id,
+        user_id=principal_user_id,
+        new_password=new_password,
+        current_hash=str(row["password_hash"]),
+        history_size=settings.auth_password_history_size,
+    )
+    await _record_password_history(
+        session,
+        realm=realm,
+        tenant_id=tenant_id,
+        user_id=principal_user_id,
+        old_hash=str(row["password_hash"]),
+        keep=settings.auth_password_history_size,
+    )
 
     new_hash = await anyio.to_thread.run_sync(hash_password, new_password)
     await session.execute(
         text(_SQL[realm]["set_credential_hash"]),
         {"hash": new_hash, "uid": principal_user_id, **_scope_params(realm, tenant_id)},
+    )
+    # 改密后邮件里的未使用重置链接一并作废（否则旧链接仍可再次改密）
+    await session.execute(
+        text(_SQL[realm]["invalidate_reset_tokens"]),
+        {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
     )
     old_families: list[UUID] = list(
         (
@@ -1397,7 +1813,7 @@ async def _change_password_in_session(
     )
     await session.execute(
         text(_SQL[realm]["revoke_user_tokens"]),
-        {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
+        {"uid": principal_user_id, "reason": "password_change", **_scope_params(realm, tenant_id)},
     )
 
     version_row: int = (
@@ -1407,9 +1823,7 @@ async def _change_password_in_session(
         )
     ).scalar_one()
 
-    roles = await _load_roles(
-        session, realm=realm, tenant_id=tenant_id, user_id=principal_user_id
-    )
+    roles = await _load_roles(session, realm=realm, tenant_id=tenant_id, user_id=principal_user_id)
     pair = await _issue_tokens(
         settings,
         realm=realm,
@@ -1435,3 +1849,610 @@ async def _change_password_in_session(
     )
     await revocation.register_session(pair.session_id, realm=realm)
     return pair, old_families
+
+
+def _build_reset_url(base: str, token: str) -> str:
+    """拼接邮件里的重置链接。
+
+    令牌放 URL fragment：浏览器不会把它发给服务器/代理，也不进 Referer；
+    前端从 `location.hash` 读取后自行调用 confirm 接口。
+    """
+
+    return f"{base}#token={quote(token, safe='')}"
+
+
+def _mask_login(login: str) -> str:
+    """登录名脱敏（审计不留明文登录名）。"""
+
+    return f"{login[:1]}***" if login else ""
+
+
+async def _audit_reset_request(
+    session: AsyncSession,
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    reason: str,
+    result: str,
+    request_id: str | None,
+    login_masked: str = "",
+    subject_user_id: UUID | None = None,
+    email_sent: bool = False,
+    ip_hash: str | None = None,
+) -> None:
+    """写重置申请审计（不记录邮箱/令牌明文）。"""
+
+    metadata: dict[str, object] = {
+        "reason": reason,
+        "email_sent": email_sent,
+        "ip_hash": ip_hash,
+    }
+    if login_masked:
+        metadata["login_masked"] = login_masked
+    if subject_user_id is not None:
+        metadata["subject_user_id"] = str(subject_user_id)
+    await append_audit(
+        session,
+        action="auth.password.reset_requested",
+        resource_type="auth",
+        actor_realm="system",
+        tenant_id=tenant_id if realm == "tenant" else None,
+        result=result,
+        metadata=metadata,
+        request_id=request_id,
+    )
+
+
+async def _audit_unknown_reset(
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    login_masked: str,
+    ip_hash: str | None,
+    request_id: str | None,
+) -> None:
+    """未知账号审计固定落平台，避免未认证请求向任意租户审计流灌数据。"""
+
+    metadata: dict[str, object] = {
+        "reason": "unknown_account",
+        "realm": realm,
+        "login_masked": login_masked,
+        "ip_hash": ip_hash,
+    }
+    if tenant_id is not None:
+        metadata["attempted_tenant_id"] = str(tenant_id)
+    async with db_session(platform=True) as session:
+        await append_audit(
+            session,
+            action="auth.password.reset_requested",
+            resource_type="auth",
+            actor_realm="system",
+            result="failure",
+            metadata=metadata,
+            request_id=request_id,
+        )
+
+
+async def _request_reset(
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    login: str,
+    settings: Settings,
+    ip_hash: str | None,
+    request_id: str | None,
+) -> None:
+    """重置申请主体逻辑（恒不抛账号相关错误，只写审计）。
+
+    - 账号不存在/停用/无邮箱/冷却中：不发送、不泄露；
+    - 令牌行先随事务提交，**提交成功后才发邮件**，避免"已收到链接但令牌被回滚"；
+    - 邮件发送失败：独立事务作废已提交令牌并写失败审计（接口仍返回 202）。
+    """
+
+    login_masked = _mask_login(login)
+    subject_user_id: UUID | None = None
+    prepared: _PreparedReset | None = None
+    async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+        row = (
+            (
+                await session.execute(
+                    text(_SQL[realm]["select_reset_user_by_login"]),
+                    {"login": login, **_scope_params(realm, tenant_id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            await _audit_unknown_reset(
+                realm=realm,
+                tenant_id=tenant_id,
+                login_masked=login_masked,
+                ip_hash=ip_hash,
+                request_id=request_id,
+            )
+            return
+
+        subject_user_id = cast(UUID, row["id"])
+        await session_store.acquire_user_lock(session, realm=realm, user_id=subject_user_id)
+        # 锁后重读：并发改密/停用后不向旧状态发信
+        row = (
+            (
+                await session.execute(
+                    text(_SQL[realm]["select_reset_user_by_login"]),
+                    {"login": login, **_scope_params(realm, tenant_id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            await _audit_unknown_reset(
+                realm=realm,
+                tenant_id=tenant_id,
+                login_masked=login_masked,
+                ip_hash=ip_hash,
+                request_id=request_id,
+            )
+            return
+        if row["status"] != "active":
+            await _audit_reset_request(
+                session,
+                realm=realm,
+                tenant_id=tenant_id,
+                reason="account_unavailable",
+                result="failure",
+                login_masked=login_masked,
+                subject_user_id=subject_user_id,
+                ip_hash=ip_hash,
+                request_id=request_id,
+            )
+            return
+        if realm == "tenant" and row["user_type"] == "student":
+            # 学生自助重置依赖 M1-E 的租户 RBAC/身份核验，M2 才开放
+            await _audit_reset_request(
+                session,
+                realm=realm,
+                tenant_id=tenant_id,
+                reason="student_reset_deferred",
+                result="failure",
+                login_masked=login_masked,
+                subject_user_id=subject_user_id,
+                ip_hash=ip_hash,
+                request_id=request_id,
+            )
+            return
+        email = str(row["email"]) if row["email"] else None
+        if email is None:
+            await _audit_reset_request(
+                session,
+                realm=realm,
+                tenant_id=tenant_id,
+                reason="missing_email",
+                result="failure",
+                login_masked=login_masked,
+                subject_user_id=subject_user_id,
+                ip_hash=ip_hash,
+                request_id=request_id,
+            )
+            return
+
+        now = datetime.now(UTC)
+        last_created = await session.scalar(
+            text(_SQL[realm]["latest_reset_created_at"]),
+            {"uid": subject_user_id, **_scope_params(realm, tenant_id)},
+        )
+        if last_created is not None and now - last_created < timedelta(
+            seconds=settings.password_reset_request_cooldown_seconds
+        ):
+            await _audit_reset_request(
+                session,
+                realm=realm,
+                tenant_id=tenant_id,
+                reason="cooldown",
+                result="failure",
+                login_masked=login_masked,
+                subject_user_id=subject_user_id,
+                ip_hash=ip_hash,
+                request_id=request_id,
+            )
+            return
+
+        token = generate_password_reset_token(realm, tenant_id)
+        _, _, secret = parse_password_reset_token(token)
+        expires_at = now + timedelta(seconds=settings.password_reset_token_ttl_seconds)
+        params: dict[str, object] = {
+            "uid": subject_user_id,
+            "hash": hash_password_reset_token(secret),
+            "expires_at": expires_at,
+            "ip_hash": ip_hash,
+            **_scope_params(realm, tenant_id),
+        }
+        # 先作废旧令牌再插新令牌：旧链接立即失效（同一事务，失败一起回滚）
+        await session.execute(
+            text(_SQL[realm]["invalidate_reset_tokens"]),
+            {"uid": subject_user_id, **_scope_params(realm, tenant_id)},
+        )
+        await session.execute(text(_SQL[realm]["insert_reset_token"]), params)
+        prepared = _PreparedReset(email=email, token=token)
+
+    if prepared is None:
+        return
+
+    subject, body = render_password_reset_email(
+        reset_url=_build_reset_url(settings.password_reset_url_base, prepared.token),
+        expires_minutes=max(1, settings.password_reset_token_ttl_seconds // 60),
+    )
+    try:
+        await build_mailer(settings).send(to=prepared.email, subject=subject, body=body)
+    except Exception:
+        logger.warning("密码重置邮件发送失败（realm=%s）", realm)
+        if realm == "tenant" and tenant_id is not None and not await _tenant_exists(tenant_id):
+            return
+        if subject_user_id is not None:
+            async with session_store.session_scope(
+                realm=realm, tenant_id=tenant_id
+            ) as audit_session:
+                # 令牌已随事务提交：投递失败必须显式作废，避免留下无人可用的有效链接
+                await audit_session.execute(
+                    text(_SQL[realm]["invalidate_reset_tokens"]),
+                    {"uid": subject_user_id, **_scope_params(realm, tenant_id)},
+                )
+                await _audit_reset_request(
+                    audit_session,
+                    realm=realm,
+                    tenant_id=tenant_id,
+                    reason="email_delivery_failed",
+                    result="failure",
+                    login_masked=login_masked,
+                    subject_user_id=subject_user_id,
+                    ip_hash=ip_hash,
+                    request_id=request_id,
+                )
+        return
+
+    if realm == "tenant" and tenant_id is not None and not await _tenant_exists(tenant_id):
+        return
+    async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as audit_session:
+        await _audit_reset_request(
+            audit_session,
+            realm=realm,
+            tenant_id=tenant_id,
+            reason="sent",
+            result="success",
+            login_masked=login_masked,
+            subject_user_id=subject_user_id,
+            email_sent=True,
+            ip_hash=ip_hash,
+            request_id=request_id,
+        )
+
+
+async def request_password_reset(
+    *,
+    realm: Realm,
+    school_code: str | None = None,
+    login_id: str | None = None,
+    account: str | None = None,
+    ip: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """申请密码重置（邮件发送；账号存在性不影响响应）。
+
+    租户 realm 需 `school_code + login_id`；平台 realm 需 `account`。
+    账号不存在、无邮箱、冷却中、邮件失败均不向调用方报错，只写审计。
+    """
+
+    settings = get_settings()
+    ip_hash = hash_client_fingerprint(ip)
+    if ip_hash is not None and not await revocation.allow_rate_limit(
+        "password_reset",
+        ip_hash,
+        limit=settings.password_reset_ip_limit,
+        window_seconds=settings.password_reset_ip_window_seconds,
+    ):
+        # 限流命中静默返回（接口仍 202）：写审计会放大未认证请求的磁盘/写入压力
+        return
+    if realm == "tenant":
+        code = (school_code or "").strip().upper()
+        async with db_session(platform=True) as platform_session:
+            tenant_row = (
+                (
+                    await platform_session.execute(
+                        text("select id, status from tenants where school_code = :code"),
+                        {"code": code},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if tenant_row is None or tenant_row["status"] != "active":
+            # 学校不存在/停用：平台级审计，不暴露给调用方
+            async with db_session(platform=True) as audit_session:
+                await append_audit(
+                    audit_session,
+                    action="auth.password.reset_requested",
+                    resource_type="auth",
+                    actor_realm="system",
+                    result="failure",
+                    metadata={
+                        "reason": "tenant_unavailable",
+                        "school_code": code,
+                        "ip_hash": ip_hash,
+                    },
+                    request_id=request_id,
+                )
+            return
+        await _request_reset(
+            realm="tenant",
+            tenant_id=cast(UUID, tenant_row["id"]),
+            login=(login_id or "").strip(),
+            settings=settings,
+            ip_hash=ip_hash,
+            request_id=request_id,
+        )
+        return
+    await _request_reset(
+        realm="platform",
+        tenant_id=None,
+        login=(account or "").strip(),
+        settings=settings,
+        ip_hash=ip_hash,
+        request_id=request_id,
+    )
+
+
+async def _record_reset_failure(
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    reason: str,
+    token_found: bool,
+    request_id: str | None,
+    ip_hash: str | None = None,
+    ua_hash: str | None = None,
+) -> None:
+    """重置确认失败审计（独立事务）。
+
+    只有令牌确实存在于该租户时才写租户审计；伪造的 tenant_id/随机令牌
+    降级为平台事件，避免向任意租户的审计流灌数据。
+    """
+
+    metadata: dict[str, object] = {
+        "reason": reason,
+        "ip_hash": ip_hash,
+        "ua_hash": ua_hash,
+    }
+    if realm == "tenant" and tenant_id is not None:
+        if token_found and await _tenant_exists(tenant_id):
+            async with session_store.session_scope(realm="tenant", tenant_id=tenant_id) as session:
+                await append_audit(
+                    session,
+                    action="auth.password.reset_failed",
+                    resource_type="auth",
+                    actor_realm="system",
+                    tenant_id=tenant_id,
+                    result="failure",
+                    metadata=metadata,
+                    request_id=request_id,
+                )
+            return
+        metadata["attempted_tenant_id"] = str(tenant_id)
+    async with db_session(platform=True) as session:
+        await append_audit(
+            session,
+            action="auth.password.reset_failed",
+            resource_type="auth",
+            actor_realm="system",
+            result="failure",
+            metadata=metadata,
+            request_id=request_id,
+        )
+
+
+async def _confirm_reset_in_session(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    realm: Realm,
+    tenant_id: UUID | None,
+    expected_hash: str,
+    new_password: str,
+    ip_hash: str | None,
+    ua_hash: str | None,
+    request_id: str | None,
+) -> list[UUID]:
+    """确认重置（同一事务：令牌校验/单次消费、策略/历史、改密、撤销会话、清锁）。
+
+    任何失败都抛 `_ResetFailure`，令牌消费与改密一起回滚，令牌可继续重试。
+    返回值是事务提交后需要清理 Redis 标记的旧 family id 列表。
+    """
+
+    row = (
+        (
+            await session.execute(
+                text(_SQL[realm]["select_reset_by_hash"]),
+                {"hash": expected_hash, **_scope_params(realm, tenant_id)},
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise _ResetFailure("invalid_token")
+
+    user_id = cast(UUID, row["user_id"])
+    await session_store.acquire_user_lock(session, realm=realm, user_id=user_id)
+    # 锁后重读：并发确认/新申请作废时以最新状态为准
+    row = (
+        (
+            await session.execute(
+                text(_SQL[realm]["select_reset_by_hash"]),
+                {"hash": expected_hash, **_scope_params(realm, tenant_id)},
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise _ResetFailure("invalid_token")
+    if row["used_at"] is not None:
+        raise _ResetFailure("used", token_found=True)
+    now = datetime.now(UTC)
+    if cast(datetime, row["expires_at"]) <= now:
+        raise _ResetFailure("expired", token_found=True)
+
+    credentials = (
+        (
+            await session.execute(
+                text(_SQL[realm]["select_credentials"]),
+                {"uid": user_id, **_scope_params(realm, tenant_id)},
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if credentials is None or credentials["status"] != "active":
+        raise _ResetFailure("account_unavailable", token_found=True)
+
+    try:
+        validate_password_strength(new_password, login_id=str(credentials["login_id"]))
+    except PasswordPolicyError as exc:
+        raise _ResetFailure("weak_password", message=str(exc), token_found=True) from exc
+    try:
+        await _ensure_password_not_reused(
+            session,
+            realm=realm,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            new_password=new_password,
+            current_hash=str(credentials["password_hash"]),
+            history_size=settings.auth_password_history_size,
+        )
+    except AuthError as exc:
+        raise _ResetFailure("weak_password", message=exc.message, token_found=True) from exc
+
+    await _record_password_history(
+        session,
+        realm=realm,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        old_hash=str(credentials["password_hash"]),
+        keep=settings.auth_password_history_size,
+    )
+    new_hash = await anyio.to_thread.run_sync(hash_password, new_password)
+    await session.execute(
+        text(_SQL[realm]["set_credential_hash"]),
+        {"hash": new_hash, "uid": user_id, **_scope_params(realm, tenant_id)},
+    )
+
+    consumed = (
+        await session.execute(
+            text(_SQL[realm]["consume_reset_token"]),
+            {"id": row["id"], **_scope_params(realm, tenant_id)},
+        )
+    ).first()
+    if consumed is None:
+        raise _ResetFailure("used", token_found=True)
+    # 用掉一个即作废该账号其余未用令牌（单账号同时只保留一条可用链接）
+    await session.execute(
+        text(_SQL[realm]["invalidate_reset_tokens"]),
+        {"uid": user_id, **_scope_params(realm, tenant_id)},
+    )
+
+    old_families: list[UUID] = list(
+        (
+            await session.execute(
+                text(_SQL[realm]["active_families"]),
+                {"uid": user_id, **_scope_params(realm, tenant_id)},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    await session.execute(
+        text(_SQL[realm]["revoke_user_tokens"]),
+        {"uid": user_id, "reason": "password_reset", **_scope_params(realm, tenant_id)},
+    )
+
+    await append_audit(
+        session,
+        action="auth.password.reset",
+        resource_type="auth",
+        actor_realm=realm,
+        actor_id=user_id,
+        tenant_id=tenant_id if realm == "tenant" else None,
+        metadata={
+            "sessions_revoked": True,
+            "sessions_revoked_count": len(old_families),
+            "ip_hash": ip_hash,
+            "ua_hash": ua_hash,
+        },
+        request_id=request_id,
+    )
+    return old_families
+
+
+async def confirm_password_reset(
+    *,
+    token: str,
+    new_password: str,
+    ip: str | None = None,
+    user_agent: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """用邮件令牌重置密码；成功后要求重新登录（不签发任何令牌）。
+
+    异常:
+        AuthError: 令牌无效/过期/已使用（400）、新密码不合规或复用（422）。
+    """
+
+    settings = get_settings()
+    ip_hash = hash_client_fingerprint(ip)
+    if ip_hash is not None and not await revocation.allow_rate_limit(
+        "password_reset_confirm",
+        ip_hash,
+        limit=settings.password_reset_confirm_ip_limit,
+        window_seconds=settings.password_reset_ip_window_seconds,
+    ):
+        # 限流命中不再写失败审计：否则未认证请求仍能放大审计/磁盘
+        raise AuthError("RATE_LIMITED", "请求过于频繁，请稍后再试", 429)
+
+    try:
+        realm, tenant_id, secret = parse_password_reset_token(token)
+    except TokenError as exc:
+        raise AuthError("INVALID_RESET_TOKEN", "重置链接无效或已过期", 400) from exc
+
+    expected_hash = hash_password_reset_token(secret)
+    ua_hash = hash_client_fingerprint(user_agent)
+    try:
+        async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+            old_families = await _confirm_reset_in_session(
+                session,
+                settings=settings,
+                realm=realm,
+                tenant_id=tenant_id,
+                expected_hash=expected_hash,
+                new_password=new_password,
+                ip_hash=ip_hash,
+                ua_hash=ua_hash,
+                request_id=request_id,
+            )
+    except _ResetFailure as failure:
+        await _record_reset_failure(
+            realm=realm,
+            tenant_id=tenant_id,
+            reason=failure.reason,
+            token_found=failure.token_found,
+            request_id=request_id,
+            ip_hash=ip_hash,
+            ua_hash=ua_hash,
+        )
+        if failure.reason == "weak_password":
+            raise AuthError(
+                "WEAK_PASSWORD", failure.message or "新密码不符合安全要求", 422
+            ) from failure
+        raise AuthError("INVALID_RESET_TOKEN", "重置链接无效或已过期", 400) from failure
+
+    # 事务已提交：删除旧设备的会话标记（token_version 已自增，访问令牌同步失效）
+    await revocation.delete_sessions(old_families, realm=realm)

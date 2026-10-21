@@ -8,7 +8,9 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app.api.auth import router as auth_router
 from app.api.body_limit import BodySizeLimitMiddleware
@@ -56,6 +58,20 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     application.state.trace_sink = trace_sink if trace_sink is not None else InMemoryTraceSink()
+
+    @application.exception_handler(RequestValidationError)
+    async def _sanitized_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        """422 只回字段位置/原因/类型，不回显 `input`（避免密码/令牌进响应/日志）。"""
+
+        details = [
+            {
+                "loc": list(error.get("loc", ())),
+                "msg": str(error.get("msg", "")),
+                "type": str(error.get("type", "")),
+            }
+            for error in exc.errors()
+        ]
+        return JSONResponse(status_code=422, content={"detail": details})
 
     # 请求级：生成/校验 request_id，并在请求结束时清空身份上下文（防协程复用泄漏）
     # 后添加的中间件在最外层：RequestContext 必须包住 BodySize，413 才带 X-Request-ID。

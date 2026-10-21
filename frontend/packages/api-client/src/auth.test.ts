@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createAuthSession, toUserMessage } from "./auth";
+import { createAuthSession, passwordPolicyError, toUserMessage } from "./auth";
 
 /** 构造可编排的 fetch 替身：按 URL 后缀匹配处理器，并记录调用顺序。 */
 function fetchStub(
@@ -319,6 +319,83 @@ describe("createAuthSession（审查修复回归）", () => {
 
     expect(onTokensRefreshed).toHaveBeenCalledOnce();
     expect(onTokensRefreshed.mock.calls[0][0].accessToken).toBe("access-1");
+  });
+});
+
+describe("密码重置（M1-D1）", () => {
+  it("申请重置：按 realm 映射字段，202 视为成功", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      return { ok: true, status: 202, json: async () => ({ status: "accepted" }) } as Response;
+    }) as typeof fetch;
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    await session.requestPasswordReset({
+      realm: "tenant",
+      schoolCode: "SCH-1",
+      loginId: "S-1",
+    });
+    await session.requestPasswordReset({ realm: "platform", account: "ops" });
+
+    expect(calls).toEqual([
+      {
+        url: "http://api/api/v1/auth/password-reset/request",
+        body: { realm: "tenant", school_code: "SCH-1", login_id: "S-1" },
+      },
+      {
+        url: "http://api/api/v1/auth/password-reset/request",
+        body: { realm: "platform", account: "ops" },
+      },
+    ]);
+  });
+
+  it("确认重置：204 空响应不解析 JSON", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return { ok: true, status: 204 } as Response;
+    }) as typeof fetch;
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    await expect(
+      session.confirmPasswordReset("v1rt.tenant.secret", "New-Password-123"),
+    ).resolves.toBeUndefined();
+    expect(seen).toEqual([{ token: "v1rt.tenant.secret", new_password: "New-Password-123" }]);
+  });
+
+  it("确认重置失败：透出后端 detail（无效/过期令牌）", async () => {
+    const fetchImpl = (async () =>
+      jsonResponse(400, { detail: "重置链接无效或已过期" })) as typeof fetch;
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    await expect(session.confirmPasswordReset("bad-token", "New-Password-123")).rejects.toThrow(
+      "重置链接无效或已过期",
+    );
+  });
+});
+
+describe("密码策略（M1-D1）", () => {
+  it("与后端同口径：长度/字节/字符类/登录名包含", () => {
+    expect(passwordPolicyError("Short-1A")).toContain("10~128");
+    expect(passwordPolicyError("汉".repeat(25) + "Aa1!")).toContain("72 字节");
+    expect(passwordPolicyError("alllowercase1")).toContain("3 类");
+    expect(passwordPolicyError("Alice-Login-1A", "alice")).toContain("学号/工号");
+    expect(passwordPolicyError("Valid-Pass-99")).toBeNull();
+  });
+
+  it("Unicode 口径：中文算 alnum 不算符号，长度按码点计", () => {
+    // 后端把中文视为 alnum：这里只有小写 + 数字 2 类，必须拒绝
+    expect(passwordPolicyError("密码密码密码abcd1")).toContain("3 类");
+    // 5 个 emoji 在 UTF-16 下是 10 个 code unit，但只有 5 个码点
+    expect(passwordPolicyError("😀😀😀😀😀")).toContain("10~128");
+    // 中文 + 大小写 + 数字 + 符号：10 个码点，合法
+    expect(passwordPolicyError("密码密码密码Ab1!")).toBeNull();
+    // Python str.isdigit 接受上标数字（No），前端同口径
+    expect(passwordPolicyError("密码密码密码Ab²!")).toBeNull();
   });
 });
 

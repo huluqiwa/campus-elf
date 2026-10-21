@@ -264,6 +264,28 @@
 - 最终门禁：后端 **290 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（99 文件）无问题、`alembic check` 无漂移、head=`d4e6f8a0b2c1`、本地 `scripts/ci.sh` 全绿。
 - 远端 CI（`692e867`）：`backend` #39639721352 success、`security` #39639721255 success；`frontend`/`evals` 未触发（无对应路径改动）。
 
+### M1-D1 密码策略/历史/邮件重置/失败锁定：第一轮审查与修复（2026-10-22）
+
+- 交付：迁移 `b2d4f6a8c0e1`（用户邮箱/锁定字段、密码历史、重置令牌、校管邮箱触发器）；AUTH-03 策略/历史/改密接入；AUTH-05 失败锁定；员工/平台邮件重置（申请 202、确认 204、30 分钟单次令牌、并发单次消费、会话与刷新家族全撤销）；admin/campus 忘记密码/重置页；审计 `auth.password.*`。
+- 第一轮独立审查：**不通过**（1 Blocker + 5 Major + 2 Minor）。
+  - Blocker：downgrade 先恢复旧 `revoked_reason` CHECK，存量 `password_reset` 行导致回滚失败。
+  - Major：学生自助重置与 M2 延后结论矛盾；改密后未使用重置令牌仍有效；同步 SMTP 可用响应耗时枚举且无 IP 限流、伪造 tenant_id 污染租户审计；重置令牌放 query string；design/TD/handoff/README 未回填。
+  - Minor：单测恒真断言与跨租/并发/422 缺口；客户端仅校验长度、FastAPI 422 回显 `input`。
+- 修复：回滚前归一化 `password_reset → password_change` 并补临时库往返用例；学生命中时只审计 `student_reset_deferred`；改密事务内作废未使用重置令牌；申请改 `BackgroundTasks` 后台发信 + Redis 固定窗口 IP 限流（fail-open，审计 `ip_rate_limited`）+ 失败审计按令牌是否属于该租户分派平台/租户；邮件链接改 fragment + `no-referrer`；新增跨租/并发/改密失效/限流/422 脱敏/迁移回滚用例；api-client 增加同口径密码策略预校验；补 design/TD-107/116/119~122/handoff/README/简报。
+- 复测（第二轮复审前）：后端 **329 passed**、`ruff`/`mypy`（103 文件）/`alembic check` 全绿；前端 **24 单测 + 20 E2E**、lint/format/typecheck/build 全绿；迁移 head=`b2d4f6a8c0e1`。
+- 第二轮复审：**不通过**（0 Blocker + 7 Major）。Major：文档门禁自相矛盾（提前写“两轮通过”/计数过期）；平台账号无邮箱导致重置闭环缺失；重置邮件在事务提交前发送（SMTP 失败会发信但令牌回滚）；改密接口可绕过登录失败锁定；并发登录失败测试缺口；前端密码策略与后端 Unicode 口径不一致；C 端学生入口指向不存在的管理员重置能力。
+- 第二轮修复：重置令牌“先提交后发信”，投递失败独立事务作废令牌并审计；改密失败计数在事务内提交并接入锁定；新增并发登录失败用例（6 并发恰 5 次失败 + 1 次 locked）；新增 `python -m app.platform_admin` 创建平台账号/维护邮箱并走完整邮件重置；api-client 按码点/字节/Unicode 类别对齐策略；学生提示先改为“联系学校管理员”。
+- 复测（第三轮复审前）：后端 **339 passed**、前端 **25 单测 + 22 E2E**、静态门禁全绿；迁移 head=`b2d4f6a8c0e1`。
+- 第三轮复审：**不通过**（1 Blocker + 3 Major + 3 Minor）。Blocker：`tech-debt` 仍提前写“两轮审查通过”、`review-log` 仍“待执行”、README/handoff 计数过期（329/24/20）。Major：确认接口无限流且每次伪造令牌都写失败审计（可放大平台审计）；平台邮箱闭环只测了 CLI、租户校管邮箱触发器无测试；学生提示仍指向未交付的管理员重置。Minor：未知账号申请仍可向租户审计流写入；平台账号改邮箱未作废旧重置令牌；staging 可明文 SMTP、重置链接默认端口只覆盖 admin、前端数字/大小写分类与 Python 有边界差异。
+- 第三轮修复：确认接口新增独立 IP 限流（默认 30 次/15 分钟，超限 429 且不写审计，补随机来源 IP 回归）；未知账号申请审计固定落平台并带 `attempted_tenant_id`；新增校管邮箱触发器 + 邮件重置全链路用例；平台账号改邮箱同事务作废未用令牌并补断言；学生提示改为“后续版本开放”不再指向不存在能力；staging 也强制真实 SMTP + TLS/STARTTLS；前端大小写改用 Unicode 二元属性、数字补齐上/下标；补 TD-123（按 realm 分流重置链接）。
+- 复测（第四轮复审前）：后端 **342 passed**、`ruff check`/`mypy`（104 文件）/`alembic check` 全绿；前端 **25 单测 + 22 E2E**、lint/format/typecheck/build 全绿。
+- 第四轮复审：**不通过**（0 Blocker + 2 Major + 5 Minor）。Major：反代后所有请求同源导致按 IP 限流失效/误伤，且直接信任 `X-Forwarded-For` 可被伪造；申请接口超限仍逐次写平台审计，未认证请求可放大写入。Minor：确认限流“不写审计”断言用畸形令牌恒真且随机 IP 可能碰撞；缺少代理头负向测试；平台 CLI 固定 12 位初始密码无法覆盖 13+ 字符账号；简报配置清单缺限流变量；429 无 `Retry-After`。
+- 第四轮修复：新增 `resolve_client_ip`（仅 `TRUSTED_PROXY_IPS` 白名单对端可读 XFF，取首个合法地址，畸形/缺失回退直连），部署文档要求 Nginx 覆盖写 `X-Forwarded-For $remote_addr`，补 6 条单元测试；申请接口超限静默返回（仍 202）且不写审计，测试断言仅两次 `sent`；确认限流用例改用合法格式未知租户令牌并显式计数失败审计，新增 `revocation.clear_rate_limit` 清理计数、IP 用 198.18/15 文档网段；429 统一带 `Retry-After`；平台初始密码长度改为 `max(12, len(account)+4)`，CLI 用例改用 28 字符账号；简报补 4 个限流变量与 `TRUSTED_PROXY_IPS`；design/spec/deployment/handoff 同步。
+- 复测（第五轮复审前）：后端 **348 passed**、`ruff check`/`mypy`（106 文件）/`alembic check` 全绿；前端 **25 单测 + 22 E2E**、lint/format/typecheck/build 全绿。
+- 第五轮复审：**通过**（0 Blocker / 0 Major / 3 Minor）。实测：白名单外伪造 XFF 被忽略、白名单内取首值、畸形头回退；申请/确认超限均在审计/建令牌/解析前拦截，失败审计计数 2→2；429 带 `Retry-After`；长账号 CLI 可创建且初始密码不含账号，改邮箱与作废令牌同事务；迁移 downgrade 先归一化再恢复 CHECK，RLS/授权齐备，`alembic check` 无漂移；令牌 SHA-256/30 分钟/单次/并发一胜/三类变更作废；锁定并发 5 失败 + 1 锁定。
+- 第五轮 Minor 收口：删除 `service.py` 未使用的 bcrypt 长度辅助函数；spec/design 中“初始密码 12 位”改为“默认 12 位、平台账号按账号长度加长”；`Retry-After` 采用整窗秒数（保守值）记入 TD-121，待 M6 网关限流统一返回精确剩余 TTL。
+- 最终门禁：后端 **348 passed**、`ruff check`/`mypy`（106 文件）/`alembic check` 全绿；前端 **25 单测 + 22 E2E**、lint/format/typecheck/build 全绿。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

@@ -30,6 +30,8 @@ TENANT_TABLES = (
     "role_permissions",
     "data_scopes",
     "refresh_tokens",
+    "password_reset_tokens",
+    "password_history",
     "roles",
     "users",
 )

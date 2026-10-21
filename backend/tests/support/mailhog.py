@@ -5,6 +5,7 @@ import re
 import time
 from email.message import Message
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
@@ -100,3 +101,29 @@ def extract_initial_password(body: str) -> str:
     match = re.search(r"初始密码：(\S+)", body)
     assert match is not None, f"邮件正文缺少初始密码：{body[:200]}"
     return match.group(1)
+
+
+def extract_reset_url(body: str) -> str:
+    """从邮件正文提取密码重置链接（仅测试使用）。
+
+    异常:
+        AssertionError: 正文中没有重置链接。
+    """
+
+    match = re.search(r"https?://\S+", body)
+    assert match is not None, f"邮件正文缺少重置链接：{body[:200]}"
+    return match.group(0)
+
+
+def extract_reset_token(body: str) -> str:
+    """从邮件链接的 fragment 中提取重置令牌（URL 解码；仅测试使用）。
+
+    异常:
+        AssertionError: 链接缺少 token fragment。
+    """
+
+    url = extract_reset_url(body)
+    fragment = parse_qs(urlsplit(url).fragment)
+    values = fragment.get("token") or []
+    assert values, f"重置链接缺少 token fragment：{url}"
+    return values[0]

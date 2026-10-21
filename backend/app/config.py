@@ -6,6 +6,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -39,6 +40,8 @@ class Settings(BaseSettings):
     app_name: str = "CampusCompanionElf"
     app_version: str = "0.1.0"
     api_prefix: str = "/api/v1"
+    # 可信反向代理地址（逗号分隔）；仅直连对端命中时才信任 X-Forwarded-For
+    trusted_proxy_ips: str = ""
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     docs_enabled: bool = True
 
@@ -86,6 +89,24 @@ class Settings(BaseSettings):
     # staging/production 必须 false——否则 XSS 可读走长期凭证，抵消 HttpOnly 的意义（审查 MA3）
     auth_refresh_token_in_body: bool = True
 
+    # ---------- 密码策略 / 失败锁定 / 邮件重置（M1-D1） ----------
+    # 同一账号在窗口内连续失败达到上限即锁定（AUTH-05）
+    auth_max_login_failures: int = Field(default=5, ge=1)
+    auth_login_failure_window_seconds: int = Field(default=900, ge=1)
+    auth_lockout_seconds: int = Field(default=900, ge=1)
+    # 记住最近多少个旧密码（拒绝复用）
+    auth_password_history_size: int = Field(default=5, ge=1)
+    # 重置令牌 TTL 与申请冷却（同一账号两次申请的最小间隔）
+    password_reset_token_ttl_seconds: int = Field(default=1800, ge=60)
+    password_reset_request_cooldown_seconds: int = Field(default=60, ge=0)
+    # 同一来源 IP 的固定窗口申请上限（防邮件轰炸/账号枚举）
+    password_reset_ip_limit: int = Field(default=20, ge=1)
+    # 确认接口单独计数：伪造令牌不触达账号，但会写失败审计，需限制放大
+    password_reset_confirm_ip_limit: int = Field(default=30, ge=1)
+    password_reset_ip_window_seconds: int = Field(default=900, ge=1)
+    # 重置邮件里的前端链接前缀（confirm 接口由前端调用）；非开发环境必须 HTTPS
+    password_reset_url_base: str = "http://127.0.0.1:5173/reset-password"
+
     # 邮件（开发用 MailHog：127.0.0.1:1025；生产由 SMTP 服务商提供）
     smtp_host: str = "127.0.0.1"
     smtp_port: int = 1025
@@ -113,6 +134,19 @@ class Settings(BaseSettings):
         2. 开发专用开关必须关闭——空壳 Loop 无认证，开启即等于开放未鉴权入口
            （"生产开关可绕过"按审查清单属阻塞项）。
         """
+
+        reset_url = urlsplit(self.password_reset_url_base)
+        if (
+            reset_url.scheme not in {"http", "https"}
+            or not reset_url.netloc
+            or reset_url.username is not None
+            or reset_url.password is not None
+            or reset_url.query
+            or reset_url.fragment
+        ):
+            raise ValueError(
+                "PASSWORD_RESET_URL_BASE 必须是绝对 URL，且不能包含凭证/查询串/fragment"
+            )
 
         if self.app_env in {"development", "test"}:
             return self
@@ -150,6 +184,11 @@ class Settings(BaseSettings):
             )
         if self.auth_cookie_samesite == "none":
             raise ValueError(f"{self.app_env} 环境禁止 AUTH_COOKIE_SAMESITE=none（跨站请求风险）")
+        if reset_url.scheme != "https":
+            raise ValueError(
+                f"{self.app_env} 环境 PASSWORD_RESET_URL_BASE 必须使用 https://"
+                "（重置令牌不得经明文链路传输）"
+            )
         expected_cookie_path = f"{self.api_prefix.rstrip('/')}/auth"
         if self.auth_cookie_path.rstrip("/") != expected_cookie_path:
             raise ValueError(
@@ -167,20 +206,22 @@ class Settings(BaseSettings):
                 "（禁止空值/占位/示例值；生成：openssl rand -hex 32）"
             )
 
+        # 重置邮件含可改密的限时令牌，staging 也必须走加密 SMTP
+        if not self.smtp_host or self.smtp_host in {"127.0.0.1", "localhost", "mailhog"}:
+            raise ValueError(f"{self.app_env} 环境必须配置真实 SMTP_HOST（禁止本机 MailHog）")
+        if not self.smtp_from or self.smtp_from.endswith("@campus-elf.local"):
+            raise ValueError(f"{self.app_env} 环境必须配置真实 SMTP_FROM")
+        if not self.smtp_username or not self.smtp_password:
+            raise ValueError(f"{self.app_env} 环境必须配置 SMTP_USERNAME / SMTP_PASSWORD")
+        if not self.smtp_use_tls and not self.smtp_start_tls:
+            raise ValueError(f"{self.app_env} 环境 SMTP 必须启用 TLS 或 STARTTLS")
+        if self.smtp_use_tls and self.smtp_start_tls:
+            raise ValueError(f"{self.app_env} 环境 SMTP_USE_TLS 与 SMTP_START_TLS 只能启用一个")
+        if "@" not in (self.smtp_from or ""):
+            raise ValueError(f"{self.app_env} 环境 SMTP_FROM 必须是合法邮箱地址")
+
         if self.app_env != "production":
             return self
-        if not self.smtp_host or self.smtp_host in {"127.0.0.1", "localhost", "mailhog"}:
-            raise ValueError("production 环境必须配置真实 SMTP_HOST（禁止本机 MailHog）")
-        if not self.smtp_from or self.smtp_from.endswith("@campus-elf.local"):
-            raise ValueError("production 环境必须配置真实 SMTP_FROM")
-        if not self.smtp_username or not self.smtp_password:
-            raise ValueError("production 环境必须配置 SMTP_USERNAME / SMTP_PASSWORD")
-        if not self.smtp_use_tls and not self.smtp_start_tls:
-            raise ValueError("production 环境 SMTP 必须启用 TLS 或 STARTTLS")
-        if self.smtp_use_tls and self.smtp_start_tls:
-            raise ValueError("production 环境 SMTP_USE_TLS 与 SMTP_START_TLS 只能启用一个")
-        if "@" not in (self.smtp_from or ""):
-            raise ValueError("production 环境 SMTP_FROM 必须是合法邮箱地址")
         if self.object_store_backend != "s3":
             raise ValueError("production 环境对象存储必须使用 s3（MinIO/OSS）")
         missing_s3 = [

@@ -180,7 +180,9 @@ LLM-05-CampusCompanionElf/
 | `tenants` | id, school_code, name, status, address, email, leadership, qualification_ref, activated_at | 学校=租户；status: pending/active/suspended/rejected/deleted |
 | `tenant_registration_requests` | id, school_name, address, leadership, email, qualification_object_key, status, submitted_at | 资质凭证存 MinIO |
 | `school_review_records` | id, tenant_id, reviewer_id, result, reason, snapshot_object_key, reviewed_at | 审核记录/凭证快照 |
-| `platform_users` | id, account, password_hash, status, mfa_secret_enc, must_change_password | SaaS 账号；不开放注册 |
+| `platform_users` | id, account, email, password_hash, status, mfa_secret_enc, must_change_password, failed_login_attempts, failed_login_window_started_at, locked_until | SaaS 账号；不开放注册；邮箱用于密码重置 |
+| `platform_password_history` | id, platform_user_id, password_hash, created_at | 最近 5 次旧密码哈希（重置/改密拒绝复用） |
+| `platform_password_reset_tokens` | id, platform_user_id, token_hash, expires_at, used_at, created_at, request_ip_hash | 平台重置令牌（SHA-256，30 分钟单次使用） |
 | `platform_roles` / `platform_user_roles` | id, code/name; user_id, role_id | 平台角色 |
 | `configs` | id, scope(global/tenant/user), tenant_id, user_id, key, value_json, is_secret, version, status | 配置中心 |
 | `config_change_requests` | id, config_id, before_json, after_json, requester, approver, reason, status | 变更审批/双人确认 |
@@ -193,7 +195,9 @@ LLM-05-CampusCompanionElf/
 
 | 表 | 关键字段 | 说明 |
 |---|---|---|
-| `users` | id, tenant_id, user_type(student/teacher), login_id, password_hash, status, must_change_password, mfa_secret_enc, last_login_at, token_version | C 端/B 端共用身份；login_id=学号/工号；token_version 用于权限/状态变更时使现有会话失效 |
+| `users` | id, tenant_id, user_type(student/teacher/school_admin), login_id, email, password_hash, status, must_change_password, mfa_secret_enc, last_login_at, token_version, failed_login_attempts, failed_login_window_started_at, locked_until | C 端/B 端共用身份；login_id=学号/工号；token_version 用于权限/状态变更时使现有会话失效；锁定字段供 AUTH-05 |
+| `password_history` | id, tenant_id, user_id, password_hash, created_at | 最近 5 次旧密码哈希；复合外键保证与用户同租 |
+| `password_reset_tokens` | id, tenant_id, user_id, token_hash, expires_at, used_at, created_at, request_ip_hash | 租户员工/校管邮件重置；只存 secret 的 SHA-256，30 分钟单次使用 |
 | `roles` | id, tenant_id, code, name, is_system | 校方角色 |
 | `permissions` | id, code, module, action | 权限点 |
 | `role_permissions` | role_id, permission_id, tenant_id（复合外键保证与父行同租） | 角色-权限 |
@@ -321,6 +325,33 @@ audit_logs: 仅追加，prev_hash/hash 链
 - **哈希链状态**：M1-A 只建表与仅追加约束；`prev_hash/hash` 可空且 `hash_version=0` 表示"未入链"，
   链计算与校验由 M1-F 实现（TD-068）——当前**未计算、未校验**，不得视为已生效。
 
+### 4.7 M1-D1 密码/锁定/重置落地（2026-10-22）
+
+- **新增表**：`password_history` / `password_reset_tokens`（租户，FORCE RLS + `TO campus_elf_tenant` 策略 +
+  显式授权）、`platform_password_history` / `platform_password_reset_tokens`（仅平台连接）；
+  令牌表只存 secret 的 SHA-256，重置申请**先作废旧未用令牌再插新令牌**（同事务，失败一起回滚）。
+- **锁定字段**：`users`/`platform_users` 增加 `email`、`failed_login_attempts`、
+  `failed_login_window_started_at`、`locked_until`；登录成功或密码重置清零；
+  锁定期间对外统一凭证错误文案，审计记录真实原因 `locked`。
+- **校管邮箱回填**：`users.email` 对 `user_type='school_admin'` 由 BEFORE INSERT 触发器从
+  `login_id`（注册邮箱）写入，存量数据迁移时回填；开通函数因此无需额外字段。
+- **重置链接**：邮件 URL 使用 fragment `#token=`（不经服务器/代理日志、不进 Referer），
+  两个前端入口 `<meta name="referrer" content="no-referrer">`；前端从 `route.hash` 读取令牌。
+- **防枚举/防滥用**：申请接口在响应后由 FastAPI `BackgroundTasks` 发送邮件（202 不等待 SMTP）；
+  申请与确认分别做同一 IP 固定窗口限流（申请默认 20 次/15 分钟、确认 30 次/15 分钟，
+  Redis INCR+EXPIRE，故障 fail-open），**两者超限都不写审计**（未认证请求不得放大审计写入），
+  确认超限返回 429 + `Retry-After`；来源 IP 由 `resolve_client_ip` 解析：仅直连对端命中
+  `TRUSTED_PROXY_IPS` 时才读取 `X-Forwarded-For` 首个合法地址，Nginx 必须覆盖写该头；
+  账号维度 60 秒冷却；并发确认由用户级 advisory lock + 条件消费保证单次使用。
+- **审计归属**：未知账号的申请事件固定落平台审计（带 `attempted_tenant_id`），不向任意租户
+  审计流灌数据；确认失败只有令牌确实存在于该租户时才写租户审计，伪造 tenant_id/随机令牌
+  写平台审计并带 `attempted_tenant_id`。
+- **平台账号邮箱（M2 缺口收口）**：`python -m app.platform_admin` 初始化平台账号（默认
+  `platform_super_admin`、`must_change_password=true`，初始密码只打印一次）或维护邮箱；
+  邮箱变更与作废未使用重置令牌在同一事务，并写 `platform.user.*` 审计。
+- **邮件传输**：staging/production 均要求真实 SMTP + TLS/STARTTLS + 用户名/密码，
+  禁止 MailHog 与 `@campus-elf.local`（重置令牌不得经明文链路）。
+
 ## 5. API 与 SSE 契约
 
 ### 5.1 约定
@@ -347,7 +378,9 @@ audit_logs: 仅追加，prev_hash/hash 链
 | GET | `/api/v1/auth/sessions` | 我的登录设备列表（设备标签、最近使用、是否当前；只显示自己的） |
 | DELETE | `/api/v1/auth/sessions/{session_id}` | 下线指定设备（仅限本人会话） |
 | POST | `/api/v1/auth/sessions/revoke-others` | 退出其它设备（保留当前） |
-| POST | `/auth/password-reset/request` | 员工邮件重置（M1-D） |
+| POST | `/api/v1/auth/password-reset/request` | 员工/平台账号邮件重置；恒 202；令牌 30 分钟单次使用（M1-D1） |
+| POST | `/api/v1/auth/password-reset/confirm` | 重置令牌；成功 204，要求重新登录；无效/过期/已用 400、弱密码 422、同 IP 超限 429（带 `Retry-After`，不写审计）（M1-D1） |
+| POST | `/api/v1/auth/mfa/enroll` / `/api/v1/auth/mfa/verify` | TOTP 可选（M1-D2） |
 
 **令牌契约**
 - 访问令牌：HS256 JWT，15 分钟；claim `sub/realm/tenant_id/jti/token_version/must_change_password/iss/aud/exp`；`aud` 按 realm 区分（`campus-elf-tenant` / `campus-elf-platform`），跨 realm 混用直接拒绝（TD-074）。
@@ -355,14 +388,15 @@ audit_logs: 仅追加，prev_hash/hash 链
 - 浏览器端刷新令牌走 **HttpOnly + Secure(staging/production) + SameSite=Lax Cookie**（路径限定 `/api/v1/auth`，JS 不可读）；登录/刷新下发、刷新与登出可仅凭 Cookie。响应体**仅在开发/测试**回显 refresh（`AUTH_REFRESH_TOKEN_IN_BODY=true`）；staging/production 强制关闭，避免 XSS 读走长期凭证（M1-C-UI 审查 MA3）。
 - 会话与设备（A31）：登录链即"会话"（family）；访问令牌增加 `sid`（会话 id）。服务端用 Redis 会话标记 `{prefix}:auth:session:{realm}:{sid}`（TTL=刷新令牌有效期）判定会话是否仍有效——登出/被踢/下线即删除标记，**下一次请求立刻 401**，不等 15 分钟。同账号同时在线设备数按 realm 受限（默认 C 端 3、校方 3、平台 2，配置化）；超限登录踢"最久未使用"的会话并审计 `auth.session.kicked`。设备标签由 UA 在服务端粗粒度解析（如"Chrome / Windows"），IP/UA 只存哈希，接口不回显明文。
 - 撤销：登出/改密即时失效——`token_version` 自增使所有旧访问令牌失效，刷新令牌按家族撤销；登出的访问令牌另写 Redis 撤销标记（TTL=剩余有效期）。
+- 密码策略与历史（M1-D1）：最小 10 / 最大 128 字符且 ≤72 UTF-8 字节（bcrypt 上限）、至少 3 类字符、不得包含学号/工号、最近 5 次历史；bcrypt cost 12；初始密码随机生成（默认 12 位，平台账号按账号长度加长）且首登强制改密。
+- 登录失败锁定（M1-D1）：15 分钟内累计 5 次认证失败锁定 15 分钟；计数/窗口/锁定字段在 `users` 与 `platform_users`；成功登录清零，密码重置清锁；锁定期间对外统一凭证错误文案，审计记录 `locked` 真实原因。
+- 密码重置（M1-D1）：租户按“学校编号+登录名”、平台按账号申请，发往库内邮箱；恒 202；令牌 `v1rt.<tenant_id>.<secret>` / `v1rp.<secret>`，库内只存 secret 的 SHA-256，30 分钟单次使用；确认成功 204，撤销全部会话与刷新家族，要求重新登录；学生校管重置在 M2 交付。
 - 身份/权限每次请求从数据库读取（不缓存快照）：停用账号、权限变更、`token_version` 变化立即生效。
 - 首登改密门禁：`must_change_password` 为真时只放行 `/auth/change-password`、`/auth/logout`、`/auth/me`，其余接口 403。
 - realm↔连接绑定：平台主体只使用平台连接、租户主体只使用租户连接（TD-074）；**平台路由必须显式声明 `realm="platform"`**（`permissions` 是全局目录，权限码本身不构成 realm 边界），权限/realm 不符写 `auth.permission.denied` 审计（含 reason）；数据库层另有 `role_permissions`/`platform_role_permissions` 的 realm/模块守卫触发器（`b7d1e3f5a9c2`）。
 - 权限模块边界：租户角色禁止引用 `platform.*`（触发器 `role_permissions_realm_guard` + 启动自检逐租户校验）；平台角色允许持有全量权限（运营方超集角色，`c8e2f4a6b1d3` 移除平台方向守卫）。
 - 已知限制：bcrypt 输入上限 72 字节（超长口令在登录按凭证错误、改密按 422 拒绝，不再 500）；改哈希方案见 TD-107。
 - 平台审核接口使用 `platform.tenant.review` 权限（开发令牌已删除，TD-078）；审计 `actor_id` 为真实平台账号（TD-081）。
-| POST | `/auth/password-reset/confirm` | 重置令牌 |
-| POST | `/auth/mfa/enroll` / `/auth/mfa/verify` | TOTP 可选 |
 
 ### 5.3 SaaS / 租户
 
@@ -736,8 +770,8 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 
 - JWT access 15m；refresh 7d 轮换；refresh token 存 hash；family 复用检测。
 - 账号删除/撤权审批通过、密码修改、权限重大变更时递增 `users.token_version`，使现有 access/refresh 失效；账号删除保留期内允许重新登录，但只签发只读会话。
-- 密码 bcrypt cost 12；初始密码 12 位随机；首登改密；历史 5；最小 10/3 类/128；禁止含学号/工号。
-- 5 次/15 分钟锁定 15 分钟；MFA TOTP 可选。
+- 密码 bcrypt cost 12；初始密码随机生成（默认 12 位；平台账号按账号长度加长）；首登改密；历史 5；最小 10、至少 3 类、最大 128 字符且 ≤72 UTF-8 字节；禁止含学号/工号。
+- 15 分钟内 5 次失败锁定 15 分钟，对外统一凭证错误文案并审计真实原因；密码重置清锁。MFA TOTP 可选（M1-D2）。
 - 角色/权限/数据范围矩阵见 `docs/rbac-matrix.md`。
 - 审批分权：提交人不能自批；超管例外默认关闭；SaaS 审核员不得审核自己提交学校。
 

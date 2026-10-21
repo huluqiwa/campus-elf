@@ -460,7 +460,7 @@
 |---|---|---|
 | A1 | 技术栈与语言版本 | 已确认：Python 3.13/FastAPI/LangGraph/PostgreSQL+Qdrant/Redis/MinIO/Vue3+Element Plus+Vant4/MinerU 4.0.12/Langfuse Server 4.63.0 + Python SDK 5.0.2 |
 | A2 | 登录鉴权与 MFA | 已确认：JWT 15m + Refresh 7d 轮换；TOTP 可选，生产可对特权角色强制 |
-| A3 | 密码策略与锁定 | 已确认：12 位初始、首登改密、bcrypt 12、最小 10/3 类/128、历史 5、5 次/15 分钟锁定、token 家族撤销 |
+| A3 | 密码策略与锁定 | 已确认：12 位初始（平台账号按账号长度加长）、首登改密、bcrypt 12、最小 10/3 类/128、历史 5、5 次/15 分钟锁定、token 家族撤销 |
 | A4 | 文件扫描/白名单/大小 | 已确认：15 个/批、50MB/文件、300MB/批、ClamAV 异步 fail-closed |
 | A5 | 数据留存/删除 | 已确认：365/180/180/3年/180；删除 5 天；备份生命周期 |
 | A6 | 租户隔离加密 | 已确认：tenant_id+RLS+仓储过滤；DEK 信封加密；Qdrant/MinIO/缓存边界 |

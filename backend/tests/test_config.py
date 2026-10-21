@@ -71,12 +71,13 @@ def _production_settings(**overrides: object) -> Settings:
         "app_env": "production",
         "redis_url": "redis://127.0.0.1:6379/0",
         "jwt_secret": "production-test-jwt-secret-0123456789abcdef",
-        "auth_cookie_secure": True,
-        "auth_refresh_token_in_body": False,
         "database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
         "platform_database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
         "migration_database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
         "qdrant_url": "http://127.0.0.1:6333",
+        "auth_cookie_secure": True,
+        "auth_refresh_token_in_body": False,
+        "password_reset_url_base": "https://admin.example.com/reset-password",
         "smtp_host": "smtp.example.com",
         "smtp_port": 587,
         "smtp_from": "no-reply@example.com",
@@ -129,6 +130,31 @@ def test_production_rejects_dev_switches_and_local_storage() -> None:
         _production_settings(s3_secret_key=None)
 
 
+def test_non_dev_requires_https_password_reset_url() -> None:
+    """重置令牌走邮件链接，非开发环境必须 HTTPS（禁止明文链路泄露令牌）。"""
+
+    with pytest.raises(ValidationError, match="PASSWORD_RESET_URL_BASE"):
+        _staging_settings(password_reset_url_base="http://admin.example.com/reset-password")
+    with pytest.raises(ValidationError, match="PASSWORD_RESET_URL_BASE"):
+        _production_settings(password_reset_url_base="http://admin.example.com/reset-password")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/reset-password",
+        "https://admin.example.com/reset-password?next=/home",
+        "https://admin.example.com/reset-password#token=old",
+        "https://user:secret@admin.example.com/reset-password",
+    ],
+)
+def test_password_reset_url_base_must_be_clean_absolute_url(value: str) -> None:
+    """拼接 `#token=` 前必须拒绝相对 URL、查询串、fragment 与内嵌凭证。"""
+
+    with pytest.raises(ValidationError, match="PASSWORD_RESET_URL_BASE"):
+        _staging_settings(password_reset_url_base=value)
+
+
 def test_production_settings_accepts_complete_configuration() -> None:
     """完整生产配置可通过校验，且密钥字段以 SecretStr 保存（不随 repr 泄露）。"""
 
@@ -153,6 +179,12 @@ def _staging_settings(**overrides: object) -> Settings:
         "jwt_secret": "9f" * 32,
         "auth_cookie_secure": True,
         "auth_refresh_token_in_body": False,
+        "password_reset_url_base": "https://admin.example.com/reset-password",
+        "smtp_host": "smtp.example.com",
+        "smtp_from": "no-reply@example.com",
+        "smtp_username": "mailer",
+        "smtp_password": "secret",
+        "smtp_start_tls": True,
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
@@ -175,6 +207,17 @@ def test_staging_accepts_strong_jwt_secret() -> None:
     settings = _staging_settings()
 
     assert settings.jwt_secret.get_secret_value() == "9f" * 32
+
+
+def test_non_dev_requires_encrypted_smtp() -> None:
+    """重置令牌经邮件传输：staging/production 禁止 MailHog 与明文 SMTP。"""
+
+    with pytest.raises(ValidationError, match="SMTP_HOST"):
+        _staging_settings(smtp_host="mailhog")
+    with pytest.raises(ValidationError, match="SMTP"):
+        _staging_settings(smtp_start_tls=False, smtp_use_tls=False)
+    with pytest.raises(ValidationError, match="SMTP_USERNAME"):
+        _staging_settings(smtp_username=None)
 
 
 def test_development_skips_jwt_strength_check() -> None:

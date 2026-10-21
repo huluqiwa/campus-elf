@@ -98,6 +98,8 @@ location /api/v1/campus/chat/ {
     proxy_pass http://backend:8000;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
+    # 覆盖写入真实来源（不要用 $proxy_add_x_forwarded_for，否则客户端可伪造）
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_buffering off;
     proxy_read_timeout 300s;
 }
@@ -105,11 +107,13 @@ location /api/v1/campus/chat/ {
 location /api/v1/school/kb/build-jobs/ {
     proxy_pass http://backend:8000;
     proxy_http_version 1.1;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_buffering off;
     proxy_read_timeout 300s;
 }
 ```
 
+- **客户端 IP**：认证接口按来源 IP 限流/审计。应用默认只信任直连对端；部署在 Nginx 后时，在**所有** `location`（或 server 级）设置 `proxy_set_header X-Forwarded-For $remote_addr;`，并把 Nginx 地址填入 `TRUSTED_PROXY_IPS`。若改用 `$proxy_add_x_forwarded_for`，必须确保最左值不被客户端控制；否则限流可被伪造头绕过，或所有用户共用代理 IP 导致误封。
 - HTTPS：Let's Encrypt 或自有证书；HTTP→HTTPS 跳转；HSTS。
 - 上传大小：`client_max_body_size 300m`（按批）；个人库二期 30m。**注册接口路径**（`/api/v1/platform/tenants/register`）单独设 `client_max_body_size 11m`（应用层同样限制 11MB，含 chunked）。
 - 限流：登录/API/SSE 分级；Redis 令牌桶为主。
@@ -171,7 +175,11 @@ location /api/v1/school/kb/build-jobs/ {
   具备 `BYPASSRLS` 的运维角色；临时数据修复脚本应显式 `SET ROLE campus_elf_platform`（或临时 `ALTER TABLE … NO FORCE`，事后恢复）。
 - 角色与授权**不随迁移回滚**（集群级对象）；需要清理时手工 `DROP ROLE`（见 `scripts/test-stack.sh::cleanup_legacy_roles` 的做法）。
 - **启动自检（TD-073）**：`APP_ENV=staging|production` 时应用启动会执行 `verify_runtime_database()`——**租户与平台两个连接**角色都不得是超级用户或带 `BYPASSRLS`；逐表要求 FORCE RLS、每条策略都引用租户/平台上下文且只授予两个应用组角色；审核函数 owner 必须可绕过 FORCE RLS；未设置租户上下文时租户数据必须不可见。任一不满足直接拒绝启动。
-- **生产配置校验强制项**：`DATABASE_URL`、`PLATFORM_DATABASE_URL`、`QDRANT_URL`、真实 `SMTP_HOST/SMTP_FROM` + `SMTP_USERNAME/SMTP_PASSWORD` + `SMTP_USE_TLS|SMTP_START_TLS`（二选一）、`JWT_SECRET`（≥32 字节随机值）、S3 四项；`DEV_*` 开关一律禁止。任一缺失/非法即启动失败。`MIGRATION_DATABASE_URL` **不注入 API/Worker**，仅迁移 Job 使用；该角色需超级用户或 `BYPASSRLS`。
+- **staging/production 配置校验强制项**：`DATABASE_URL`、`PLATFORM_DATABASE_URL`、`QDRANT_URL`、真实 `SMTP_HOST/SMTP_FROM` + `SMTP_USERNAME/SMTP_PASSWORD` + `SMTP_USE_TLS|SMTP_START_TLS`（二选一，MailHog/明文 SMTP 一律拒绝）、`JWT_SECRET`（≥32 字节随机值）、`PASSWORD_RESET_URL_BASE`（https）、`AUTH_COOKIE_SECURE=true`；生产另强制 S3 四项；`DEV_*` 开关一律禁止。任一缺失/非法即启动失败。`MIGRATION_DATABASE_URL` **不注入 API/Worker**，仅迁移 Job 使用；该角色需超级用户或 `BYPASSRLS`。
+- **平台账号初始化（无注册 UI）**：部署后执行
+  `docker compose exec api python -m app.platform_admin --account <账号> --email <邮箱>`，
+  初始密码仅在终端打印一次，账号默认 `must_change_password=true`；已有账号改邮箱用
+  `--update-email-only`（同事务作废未使用重置令牌）。请通过安全渠道交付初始密码，勿写入工单/日志。
 - **平台开通能力**：平台运行角色对 `users/roles/role_permissions/user_roles` 零权限；申请单仅 SELECT+INSERT、审核记录仅 SELECT、租户仅 SELECT + 列级 `UPDATE(status,status_reason)`。开通/审核只能 `EXECUTE review_registration_request(...)`（`SECURITY DEFINER`，函数内锁申请、写审核记录与审计）。该函数 owner 必须是超级用户或 `BYPASSRLS`（自检与迁移都会强制），否则写入会被 FORCE RLS 拒绝。
 
 ## 7. Langfuse 独立主机

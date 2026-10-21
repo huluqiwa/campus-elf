@@ -52,6 +52,8 @@ TABLES_ALLOWED_WITHOUT_TENANT_ID = {
     "platform_roles",
     "platform_user_roles",
     "platform_refresh_tokens",
+    "platform_password_history",
+    "platform_password_reset_tokens",
     "permissions",
     "platform_role_permissions",
     "tenant_registration_requests",
@@ -131,9 +133,7 @@ async def test_every_tenant_table_has_forced_rls_and_policy(engine: AsyncEngine)
             row["is_nullable"] != "NO"
             and row["table_name"] not in PLATFORM_TABLES_WITH_OPTIONAL_TENANT
         ):
-            problems.append(
-                f"{row['table_name']}.tenant_id 允许 NULL（租户级表必须 NOT NULL）"
-            )
+            problems.append(f"{row['table_name']}.tenant_id 允许 NULL（租户级表必须 NOT NULL）")
 
     assert not problems, "租户级表 RLS 覆盖不全：\n" + "\n".join(problems)
 
@@ -145,23 +145,31 @@ async def test_platform_tables_do_not_carry_tenant_column(engine: AsyncEngine) -
     async with engine.connect() as conn:
         rows = (await conn.execute(SQL_TENANT_COLUMNS)).mappings().all()
         all_tables = (
-            await conn.execute(
-                text(
-                    """
+            (
+                await conn.execute(
+                    text(
+                        """
                     select c.relname as table_name from pg_class c
                     join pg_namespace n on n.oid = c.relnamespace
                     where n.nspname = 'public' and c.relkind = 'r'
                     """
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
     with_tenant = {row["table_name"] for row in rows}
-    unexpected = with_tenant & (TABLES_ALLOWED_WITHOUT_TENANT_ID - PLATFORM_TABLES_WITH_OPTIONAL_TENANT)
+    unexpected = with_tenant & (
+        TABLES_ALLOWED_WITHOUT_TENANT_ID - PLATFORM_TABLES_WITH_OPTIONAL_TENANT
+    )
     assert not unexpected, f"平台级表意外带 tenant_id：{unexpected}"
 
     # 反向守卫：任何 public 表要么带 tenant_id，要么在允许清单里（防新业务表漏列）
-    missing_tenant_column = {row["table_name"] for row in all_tables} - with_tenant - TABLES_ALLOWED_WITHOUT_TENANT_ID
+    missing_tenant_column = (
+        {row["table_name"] for row in all_tables} - with_tenant - TABLES_ALLOWED_WITHOUT_TENANT_ID
+    )
     assert not missing_tenant_column, (
         f"以下表既无 tenant_id 也不在平台表清单中，疑似漏了租户列：{missing_tenant_column}"
     )
@@ -203,10 +211,14 @@ async def test_every_policy_references_context_variables(engine: AsyncEngine) ->
 
     async with engine.connect() as conn:
         rows = (
-            await conn.execute(
-                text("select tablename, policyname, qual, with_check from pg_policies")
+            (
+                await conn.execute(
+                    text("select tablename, policyname, qual, with_check from pg_policies")
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
     assert rows, "没有任何策略"
     bad: list[str] = []

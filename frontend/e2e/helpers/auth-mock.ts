@@ -51,6 +51,72 @@ function userBody(options: MockAuthOptions): Record<string, unknown> {
   };
 }
 
+export interface PasswordResetRequestPayload {
+  realm?: string;
+  school_code?: string;
+  login_id?: string;
+  account?: string;
+}
+
+export interface PasswordResetConfirmPayload {
+  token?: string;
+  new_password?: string;
+}
+
+export interface MockPasswordResetOptions {
+  /** 申请接口失败（默认 202）。 */
+  requestFails?: boolean;
+  requestErrorMessage?: string;
+  /** 确认接口状态码（默认 204 成功）。 */
+  confirmStatus?: number;
+  confirmErrorMessage?: string;
+}
+
+export interface PasswordResetMock {
+  requests: PasswordResetRequestPayload[];
+  confirms: PasswordResetConfirmPayload[];
+}
+
+/** mock 密码重置接口，并记录请求体供断言（M1-D1）。 */
+export async function mockPasswordReset(
+  page: Page,
+  options: MockPasswordResetOptions = {},
+): Promise<PasswordResetMock> {
+  const requests: PasswordResetRequestPayload[] = [];
+  const confirms: PasswordResetConfirmPayload[] = [];
+
+  await page.route("**/api/v1/auth/password-reset/request", (route) => {
+    requests.push((route.request().postDataJSON() ?? {}) as PasswordResetRequestPayload);
+    if (options.requestFails) {
+      return route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: options.requestErrorMessage ?? "服务暂时不可用" }),
+      });
+    }
+    return route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "accepted" }),
+    });
+  });
+
+  await page.route("**/api/v1/auth/password-reset/confirm", (route) => {
+    confirms.push((route.request().postDataJSON() ?? {}) as PasswordResetConfirmPayload);
+    const status = options.confirmStatus ?? 204;
+    if (status !== 204) {
+      return route.fulfill({
+        status,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: options.confirmErrorMessage ?? "重置链接无效或已过期" }),
+      });
+    }
+    return route.fulfill({ status: 204 });
+  });
+
+  return { requests, confirms };
+}
+
 /**
  * 统一 mock 认证接口（**有状态**）：refresh/me/login/change-password/logout 与 health。
  *

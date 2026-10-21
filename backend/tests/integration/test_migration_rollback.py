@@ -22,6 +22,7 @@ pytestmark = [pytest.mark.integration]
 
 M1A_REVISION = "779f731db342"
 M1C2_PREVIOUS_REVISION = "c8e2f4a6b1d3"
+D1_PREVIOUS_REVISION = "d4e6f8a0b2c1"
 
 
 def _alembic_config(url: str) -> Config:
@@ -98,9 +99,7 @@ async def _school_admin_count(dsn: str) -> int:
     connection = await asyncpg.connect(dsn)
     try:
         return int(
-            await connection.fetchval(
-                "select count(*) from users where user_type = 'school_admin'"
-            )
+            await connection.fetchval("select count(*) from users where user_type = 'school_admin'")
         )
     finally:
         await connection.close()
@@ -185,8 +184,7 @@ async def _simulate_first_round_schema(dsn: str) -> None:
     connection = await asyncpg.connect(dsn)
     try:
         await connection.execute(
-            "DROP TRIGGER IF EXISTS school_review_records_no_update_delete "
-            "ON school_review_records"
+            "DROP TRIGGER IF EXISTS school_review_records_no_update_delete ON school_review_records"
         )
         await connection.execute(
             "DROP TRIGGER IF EXISTS tenant_registration_requests_status_guard "
@@ -208,9 +206,7 @@ async def _simulate_first_round_schema(dsn: str) -> None:
         await connection.execute(
             "GRANT UPDATE ON tenant_registration_requests TO campus_elf_platform"
         )
-        await connection.execute(
-            "GRANT INSERT ON school_review_records TO campus_elf_platform"
-        )
+        await connection.execute("GRANT INSERT ON school_review_records TO campus_elf_platform")
     finally:
         await connection.close()
 
@@ -261,9 +257,7 @@ async def _assert_hardened(dsn: str, platform_dsn: str) -> None:
             "select proacl::text from pg_proc where proname = 'review_registration_request'"
         )
         public_grant = re.compile(r"(^|[{,])=X/")
-        assert provision_acl is not None and not public_grant.search(provision_acl), (
-            provision_acl
-        )
+        assert provision_acl is not None and not public_grant.search(provision_acl), provision_acl
         assert review_acl is not None and not public_grant.search(review_acl), review_acl
 
         policies = await connection.fetchval(
@@ -307,9 +301,10 @@ def test_hardening_revision_repairs_first_round_schema() -> None:
     temp_database = f"{database}_legacy"
     temp_dsn = dsn.rsplit("/", 1)[0] + f"/{temp_database}"
     temp_url = admin_url.rsplit("/", 1)[0] + f"/{temp_database}"
-    temp_platform_dsn = platform_url.replace("postgresql+asyncpg://", "postgresql://").rsplit(
-        "/", 1
-    )[0] + f"/{temp_database}"
+    temp_platform_dsn = (
+        platform_url.replace("postgresql+asyncpg://", "postgresql://").rsplit("/", 1)[0]
+        + f"/{temp_database}"
+    )
 
     asyncio.run(_create_database(dsn, temp_database))
     try:
@@ -432,10 +427,7 @@ def test_selfcheck_detects_disabled_rls_on_empty_table() -> None:
     temp_platform_url = platform_url.rsplit("/", 1)[0] + f"/{temp_database}"
 
     asyncio.run(_create_database(dsn, temp_database))
-    saved = {
-        key: os.environ.get(key)
-        for key in ("DATABASE_URL", "PLATFORM_DATABASE_URL")
-    }
+    saved = {key: os.environ.get(key) for key in ("DATABASE_URL", "PLATFORM_DATABASE_URL")}
     try:
         command.upgrade(_alembic_config(temp_url), "head")
         asyncio.run(_disable_users_force_rls(temp_dsn))
@@ -529,9 +521,7 @@ async def _seed_m1c2_reasons(dsn: str) -> None:
             "'active', false, false) returning id",
             tenant_id,
         )
-        for index, reason in enumerate(
-            ("rotated", "session_kicked", "session_revoked", "logout")
-        ):
+        for index, reason in enumerate(("rotated", "session_kicked", "session_revoked", "logout")):
             await connection.execute(
                 "insert into refresh_tokens (tenant_id, user_id, jti, family_id, "
                 "token_hash, expires_at, last_seen_at, revoked_at, revoked_reason) "
@@ -549,9 +539,7 @@ async def _seed_m1c2_reasons(dsn: str) -> None:
             "values ('m1c2-rollback-ops', '$2b$12$fake', 'active', false, false) "
             "returning id"
         )
-        for index, reason in enumerate(
-            ("rotated", "session_kicked", "session_revoked", "logout")
-        ):
+        for index, reason in enumerate(("rotated", "session_kicked", "session_revoked", "logout")):
             await connection.execute(
                 "insert into platform_refresh_tokens (platform_user_id, jti, family_id, "
                 "token_hash, expires_at, last_seen_at, revoked_at, revoked_reason) "
@@ -606,8 +594,7 @@ async def _m1c2_backfill_mismatches(dsn: str) -> int:
     connection = await asyncpg.connect(dsn)
     try:
         tenant = await connection.fetchval(
-            "select count(*) from refresh_tokens "
-            "where last_seen_at is distinct from issued_at"
+            "select count(*) from refresh_tokens where last_seen_at is distinct from issued_at"
         )
         platform = await connection.fetchval(
             "select count(*) from platform_refresh_tokens "
@@ -658,5 +645,114 @@ def test_m1c2_downgrade_with_session_reasons_then_upgrade() -> None:
         ]
         assert nullable_after == "NO"
         assert asyncio.run(_m1c2_backfill_mismatches(temp_dsn)) == 0
+    finally:
+        asyncio.run(_drop_database(dsn, temp_database))
+
+
+async def _seed_d1_password_reset_reason(dsn: str) -> None:
+    """写入 revoked_reason='password_reset' 的租户/平台刷新令牌行。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        tenant_id = await connection.fetchval(
+            "insert into tenants (school_code, name, status, activated_at) "
+            "values ('SCH-D1ROLL', 'D1 回滚中学', 'active', now()) returning id"
+        )
+        user_id = await connection.fetchval(
+            "insert into users (tenant_id, user_type, login_id, password_hash, "
+            "status, must_change_password, mfa_enabled) "
+            "values ($1, 'student', 'd1-rollback@school.edu', '$2b$12$fake', "
+            "'active', false, false) returning id",
+            tenant_id,
+        )
+        await connection.execute(
+            "insert into refresh_tokens (tenant_id, user_id, jti, family_id, "
+            "token_hash, expires_at, last_seen_at, revoked_at, revoked_reason) "
+            "values ($1, $2, gen_random_uuid(), gen_random_uuid(), $3, "
+            "now() + interval '1 day', now(), now(), 'password_reset')",
+            tenant_id,
+            user_id,
+            "d" * 64,
+        )
+        platform_user_id = await connection.fetchval(
+            "insert into platform_users (account, password_hash, status, "
+            "must_change_password, mfa_enabled) "
+            "values ('d1-rollback-ops', '$2b$12$fake', 'active', false, false) "
+            "returning id"
+        )
+        await connection.execute(
+            "insert into platform_refresh_tokens (platform_user_id, jti, family_id, "
+            "token_hash, expires_at, last_seen_at, revoked_at, revoked_reason) "
+            "values ($1, gen_random_uuid(), gen_random_uuid(), $2, "
+            "now() + interval '1 day', now(), now(), 'password_reset')",
+            platform_user_id,
+            "e" * 64,
+        )
+    finally:
+        await connection.close()
+
+
+async def _d1_rollback_state(dsn: str) -> tuple[list[str], list[str], bool]:
+    """返回回滚后的撤销原因（应归一化为 password_change）与 D1 表是否已删除。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        tenant_reasons = [
+            str(row["revoked_reason"])
+            for row in await connection.fetch("select revoked_reason from refresh_tokens")
+        ]
+        platform_reasons = [
+            str(row["revoked_reason"])
+            for row in await connection.fetch("select revoked_reason from platform_refresh_tokens")
+        ]
+        table_gone = await connection.fetchval(
+            "select to_regclass('password_reset_tokens') is null "
+            "and to_regclass('platform_password_reset_tokens') is null "
+            "and to_regclass('password_history') is null "
+            "and to_regclass('platform_password_history') is null"
+        )
+        return tenant_reasons, platform_reasons, bool(table_gone)
+    finally:
+        await connection.close()
+
+
+async def _table_exists(dsn: str, table: str) -> bool:
+    """表是否存在（升级后复核 D1 表重建）。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        return bool(await connection.fetchval(f"select to_regclass('{table}') is not null"))
+    finally:
+        await connection.close()
+
+
+def test_m1d1_downgrade_normalizes_password_reset_reason_then_upgrade() -> None:
+    """含 password_reset 撤销原因时可 downgrade（先归一化为 password_change），再 upgrade。"""
+
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL 未设置；先运行 scripts/test-stack.sh up 并导出 TEST_*")
+    assert_test_database_dsn(admin_url)
+
+    dsn, database = _admin_dsn(admin_url)
+    temp_database = f"{database}_m1d1rollback"
+    temp_dsn = dsn.rsplit("/", 1)[0] + f"/{temp_database}"
+    temp_url = admin_url.rsplit("/", 1)[0] + f"/{temp_database}"
+
+    asyncio.run(_create_database(dsn, temp_database))
+    try:
+        config = _alembic_config(temp_url)
+        command.upgrade(config, "head")
+        asyncio.run(_seed_d1_password_reset_reason(temp_dsn))
+
+        command.downgrade(config, D1_PREVIOUS_REVISION)
+
+        tenant_reasons, platform_reasons, table_gone = asyncio.run(_d1_rollback_state(temp_dsn))
+        assert tenant_reasons == ["password_change"]
+        assert platform_reasons == ["password_change"]
+        assert table_gone is True
+
+        command.upgrade(config, "head")
+        assert asyncio.run(_table_exists(temp_dsn, "password_reset_tokens")) is True
     finally:
         asyncio.run(_drop_database(dsn, temp_database))

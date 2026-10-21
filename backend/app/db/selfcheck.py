@@ -25,6 +25,8 @@ REQUIRED_RLS_TABLES: tuple[str, ...] = (
     "user_roles",
     "data_scopes",
     "refresh_tokens",
+    "password_history",
+    "password_reset_tokens",
     "audit_logs",
 )
 
@@ -37,13 +39,17 @@ async def _check_role(session: AsyncSession, label: str) -> None:
     """校验当前连接角色不可绕过 RLS。"""
 
     role = (
-        await session.execute(
-            text(
-                "select current_user as role_name, r.rolsuper, r.rolbypassrls "
-                "from pg_roles r where r.rolname = current_user"
+        (
+            await session.execute(
+                text(
+                    "select current_user as role_name, r.rolsuper, r.rolbypassrls "
+                    "from pg_roles r where r.rolname = current_user"
+                )
             )
         )
-    ).mappings().one()
+        .mappings()
+        .one()
+    )
     if role["rolsuper"] or role["rolbypassrls"]:
         raise DatabaseSelfCheckError(
             f"{label}连接角色 {role['role_name']} 具有超级用户/BYPASSRLS，禁止启动"
@@ -58,9 +64,10 @@ async def _check_forced_rls(session: AsyncSession) -> None:
     """
 
     rows = (
-        await session.execute(
-            text(
-                """
+        (
+            await session.execute(
+                text(
+                    """
                 select c.relname,
                        c.relrowsecurity,
                        c.relforcerowsecurity,
@@ -88,10 +95,13 @@ async def _check_forced_rls(session: AsyncSession) -> None:
                   and c.relname = any(:tables)
                 group by c.relname, c.relrowsecurity, c.relforcerowsecurity
                 """
-            ),
-            {"tables": list(REQUIRED_RLS_TABLES)},
+                ),
+                {"tables": list(REQUIRED_RLS_TABLES)},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     found = {row["relname"] for row in rows}
     missing = set(REQUIRED_RLS_TABLES) - found
@@ -122,18 +132,22 @@ async def _check_review_function_owner(session: AsyncSession) -> None:
     """SECURITY DEFINER 审核函数 owner 必须能绕过 FORCE RLS。"""
 
     row = (
-        await session.execute(
-            text(
-                """
+        (
+            await session.execute(
+                text(
+                    """
                 select r.rolname, r.rolsuper, r.rolbypassrls
                 from pg_proc p
                 join pg_roles r on r.oid = p.proowner
                 where p.proname = 'review_registration_request'
                 limit 1
                 """
+                )
             )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None:
         raise DatabaseSelfCheckError("review_registration_request() 不存在（迁移未执行）")
     if not (row["rolsuper"] or row["rolbypassrls"]):
@@ -177,18 +191,22 @@ async def _check_registration_function_owner(session: AsyncSession) -> None:
     """注册函数同样在 FORCE RLS 下的 audit_logs/申请单内写入，owner 必须可绕过。"""
 
     row = (
-        await session.execute(
-            text(
-                """
+        (
+            await session.execute(
+                text(
+                    """
                 select r.rolname, r.rolsuper, r.rolbypassrls
                 from pg_proc p
                 join pg_roles r on r.oid = p.proowner
                 where p.proname = 'submit_tenant_registration'
                 limit 1
                 """
+                )
             )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None:
         raise DatabaseSelfCheckError("submit_tenant_registration() 不存在（迁移未执行）")
     if not (row["rolsuper"] or row["rolbypassrls"]):
@@ -205,9 +223,7 @@ async def _check_fail_closed(session: AsyncSession) -> None:
             text(f"select count(*) from {table}")  # nosec B608 - 表名来自常量元组
         )
         if visible:
-            raise DatabaseSelfCheckError(
-                f"未设置租户上下文却可读取 {table}，RLS 隔离失效"
-            )
+            raise DatabaseSelfCheckError(f"未设置租户上下文却可读取 {table}，RLS 隔离失效")
 
 
 async def verify_runtime_database() -> None:

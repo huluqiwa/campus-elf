@@ -16,17 +16,18 @@
 | M1 | M1-C 三端登录与令牌**后端**（AUTH-01/02） | ✅ 完成（三轮审查通过） |
 | M1 | M1-C-UI 三端登录页/强制改密页/守卫/HttpOnly 刷新 Cookie | ✅ 完成（两轮审查通过） |
 | M1 | M1-C2 会话设备管理（AUTH-06，策略 C） | ✅ 完成（五轮审查通过；设备限额/列表/下线/退出其它/被踢即时失效；简报 `docs/design-briefs/M1-C2-session-devices.md`） |
-| M1 | M1-D 密码策略/历史/重置、失败锁定、MFA（AUTH-03/04/05） | ⏳ 未开始 |
+| M1 | M1-D1 密码策略/历史/邮件重置、失败锁定（AUTH-03 员工/平台部分、AUTH-05） | 🔄 第五轮复审通过（348 passed），待提交/远端 CI（简报 `docs/design-briefs/M1-D1-password-lockout.md`） |
+| M1 | M1-D2 MFA（AUTH-04） | ⏳ 未开始（独立简报） |
 | M1 | M1-E RBAC 与数据范围（RBAC-01/02/03） | ⏳ 未开始 |
 | M1 | M1-F 审计落库与哈希链（AUD-01） | ⏳ 未开始 |
 | M1 | M1 验收报告 | ⏳ 未开始（需含 TD-110 真实后端全栈 E2E） |
 | M2/M3/M4 | 组织与人员 / 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 ORG-05、KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M1-D → M1-E → M1-F → M1 验收报告 → M2 → M3 → M4。
+- **建议的下一步顺序**：M1-D1 收口 → M1-D2（MFA）→ M1-E → M1-F → M1 验收报告 → M2 → M3 → M4。
 - 最近提交：`main` 含 M1-C2 收口 `692e867` 及其后的文档回填提交；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
-- 数据库迁移 head：`d4e6f8a0b2c1`（M1-C2）；`alembic check` 应无漂移。
+- 数据库迁移 head：`b2d4f6a8c0e1`（M1-D1）；`alembic check` 应无漂移。
 
 ---
 
@@ -45,14 +46,14 @@ cd backend
 uv sync --frozen
 uv run ruff check app tests
 uv run mypy --no-incremental app tests
-REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 290 passed）
+REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 348 passed）
 uv run alembic -x db_url="$TEST_DATABASE_URL" check   # 迁移漂移检查
 
 # 3) 前端
 cd ../frontend
 pnpm install --frozen-lockfile
 pnpm lint && pnpm format:check && pnpm typecheck && pnpm test:unit && pnpm build
-pnpm test:e2e                                     # 需系统 Chrome（channel: chrome），当前 12 passed
+pnpm test:e2e                                     # 需系统 Chrome（channel: chrome），当前 25 单测 / 22 E2E
 
 # 4) 一键本地 CI（与远端工作流一一对应；--with-e2e 追加 Playwright）
 cd .. && bash scripts/ci.sh            # 或 bash scripts/ci.sh --with-e2e

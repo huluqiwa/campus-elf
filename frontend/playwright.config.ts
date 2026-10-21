@@ -4,6 +4,8 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
   fullyParallel: true,
+  // Windows 高并发下 Chrome 偶发导航 ERR_ABORTED；固定 2 与 CI runner 对齐
+  workers: 2,
   reporter: [["list"]],
   use: {
     trace: "off",

@@ -46,11 +46,13 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
 
 export {
   createAuthSession,
+  passwordPolicyError,
   toUserMessage,
   type AuthSession,
   type AuthSessionOptions,
   type AuthTokens,
   type AuthUser,
+  type PasswordResetRequestInput,
   type PlatformLoginInput,
   type Realm,
   type TenantLoginInput,

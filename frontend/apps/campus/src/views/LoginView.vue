@@ -83,6 +83,13 @@ async function submit(): Promise<void> {
         >
           登录
         </van-button>
+        <router-link
+          class="forgot"
+          :to="{ name: 'forgot-password' }"
+          data-testid="forgot-password-link"
+        >
+          忘记密码？
+        </router-link>
       </div>
     </van-form>
   </div>
@@ -104,5 +111,13 @@ h1 {
   color: #d43030;
   text-align: center;
   margin: 8px 0 0;
+}
+.forgot {
+  display: block;
+  margin-top: 12px;
+  text-align: center;
+  color: #1989fa;
+  text-decoration: none;
+  font-size: 14px;
 }
 </style>

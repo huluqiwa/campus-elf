@@ -195,7 +195,9 @@ async def test_tenant_sees_only_own_rows(
 ) -> None:
     """带租户上下文只能看到本租户数据；按条件查其他租户返回空。"""
 
-    tenant_a, tenant_b, user_a, _ = await _seed_two_tenants(session_factory, platform_session_factory)
+    tenant_a, tenant_b, user_a, _ = await _seed_two_tenants(
+        session_factory, platform_session_factory
+    )
 
     async with session_factory() as session, session.begin():
         await prepare_tenant_context(session, tenant_a)
@@ -241,7 +243,9 @@ async def test_cross_tenant_parent_reference_is_rejected(
 ) -> None:
     """跨租父行引用（把 B 的角色授给 A 的用户）必须被复合外键拒绝。"""
 
-    tenant_a, tenant_b, user_a, _ = await _seed_two_tenants(session_factory, platform_session_factory)
+    tenant_a, tenant_b, user_a, _ = await _seed_two_tenants(
+        session_factory, platform_session_factory
+    )
 
     async with session_factory() as session, session.begin():
         await prepare_tenant_context(session, tenant_b)
@@ -259,7 +263,9 @@ async def test_cross_tenant_parent_reference_is_rejected(
         await prepare_tenant_context(session, tenant_a)
         with pytest.raises(DBAPIError) as excinfo:
             await session.execute(
-                text("insert into user_roles (tenant_id, user_id, role_id) values (:tid, :uid, :rid)"),
+                text(
+                    "insert into user_roles (tenant_id, user_id, role_id) values (:tid, :uid, :rid)"
+                ),
                 {"tid": tenant_a, "uid": user_a, "rid": role_b_id},
             )
         # 复合外键或 RLS 任一拦截均可（均为越权写被拒）
@@ -333,6 +339,61 @@ async def test_tenant_connection_cannot_read_platform_tables(
     async with session_factory() as session, session.begin():
         with pytest.raises(DBAPIError, match="permission denied"):
             await session.execute(text("select * from platform_users"))
+
+
+@pytest.mark.asyncio
+async def test_d1_password_tables_are_tenant_isolated(
+    session_factory: async_sessionmaker[AsyncSession],
+    platform_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """M1-D1 新表：跨租读写被 RLS 拒绝，租户连接拿不到平台密码表。"""
+
+    tenant_a, tenant_b, user_a, _ = await _seed_two_tenants(
+        session_factory, platform_session_factory
+    )
+    async with session_factory() as session, session.begin():
+        await prepare_tenant_context(session, tenant_a)
+        await session.execute(
+            text(
+                "insert into password_history (tenant_id, user_id, password_hash) "
+                "values (:tid, :uid, 'history-hash')"
+            ),
+            {"tid": tenant_a, "uid": user_a},
+        )
+        await session.execute(
+            text(
+                "insert into password_reset_tokens "
+                "(tenant_id, user_id, token_hash, expires_at) "
+                "values (:tid, :uid, :hash, now() + interval '30 minutes')"
+            ),
+            {"tid": tenant_a, "uid": user_a, "hash": "a" * 64},
+        )
+
+    async with session_factory() as session, session.begin():
+        await prepare_tenant_context(session, tenant_b)
+        assert (await session.execute(text("select * from password_history"))).all() == []
+        assert (await session.execute(text("select * from password_reset_tokens"))).all() == []
+        with pytest.raises(DBAPIError, match=RLS_ERROR):
+            await session.execute(
+                text(
+                    "insert into password_history (tenant_id, user_id, password_hash) "
+                    "values (:tid, :uid, 'cross-tenant')"
+                ),
+                {"tid": tenant_a, "uid": user_a},
+            )
+
+    # 权限拒绝会使事务进入 aborted 状态：每条负向断言独立事务，避免被前一条污染
+    for table in ("platform_password_history", "platform_password_reset_tokens"):
+        async with session_factory() as session, session.begin():
+            await prepare_tenant_context(session, tenant_b)
+            with pytest.raises(DBAPIError, match="permission denied"):
+                await session.execute(text(f"select * from {table}"))
+
+    for table in ("password_history", "password_reset_tokens"):
+        async with platform_session_factory() as session, session.begin():
+            await prepare_platform_context(session)
+            with pytest.raises(DBAPIError, match="permission denied"):
+                await session.execute(text(f"select * from {table}"))
 
 
 @pytest.mark.asyncio
@@ -453,7 +514,9 @@ async def test_app_roles_are_not_table_owners_and_cannot_create_tables(
 
     # 应用角色不能在 public 建表（无法自建表并"忘记"启用策略）
     async with tenant_engine.connect() as conn:
-        can_create = await conn.scalar(text("select has_schema_privilege(current_user, 'public', 'CREATE')"))
+        can_create = await conn.scalar(
+            text("select has_schema_privilege(current_user, 'public', 'CREATE')")
+        )
     assert can_create is False
 
 
@@ -492,13 +555,16 @@ async def test_tenant_connection_cannot_escalate_via_platform_guc(
         await prepare_tenant_context(session, tenant_a)
         await prepare_platform_context(session)  # 模拟"应用层误设 GUC"
         actions = [
-            row.action for row in (await session.execute(text("select action from audit_logs"))).all()
+            row.action
+            for row in (await session.execute(text("select action from audit_logs"))).all()
         ]
         tenants_visible = (await session.execute(text("select count(*) from tenants"))).scalar()
 
         # 伪造平台级事件必须失败（策略按角色限定，租户角色不匹配平台策略）
         with pytest.raises(DBAPIError):
-            await session.execute(insert_sql, {"tid": None, "realm": "platform", "action": "forged"})
+            await session.execute(
+                insert_sql, {"tid": None, "realm": "platform", "action": "forged"}
+            )
 
     assert actions == ["a.1"], f"租户连接读到了非本租户审计：{actions}"
     assert tenants_visible == 1

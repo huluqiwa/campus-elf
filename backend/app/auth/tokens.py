@@ -213,3 +213,59 @@ def hash_client_fingerprint(value: str | None) -> str | None:
     if not value:
         return None
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+# ---------- 密码重置令牌（M1-D1） ----------
+# 格式：租户 `v1rt.<tenant_id>.<secret>`；平台 `v1rp.<secret>`。
+# 前缀只用于确认时选择连接与 realm；secret 是唯一凭证，数据库只存其 SHA-256。
+_RESET_TENANT_KIND = "v1rt"
+_RESET_PLATFORM_KIND = "v1rp"
+_RESET_SECRET_BYTES = 32
+# token_urlsafe(32) 约 43 字符；下限用于拒绝明显伪造的短串
+_RESET_SECRET_MIN_LENGTH = 32
+
+
+def generate_password_reset_token(realm: Realm, tenant_id: UUID | None) -> str:
+    """生成重置令牌明文（只出现在邮件链接中，不落库/日志/审计）。
+
+    异常:
+        ValueError: realm 与 tenant_id 组合非法。
+    """
+
+    secret = secrets.token_urlsafe(_RESET_SECRET_BYTES)
+    if realm == "tenant":
+        if tenant_id is None:
+            raise ValueError("租户重置令牌必须有 tenant_id")
+        return f"{_RESET_TENANT_KIND}.{tenant_id}.{secret}"
+    if tenant_id is not None:
+        raise ValueError("平台重置令牌不得携带 tenant_id")
+    return f"{_RESET_PLATFORM_KIND}.{secret}"
+
+
+def parse_password_reset_token(token: str) -> tuple[Realm, UUID | None, str]:
+    """解析重置令牌的 realm/tenant_id/secret（不校验数据库记录）。
+
+    异常:
+        TokenError: 格式非法或 secret 过短。
+    """
+
+    parts = token.strip().split(".")
+    if len(parts) == 3 and parts[0] == _RESET_TENANT_KIND:
+        try:
+            tenant_id = UUID(parts[1])
+        except ValueError as exc:
+            raise TokenError("TOKEN_INVALID", "重置令牌无效") from exc
+        if len(parts[2]) < _RESET_SECRET_MIN_LENGTH:
+            raise TokenError("TOKEN_INVALID", "重置令牌无效")
+        return "tenant", tenant_id, parts[2]
+    if len(parts) == 2 and parts[0] == _RESET_PLATFORM_KIND:
+        if len(parts[1]) < _RESET_SECRET_MIN_LENGTH:
+            raise TokenError("TOKEN_INVALID", "重置令牌无效")
+        return "platform", None, parts[1]
+    raise TokenError("TOKEN_INVALID", "重置令牌无效")
+
+
+def hash_password_reset_token(secret: str) -> str:
+    """重置令牌 secret 的 SHA-256 十六进制哈希（数据库只存该值）。"""
+
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
