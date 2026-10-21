@@ -69,6 +69,27 @@ cd .. && bash scripts/ci.sh            # 或 bash scripts/ci.sh --with-e2e
 5. **MailHog 端口**：测试栈 SMTP=51025、API=58025（不是 1025/8025，那是开发栈）。测试必须用 `TEST_SMTP_*`/`TEST_MAILHOG_API`，不要写死默认端口（CI 上会因 1025 无服务而 502）。
 6. **测试栈容器重启后**：偶发端口转发短暂异常，重跑 `bash scripts/test-stack.sh up` 即可。
 
+### 2.1 接手时先做"环境自检"（新工具跑这几条，然后汇报，别猜）
+
+```bash
+uname -a                                   # 是否 Linux/macOS/Windows(Git Bash/WSL)
+docker ps --format '{{.Names}} {{.Status}}' | head        # 能否操作 Docker；测试栈是否已在跑
+test -f .env && echo ".env 存在" || echo ".env 缺失"      # .env 不入库，缺失需从 .env.example 复制
+grep -q '^JWT_SECRET=.\+' .env 2>/dev/null && echo "JWT_SECRET 已配" || echo "JWT_SECRET 缺失/为空"
+gh auth status 2>&1 | head -5               # 能否查远端 CI
+git ls-remote origin -h refs/heads/main     # 能否访问远端仓库（SSH/HTTPS 权限）
+env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 127.0.0.1）
+```
+
+**要求它按这五项汇报**（每项写"能满足 / 不能满足 / 需要你提供"）：
+1. 能否运行 Docker 与 bash（不能跑 Docker ⇒ 集成/业务场景测试与 e2e 无法本地执行，只能用单元测试 + 远端 CI 代替，必须在汇报里说明）；
+2. 测试栈是否已启动（没起则先 `bash scripts/test-stack.sh up`）；
+3. `.env` 与 `JWT_SECRET` 是否就绪（缺失则从 `.env.example` 复制并生成 32 字节随机值）；
+4. 能否访问 GitHub 并查询 CI（`gh auth login` / SSH key / PAT）；
+5. **是否具备"第二上下文/子 agent"能力**——这是独立审查门禁的前提；不满足时按 §6 的替代方案执行，并明确告知用户本轮的审查由谁做。
+
+注意：**环境相关的"状态"（栈有没有起、凭据有没有配）只有用户能确认**；"配置方法"已经在 §2 里，不需要再问用户。
+
 ---
 
 ## 3. 工作流门禁（每个功能点都必须走完，顺序不可省）
