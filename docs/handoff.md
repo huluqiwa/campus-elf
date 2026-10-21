@@ -23,7 +23,7 @@
 | M2/M3/M4 | 组织与人员 / 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 ORG-05、KB-09/KB-10、AI-10） |
 
 - **建议的下一步顺序**：M1-D → M1-E → M1-F → M1 验收报告 → M2 → M3 → M4。
-- 最近提交：`main` = `692e867`（M1-C2 收口）；工作树应保持干净。
+- 最近提交：`main` 含 M1-C2 收口 `692e867` 及其后的文档回填提交；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
 - 数据库迁移 head：`d4e6f8a0b2c1`（M1-C2）；`alembic check` 应无漂移。
