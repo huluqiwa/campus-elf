@@ -106,3 +106,41 @@ class RefreshToken(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
     revoked_reason: Mapped[str | None] = mapped_column(String(32))
     ua_hash: Mapped[str | None] = mapped_column(String(64))
     ip_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+class PlatformRefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """平台账号刷新令牌（平台 realm；与租户 `refresh_tokens` 同构但不带 tenant_id）。"""
+
+    __tablename__ = "platform_refresh_tokens"
+    __table_args__ = (
+        Index("ix_platform_refresh_tokens_platform_user_id", "platform_user_id"),
+        Index("ix_platform_refresh_tokens_family_id", "family_id"),
+        Index("ix_platform_refresh_tokens_expires_at", "expires_at"),
+        UniqueConstraint("token_hash", name="uq_platform_refresh_tokens_token_hash"),
+        CheckConstraint(
+            "revoked_reason IS NULL OR revoked_reason IN "
+            "('logout', 'password_change', 'reuse_detected', 'rotated', "
+            "'admin_revoke', 'account_deleted', 'expired')",
+            name="revoked_reason_valid",
+        ),
+        ForeignKeyConstraint(
+            ["platform_user_id"],
+            ["platform_users.id"],
+            name="fk_platform_refresh_tokens_platform_user_id_platform_users",
+            ondelete="CASCADE",
+        ),
+    )
+
+    jti: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False, unique=True)
+    family_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    platform_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rotated_to_jti: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_reason: Mapped[str | None] = mapped_column(String(32))
+    ua_hash: Mapped[str | None] = mapped_column(String(64))
+    ip_hash: Mapped[str | None] = mapped_column(String(64))

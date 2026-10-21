@@ -335,15 +335,27 @@ audit_logs: 仅追加，prev_hash/hash 链
 - OpenAPI 3.1 自动生成；前端 `openapi-typescript` 生成类型。
 - SSE：`Content-Type: text/event-stream`；Nginx `proxy_buffering off`、`X-Accel-Buffering: no`；心跳 15s；支持 `Last-Event-ID`/`since`。
 
-### 5.2 认证
+### 5.2 认证（M1-C 已实现）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/auth/login` | 学校编号+账号+密码，返回 access/refresh/must_change_password |
-| POST | `/auth/refresh` | 轮换 refresh；复用检测 |
-| POST | `/auth/logout` | 撤销当前 refresh family |
-| POST | `/auth/change-password` | 首登/主动改密；撤销全部 refresh |
-| POST | `/auth/password-reset/request` | 员工邮件重置 |
+| POST | `/api/v1/auth/login` | `realm=tenant`：学校编号 + 学号/工号 + 密码；`realm=platform`：平台账号 + 密码；失败文案统一 |
+| POST | `/api/v1/auth/refresh` | 刷新令牌轮换；旧令牌重用 → 撤销整个家族（`reuse_detected`） |
+| POST | `/api/v1/auth/logout` | 撤销刷新令牌家族（可选 body 携带 refresh_token）+ 当前访问令牌 jti 立即进入撤销集合 |
+| POST | `/api/v1/auth/change-password` | 首登改密/主动改密；自增 `token_version` + 撤销全部家族 + 返回新令牌 |
+| GET | `/api/v1/auth/me` | 当前主体、realm、权限码（前端菜单用；服务端仍逐请求校验） |
+| POST | `/auth/password-reset/request` | 员工邮件重置（M1-D） |
+
+**令牌契约**
+- 访问令牌：HS256 JWT，15 分钟；claim `sub/realm/tenant_id/jti/token_version/must_change_password/iss/aud/exp`；`aud` 按 realm 区分（`campus-elf-tenant` / `campus-elf-platform`），跨 realm 混用直接拒绝（TD-074）。
+- 刷新令牌：`v1t.<tenant_id>.<jti>.<secret>`（租户）/ `v1p.<jti>.<secret>`（平台），仅存 SHA-256 哈希；7 天有效，每次刷新轮换。
+- 撤销：登出/改密即时失效——`token_version` 自增使所有旧访问令牌失效，刷新令牌按家族撤销；登出的访问令牌另写 Redis 撤销标记（TTL=剩余有效期）。
+- 身份/权限每次请求从数据库读取（不缓存快照）：停用账号、权限变更、`token_version` 变化立即生效。
+- 首登改密门禁：`must_change_password` 为真时只放行 `/auth/change-password`、`/auth/logout`、`/auth/me`，其余接口 403。
+- realm↔连接绑定：平台主体只使用平台连接、租户主体只使用租户连接（TD-074）；**平台路由必须显式声明 `realm="platform"`**（`permissions` 是全局目录，权限码本身不构成 realm 边界），权限/realm 不符写 `auth.permission.denied` 审计（含 reason）；数据库层另有 `role_permissions`/`platform_role_permissions` 的 realm/模块守卫触发器（`b7d1e3f5a9c2`）。
+- 权限模块边界：租户角色禁止引用 `platform.*`（触发器 `role_permissions_realm_guard` + 启动自检逐租户校验）；平台角色允许持有全量权限（运营方超集角色，`c8e2f4a6b1d3` 移除平台方向守卫）。
+- 已知限制：bcrypt 输入上限 72 字节（超长口令在登录按凭证错误、改密按 422 拒绝，不再 500）；改哈希方案见 TD-107。
+- 平台审核接口使用 `platform.tenant.review` 权限（开发令牌已删除，TD-078）；审计 `actor_id` 为真实平台账号（TD-081）。
 | POST | `/auth/password-reset/confirm` | 重置令牌 |
 | POST | `/auth/mfa/enroll` / `/auth/mfa/verify` | TOTP 可选 |
 
@@ -530,7 +542,7 @@ GET  /api/v1/platform/tenants/{id}/review-records
 - 学校编号：`SCH-` + 8 位随机（字符集排除 0/O/1/I/L），唯一约束兜底；开通函数调用外层用 SAVEPOINT 对编号冲突换号重试。
 - 对象存储 key：`onboarding/<request_id>/qualification.<ext>`、`reviews/<review_record_id>/qualification.<ext>`；开发/测试用本地目录，生产用 S3/MinIO。注册**先查重再写对象**，失败清理，避免重复提交产生孤儿文件；文件类型以魔数校验（PDF/PNG/JPEG），MIME 声明仅作快速拒绝。
 - 请求体限制**按路由**生效（仅 `/platform/tenants/register` 11MB，避免给后续 KB 50MB/300MB 上传引入全局上限）：有 `Content-Length` 直接拒绝；chunked/无长度时先缓冲并累计字节数，超限返回 413；未登记路由原样透传（不做缓冲）。
-- 鉴权：M1-C 之前审核接口使用 `DEV_PLATFORM_REVIEW_TOKEN`（常量时间比较；production 禁止配置；M1-C 换 JWT + `platform.tenant.review` 后删除，TD-078）；拒绝请求写 `platform.review.denied` 审计。
+- 鉴权：使用平台账号登录 + `platform.tenant.review`/`platform.tenant.view` 权限（开发令牌已删除，TD-078）；权限拒绝（含 realm 不符）写 `auth.permission.denied` 审计（带 reason）。
 - 审计脱敏：邮箱只落掩码（`a***@domain`），不写明文联系方式；`request_id` 贯穿提交/审核，与响应头 `X-Request-ID` 一致。
 - 启动自检（预发/生产）：**租户与平台两个连接**都不得为超级用户/BYPASSRLS；逐表要求 FORCE RLS、**每条策略都引用租户/平台上下文且只授予两个应用组角色**（防 `USING (true)` 宽松策略）；审核函数 owner 必须可绕过 FORCE RLS；无租户上下文时租户数据不可见。任一失败拒绝启动（TD-073）。
 

@@ -54,9 +54,6 @@ ensure_app_password() {
   if [[ -z "$(read_env_value TEST_PLATFORM_PASSWORD)" ]]; then
     echo "TEST_PLATFORM_PASSWORD=$(openssl rand -hex 16)" >> "${ENV_FILE}"
   fi
-  if [[ -z "$(read_env_value TEST_PLATFORM_REVIEW_TOKEN)" ]]; then
-    echo "TEST_PLATFORM_REVIEW_TOKEN=$(openssl rand -hex 24)" >> "${ENV_FILE}"
-  fi
 }
 
 cleanup_legacy_roles() {
@@ -166,7 +163,6 @@ export TEST_SMTP_HOST="127.0.0.1"
 export TEST_SMTP_PORT="51025"
 export TEST_MAILHOG_API="http://127.0.0.1:58025"
 export TEST_OBJECT_STORE_DIR="${REPO_ROOT}/.zcode/tmp/objects-test"
-export TEST_PLATFORM_REVIEW_TOKEN="$(read_env_value TEST_PLATFORM_REVIEW_TOKEN)"
 EOF
 }
 
@@ -193,7 +189,6 @@ TEST_SMTP_HOST=127.0.0.1
 TEST_SMTP_PORT=51025
 TEST_MAILHOG_API=http://127.0.0.1:58025
 TEST_OBJECT_STORE_DIR=${REPO_ROOT}/.zcode/tmp/objects-test
-TEST_PLATFORM_REVIEW_TOKEN=$(read_env_value TEST_PLATFORM_REVIEW_TOKEN)
 EOF
 }
 

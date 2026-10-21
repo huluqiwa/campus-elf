@@ -51,6 +51,7 @@ TABLES_ALLOWED_WITHOUT_TENANT_ID = {
     "platform_users",
     "platform_roles",
     "platform_user_roles",
+    "platform_refresh_tokens",
     "permissions",
     "platform_role_permissions",
     "tenant_registration_requests",

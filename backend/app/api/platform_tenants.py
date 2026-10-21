@@ -1,62 +1,27 @@
-"""平台侧租户接口（M1-B）。
+"""平台侧租户接口（M1-B/M1-C）。
 
-鉴权说明：M1-C 之前没有正式登录，审核接口使用**开发/测试专用**静态令牌：
-- `DEV_PLATFORM_REVIEW_TOKEN` 未配置 → 403（生产由配置校验禁止配置该令牌）；
-- 配置后要求 `Authorization: Bearer <token>`；
-- M1-C 用 JWT + `platform.tenant.review` 权限替换本依赖并删除令牌（TD）。
+鉴权（M1-C 起）：平台账号登录后携带访问令牌，按权限码控制：
+- 审核：`platform.tenant.review`；
+- 列表/审核记录：`platform.tenant.view`；
+- 注册提交为公开接口（无鉴权，字段/文件/体积校验 + 审计）。
+开发令牌 `DEV_PLATFORM_REVIEW_TOKEN` 已删除（TD-078 完成）。
 """
 
-import secrets
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from app.audit.writer import append_audit
-from app.config import get_settings
-from app.db.session import db_session
+from app.auth.principal import Principal, require_permission
 from app.onboarding import service
 from app.onboarding.service import OnboardingError
 
 router = APIRouter(prefix="/platform", tags=["platform"])
 
 
-async def require_platform_reviewer(
-    request: Request,
-    authorization: Annotated[str | None, Header()] = None,
-) -> UUID:
-    """校验开发令牌并返回审核人占位 id（M1-C 改为 JWT 主体）。
-
-    - 常量时间比较，避免令牌被计时侧信道枚举；
-    - 未配置令牌 → 403；缺失/错误 → 401，并写一条拒绝审计。
-
-    异常:
-        HTTPException: 未启用（403）、令牌缺失/错误（401）。
-    """
-
-    settings = get_settings()
-    expected = settings.dev_platform_review_token
-    if expected is None or not expected.get_secret_value():
-        raise HTTPException(status_code=403, detail="审核接口未启用（等待正式登录）")
-    provided = authorization if authorization is not None else ""
-    expected_header = f"Bearer {expected.get_secret_value()}"
-    if not secrets.compare_digest(provided.encode(), expected_header.encode()):
-        async with db_session(platform=True) as session:
-            await append_audit(
-                session,
-                action="platform.review.denied",
-                resource_type="platform_review",
-                actor_realm="platform",
-                result="failure",
-                metadata={"path": request.url.path},
-                request_id=getattr(request.state, "request_id", None),
-            )
-        raise HTTPException(status_code=401, detail="审核令牌无效")
-    return service.SYSTEM_REVIEWER_ID
-
-
-ReviewerId = Annotated[UUID, Depends(require_platform_reviewer)]
+ReviewerDep = require_permission("platform.tenant.review", realm="platform")
+ViewerDep = require_permission("platform.tenant.view", realm="platform")
 
 
 class RegistrationResponse(BaseModel):
@@ -174,7 +139,7 @@ async def review_tenant_request(
     request_id: UUID,
     payload: ReviewPayload,
     request: Request,
-    reviewer_id: ReviewerId,
+    reviewer: Annotated[Principal, ReviewerDep],
 ) -> ReviewResponse:
     """审核注册申请（通过/拒绝；通过后开通租户并发初始密码邮件）。
 
@@ -182,6 +147,7 @@ async def review_tenant_request(
         HTTPException: 申请不存在（404）、已审核（409）、拒绝缺理由（422）。
     """
 
+    reviewer_id = reviewer.user_id
     try:
         if payload.result == "approved":
             outcome = await service.approve_request(
@@ -212,7 +178,7 @@ async def review_tenant_request(
 
 @router.get("/tenants", response_model=list[TenantItem])
 async def list_tenants(
-    reviewer_id: ReviewerId, status: str | None = None
+    viewer: Annotated[Principal, ViewerDep], status: str | None = None
 ) -> list[TenantItem]:
     """列出学校（平台侧）。"""
 
@@ -232,7 +198,7 @@ async def list_tenants(
 
 @router.get("/tenant-requests", response_model=list[RequestItem])
 async def list_tenant_requests(
-    reviewer_id: ReviewerId, status: str | None = None
+    viewer: Annotated[Principal, ViewerDep], status: str | None = None
 ) -> list[RequestItem]:
     """列出注册申请（平台侧，可按状态过滤）。"""
 
@@ -252,7 +218,9 @@ async def list_tenant_requests(
 
 
 @router.get("/tenants/{tenant_id}/review-records", response_model=list[ReviewRecordItem])
-async def list_review_records(tenant_id: UUID, reviewer_id: ReviewerId) -> list[ReviewRecordItem]:
+async def list_review_records(
+    tenant_id: UUID, viewer: Annotated[Principal, ViewerDep]
+) -> list[ReviewRecordItem]:
     """某学校的审核记录（平台侧）。"""
 
     rows = await service.list_review_records(tenant_id)

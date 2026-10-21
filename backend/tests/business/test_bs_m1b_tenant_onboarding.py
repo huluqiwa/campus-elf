@@ -13,6 +13,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
+from app.auth import revocation
 from app.auth.passwords import verify_password
 from app.config import get_settings
 from app.db.models.identity import User
@@ -22,6 +23,7 @@ from app.db.models.tenant import Tenant
 from app.db.session import db_session, dispose_engine
 from app.main import create_app
 from app.storage.objects import build_object_store
+from tests.support.auth import login_platform, seed_platform_user
 from tests.support.db import (
     clean_test_data,
     database_url,
@@ -70,14 +72,29 @@ async def client(
     monkeypatch.setenv("SMTP_HOST", os.environ["TEST_SMTP_HOST"])
     monkeypatch.setenv("SMTP_PORT", os.environ["TEST_SMTP_PORT"])
     monkeypatch.setenv("SMTP_FROM", "no-reply@campus-elf.test")
-    monkeypatch.setenv("DEV_PLATFORM_REVIEW_TOKEN", os.environ["TEST_PLATFORM_REVIEW_TOKEN"])
+    monkeypatch.setenv("REDIS_URL", os.environ["TEST_REDIS_URL"])
     monkeypatch.delenv("DEV_SKIP_SCHOOL_REVIEW", raising=False)
     get_settings.cache_clear()
+    await revocation.reset_client()
+
+    admin_engine = make_test_engine("admin")
+    try:
+        await seed_platform_user(
+            admin_engine,
+            account="ops-m1b",
+            permissions=("platform.tenant.review", "platform.tenant.view"),
+        )
+        await seed_platform_user(
+            admin_engine, account="ops-m1b-view", permissions=("platform.tenant.view",)
+        )
+    finally:
+        await admin_engine.dispose()
 
     transport = ASGITransport(app=create_app())
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
+    await revocation.reset_client()
     await dispose_engine()
     get_settings.cache_clear()
     import shutil
@@ -85,8 +102,10 @@ async def client(
     shutil.rmtree(object_dir, ignore_errors=True)
 
 
-def _auth_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {os.environ['TEST_PLATFORM_REVIEW_TOKEN']}"}
+async def _auth_headers(client: AsyncClient) -> dict[str, str]:
+    """平台账号登录（M1-C 起审核接口使用真实登录 + 权限，不再有开发令牌）。"""
+
+    return await login_platform(client, "ops-m1b")
 
 
 async def test_bs_m1b_registration_to_activation(client: AsyncClient) -> None:
@@ -126,7 +145,7 @@ async def test_bs_m1b_registration_to_activation(client: AsyncClient) -> None:
     review = await client.post(
         f"/api/v1/platform/tenant-requests/{request_id}/review",
         json={"result": "approved", "reason": "资质齐全"},
-        headers=_auth_headers(),
+        headers=await _auth_headers(client),
     )
     assert review.status_code == 200, review.text
     review_body = review.json()
@@ -141,11 +160,11 @@ async def test_bs_m1b_registration_to_activation(client: AsyncClient) -> None:
     assert "初始密码" not in review.text
 
     # 4) 平台列表可查
-    tenants = await client.get("/api/v1/platform/tenants", headers=_auth_headers())
+    tenants = await client.get("/api/v1/platform/tenants", headers=await _auth_headers(client))
     assert tenants.status_code == 200
     assert [item["school_code"] for item in tenants.json()] == [school_code]
     records = await client.get(
-        f"/api/v1/platform/tenants/{tenant_id}/review-records", headers=_auth_headers()
+        f"/api/v1/platform/tenants/{tenant_id}/review-records", headers=await _auth_headers(client)
     )
     assert records.status_code == 200
     assert [item["result"] for item in records.json()] == ["approved"]
@@ -210,14 +229,14 @@ async def test_bs_m1b_reject_flow(client: AsyncClient) -> None:
     missing_reason = await client.post(
         f"/api/v1/platform/tenant-requests/{request_id}/review",
         json={"result": "rejected"},
-        headers=_auth_headers(),
+        headers=await _auth_headers(client),
     )
     assert missing_reason.status_code == 422
 
     rejected = await client.post(
         f"/api/v1/platform/tenant-requests/{request_id}/review",
         json={"result": "rejected", "reason": "资质不清晰"},
-        headers=_auth_headers(),
+        headers=await _auth_headers(client),
     )
     assert rejected.status_code == 200
     assert rejected.json()["status"] == "rejected"
@@ -225,7 +244,7 @@ async def test_bs_m1b_reject_flow(client: AsyncClient) -> None:
     listing = await client.get(
         "/api/v1/platform/tenant-requests",
         params={"status": "rejected"},
-        headers=_auth_headers(),
+        headers=await _auth_headers(client),
     )
     assert listing.status_code == 200
     items = listing.json()
@@ -249,7 +268,7 @@ async def test_bs_m1b_oversized_request_is_rejected_before_parsing(
 async def test_bs_m1b_denied_review_is_audited_with_request_id(
     client: AsyncClient,
 ) -> None:
-    """M7/M9：错误令牌被拒绝时写审计，且 request_id 与响应头一致。"""
+    """M7/M9 + M1-C：无审核权限的平台账号被拒时写审计，且 request_id 与响应头一致。"""
 
     response = await client.post(
         "/api/v1/platform/tenants/register",
@@ -264,25 +283,35 @@ async def test_bs_m1b_denied_review_is_audited_with_request_id(
     assert response.status_code == 201, response.text
     request_id = response.json()["request_id"]
 
+    # 未带令牌 → 401（认证层）
+    anonymous = await client.post(
+        f"/api/v1/platform/tenant-requests/{request_id}/review",
+        json={"result": "approved"},
+    )
+    assert anonymous.status_code == 401
+
+    # 有登录但无 platform.tenant.review 权限 → 403 + 审计
+    view_only_headers = await login_platform(client, "ops-m1b-view")
     denied = await client.post(
         f"/api/v1/platform/tenant-requests/{request_id}/review",
         json={"result": "approved"},
-        headers={"Authorization": "Bearer definitely-wrong"},
+        headers=view_only_headers,
     )
-    assert denied.status_code == 401
+    assert denied.status_code == 403
     header_request_id = denied.headers["x-request-id"]
 
     async with db_session(platform=True) as session:
         row = (
             await session.execute(
                 text(
-                    "select request_id, result from audit_logs "
-                    "where action = 'platform.review.denied'"
+                    "select request_id, result, resource_id from audit_logs "
+                    "where action = 'auth.permission.denied'"
                 )
             )
         ).mappings().one()
 
     assert row["result"] == "failure"
+    assert row["resource_id"] == "platform.tenant.review"
     assert row["request_id"] == header_request_id
 
 

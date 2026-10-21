@@ -60,9 +60,19 @@ class Settings(BaseSettings):
     dev_skeleton_loop_enabled: bool = False
     # 开发/测试专用：跳过学校资质审核（直接开通）；生产必须为 false（强制校验）。
     dev_skip_school_review: bool = False
-    # 开发/测试专用：平台审核接口的临时令牌；M1-C 用正式登录替换后删除。
-    # production 下即使配置也拒绝服务（见校验器）。
-    dev_platform_review_token: SecretStr | None = None
+
+    # ---------- 认证与令牌（M1-C） ----------
+    # JWT 签名密钥：只从 .env/密钥管理注入；≥32 字节，生产禁止占位值。
+    jwt_secret: SecretStr
+    jwt_algorithm: Literal["HS256"] = "HS256"
+    jwt_issuer: str = "campus-elf"
+    # realm 分离：租户与平台令牌的 audience 不同，跨 realm 令牌一律拒绝（TD-074）
+    jwt_audience_tenant: str = "campus-elf-tenant"
+    jwt_audience_platform: str = "campus-elf-platform"
+    # 密钥版本（header kid）；轮换时可并存多个 kid，当前签发用 active
+    jwt_active_kid: str = "k1"
+    access_token_ttl_seconds: int = 900
+    refresh_token_ttl_seconds: int = 604800
 
     # 邮件（开发用 MailHog：127.0.0.1:1025；生产由 SMTP 服务商提供）
     smtp_host: str = "127.0.0.1"
@@ -92,6 +102,19 @@ class Settings(BaseSettings):
            （"生产开关可绕过"按审查清单属阻塞项）。
         """
 
+        if self.app_env in {"development", "test"}:
+            return self
+
+        # staging/production 都按真实部署对待：密钥必须具备最低强度（TD-073 自检同样对 staging 生效）
+        secret = self.jwt_secret.get_secret_value()
+        lowered = secret.lower()
+        placeholder_markers = ("change-me", "changeme", "placeholder", "example", "your-secret")
+        if len(secret) < 32 or any(marker in lowered for marker in placeholder_markers):
+            raise ValueError(
+                f"{self.app_env} 环境 JWT_SECRET 必须是 ≥32 字节的随机密钥"
+                "（禁止空值/占位/示例值；生成：openssl rand -hex 32）"
+            )
+
         if self.app_env != "production":
             return self
 
@@ -101,10 +124,6 @@ class Settings(BaseSettings):
             )
         if self.dev_skip_school_review:
             raise ValueError("production 环境禁止开启 DEV_SKIP_SCHOOL_REVIEW（学校资质必须审核）")
-        if self.dev_platform_review_token is not None:
-            raise ValueError(
-                "production 环境禁止配置 DEV_PLATFORM_REVIEW_TOKEN（审核必须走正式登录鉴权）"
-            )
 
         missing = [
             name

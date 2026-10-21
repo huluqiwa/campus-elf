@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.auth import router as auth_router
 from app.api.body_limit import BodySizeLimitMiddleware
 from app.api.campus_chat import router as campus_chat_router
 from app.api.health import router as health_router
@@ -67,6 +68,7 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
 
     # 健康检查固定在根路径，供 Compose/Nginx/探针使用；业务路由挂 api_prefix。
     application.include_router(health_router)
+    application.include_router(auth_router, prefix=settings.api_prefix)
     application.include_router(campus_chat_router, prefix=settings.api_prefix)
     application.include_router(platform_tenants_router, prefix=settings.api_prefix)
     return application

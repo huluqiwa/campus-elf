@@ -237,51 +237,36 @@ async def submit_registration(
     object_key = f"onboarding/{registration_id}/qualification{suffix}"
     digest = sha256(data).hexdigest()
 
+    hint = False
     try:
         async with db_session(platform=True) as session:
-            duplicate = await session.scalar(
-                select(TenantRegistrationRequest.id)
-                .where(TenantRegistrationRequest.email == normalized_email)
-                .where(TenantRegistrationRequest.status.in_(["pending", "approved"]))
-                .limit(1)
+            hint = await _school_name_duplicate(session, clean_name)
+            # DB 去重通过后再写对象；后续任何失败（含提交时唯一约束冲突）都清理
+            await object_store.put(object_key, data, content_type or "application/octet-stream")
+            payload = await session.scalar(
+                text(
+                    "select submit_tenant_registration("
+                    ":id, :school_name, :address, :leadership, :email, :object_key, "
+                    ":sha256, :size, :mime, :hint, :http_request_id)"
+                ),
+                {
+                    "id": registration_id,
+                    "school_name": clean_name,
+                    "address": clean_address,
+                    "leadership": clean_leadership,
+                    "email": normalized_email,
+                    "object_key": object_key,
+                    "sha256": digest,
+                    "size": len(data),
+                    "mime": content_type or "",
+                    "hint": hint,
+                    "http_request_id": request_id,
+                },
             )
-            if duplicate is not None:
+            if isinstance(payload, dict) and payload.get("error") == "DUPLICATE_EMAIL":
                 raise OnboardingError(
                     "DUPLICATE_EMAIL", "该邮箱已有进行中或已开通的申请，请勿重复提交", 409
                 )
-            hint = await _school_name_duplicate(session, clean_name)
-
-            # DB 去重通过后再写对象；后续任何失败（含提交时唯一约束冲突）都清理
-            await object_store.put(object_key, data, content_type or "application/octet-stream")
-            session.add(
-                TenantRegistrationRequest(
-                    id=registration_id,
-                    school_name=clean_name,
-                    address=clean_address,
-                    leadership=clean_leadership,
-                    email=normalized_email,
-                    qualification_object_key=object_key,
-                    qualification_sha256=digest,
-                    qualification_size=len(data),
-                    qualification_mime=content_type or "",
-                    status="pending",
-                    school_name_duplicate_hint=hint,
-                )
-            )
-            await append_audit(
-                session,
-                action="tenant.register.submitted",
-                resource_type="tenant_registration_request",
-                resource_id=str(registration_id),
-                actor_realm=SYSTEM_ACTOR_REALM,
-                metadata={
-                    "school_name": clean_name,
-                    "duplicate_hint": hint,
-                    "qualification_sha256": digest,
-                    "contact_email_masked": mask_email(normalized_email),
-                },
-                request_id=request_id,
-            )
     except IntegrityError as exc:  # 并发下同一邮箱的最终防线（部分唯一索引）
         await object_store.delete(object_key)
         raise OnboardingError("DUPLICATE_EMAIL", "该邮箱已有进行中的申请", 409) from exc

@@ -9,6 +9,8 @@
 失败即拒绝启动，避免"带病上线"。
 """
 
+from uuid import UUID
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -140,6 +142,61 @@ async def _check_review_function_owner(session: AsyncSession) -> None:
         )
 
 
+async def _check_realm_permission_matrix() -> None:
+    """逐租户校验：租户角色不得持有 platform.* 权限（B1 第二道防线）。
+
+    `role_permissions` 是 FORCE RLS 表，**没有租户上下文时一行都看不到**——因此不能用
+    "无上下文的 count(*)" 取证（那恒为 0，等于空实现）。这里先经平台连接列出租户，
+    再逐个在租户上下文内统计；平台侧不限制模块（平台超管按设计拥有全量权限）。
+
+    异常:
+        DatabaseSelfCheckError: 发现租户角色映射了 platform.* 权限。
+    """
+
+    async with db_session(platform=True) as platform_session:
+        tenant_ids: list[UUID] = list(
+            (await platform_session.execute(text("select id from tenants"))).scalars().all()
+        )
+
+    for tenant_id in tenant_ids:
+        async with db_session(tenant_id=tenant_id) as scoped:
+            violations = await scoped.scalar(
+                text(
+                    "select count(*) from role_permissions rp "
+                    "join permissions p on p.id = rp.permission_id "
+                    "where p.module = 'platform'"
+                )
+            )
+        if violations:
+            raise DatabaseSelfCheckError(
+                f"租户 {tenant_id} 有 {violations} 条角色映射到 platform.* 权限（realm 越界）"
+            )
+
+
+async def _check_registration_function_owner(session: AsyncSession) -> None:
+    """注册函数同样在 FORCE RLS 下的 audit_logs/申请单内写入，owner 必须可绕过。"""
+
+    row = (
+        await session.execute(
+            text(
+                """
+                select r.rolname, r.rolsuper, r.rolbypassrls
+                from pg_proc p
+                join pg_roles r on r.oid = p.proowner
+                where p.proname = 'submit_tenant_registration'
+                limit 1
+                """
+            )
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        raise DatabaseSelfCheckError("submit_tenant_registration() 不存在（迁移未执行）")
+    if not (row["rolsuper"] or row["rolbypassrls"]):
+        raise DatabaseSelfCheckError(
+            f"注册函数 owner {row['rolname']} 不具备超级用户/BYPASSRLS，注册会被 RLS 拒绝"
+        )
+
+
 async def _check_fail_closed(session: AsyncSession) -> None:
     """无租户上下文时，租户数据必须不可见（对非空表也有意义）。"""
 
@@ -165,6 +222,8 @@ async def verify_runtime_database() -> None:
         await _check_role(tenant_session, "租户")
         await _check_forced_rls(tenant_session)
         await _check_review_function_owner(tenant_session)
+        await _check_registration_function_owner(tenant_session)
+        await _check_realm_permission_matrix()
         await _check_fail_closed(tenant_session)
 
     async with db_session(platform=True) as platform_session:

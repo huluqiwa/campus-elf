@@ -52,9 +52,7 @@ jobs:
         # 本地评估项目，不进生产镜像）；上游发布修复后必须移除忽略并升级。
         run: |
           uv sync --frozen
-          uv run --with pip-audit pip-audit --skip-editable \
-            --ignore-vuln PYSEC-2026-2447 \
-            --ignore-vuln PYSEC-2026-3046
+          uv run --with pip-audit pip-audit --skip-editable --ignore-vuln PYSEC-2026-2447 --ignore-vuln PYSEC-2026-3046
         continue-on-error: false
 
       - name: bandit（后端静态安全分析）

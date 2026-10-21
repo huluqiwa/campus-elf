@@ -15,7 +15,7 @@ from arq.typing import StartupShutdown, WorkerCoroutine
 from arq.worker import Function
 
 from app.config import Settings, get_settings
-from app.workers.tasks import echo
+from app.workers.tasks import cleanup_refresh_tokens, echo
 
 
 def build_redis_settings(settings: Settings) -> RedisSettings:
@@ -76,7 +76,27 @@ class WorkerSettings:
 
     # echo 的签名比 WorkerCoroutine 协议更窄（协议要求 *args/**kwargs），故 cast。
     functions: Sequence[WorkerCoroutine | Function] = [cast(WorkerCoroutine, echo)]
-    cron_jobs: Sequence[CronJob] | None = None
+    # 每天 03:30（UTC）清理过期/已撤销刷新令牌（TD-067）
+    cron_jobs: Sequence[CronJob] | None = [
+        CronJob(
+            "cleanup_refresh_tokens",
+            cast(WorkerCoroutine, cleanup_refresh_tokens),
+            month=None,
+            day=None,
+            weekday=None,
+            hour=3,
+            minute=30,
+            second=0,
+            microsecond=0,
+            run_at_startup=False,
+            unique=True,
+            job_id=None,
+            timeout_s=None,
+            keep_result_s=None,
+            keep_result_forever=None,
+            max_tries=None,
+        )
+    ]
     on_startup: StartupShutdown | None = None
     on_shutdown: StartupShutdown | None = None
     redis_settings: RedisSettings = _redis_settings()

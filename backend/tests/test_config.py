@@ -70,6 +70,7 @@ def _production_settings(**overrides: object) -> Settings:
         "_env_file": None,
         "app_env": "production",
         "redis_url": "redis://127.0.0.1:6379/0",
+        "jwt_secret": "production-test-jwt-secret-0123456789abcdef",
         "database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
         "platform_database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
         "migration_database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
@@ -118,8 +119,8 @@ def test_production_rejects_dev_switches_and_local_storage() -> None:
 
     with pytest.raises(ValidationError, match="DEV_SKIP_SCHOOL_REVIEW"):
         _production_settings(dev_skip_school_review=True)
-    with pytest.raises(ValidationError, match="DEV_PLATFORM_REVIEW_TOKEN"):
-        _production_settings(dev_platform_review_token="token")
+    with pytest.raises(ValidationError, match="JWT_SECRET"):
+        _production_settings(jwt_secret="short")
     with pytest.raises(ValidationError, match="s3"):
         _production_settings(object_store_backend="local")
     with pytest.raises(ValidationError, match="S3_SECRET_KEY"):
@@ -135,3 +136,50 @@ def test_production_settings_accepts_complete_configuration() -> None:
     assert settings.s3_secret_key is not None
     assert "smtp_password=SecretStr('**********')" in repr(settings)
     assert "s3_secret_key=SecretStr('**********')" in repr(settings)
+
+
+def _staging_settings(**overrides: object) -> Settings:
+    """构造 staging 配置（只需依赖地址即可通过后续校验）。"""
+
+    base: dict[str, object] = {
+        "_env_file": None,
+        "app_env": "staging",
+        "redis_url": "redis://127.0.0.1:6379/0",
+        "database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
+        "platform_database_url": "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
+        "qdrant_url": "http://127.0.0.1:6333",
+        "jwt_secret": "9f" * 32,
+    }
+    base.update(overrides)
+    return Settings(**base)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "secret",
+    ["", "short", "change-me", "change-me-please-generate", "my-example-key", "your-secret-here"],
+)
+def test_staging_rejects_weak_or_placeholder_jwt_secret(secret: str) -> None:
+    """staging 与 production 同等对待：弱/占位/空密钥必须拒绝启动。"""
+
+    with pytest.raises(ValidationError, match="JWT_SECRET"):
+        _staging_settings(jwt_secret=secret)
+
+
+def test_staging_accepts_strong_jwt_secret() -> None:
+    """64 位十六进制随机密钥可通过 staging 校验。"""
+
+    settings = _staging_settings()
+
+    assert settings.jwt_secret.get_secret_value() == "9f" * 32
+
+
+def test_development_skips_jwt_strength_check() -> None:
+    """开发/测试环境不强制密钥强度（本地与 CI 用固定测试值）。"""
+
+    settings = Settings(
+        _env_file=None,
+        redis_url="redis://127.0.0.1:6379/15",
+        jwt_secret="dev",
+    )
+
+    assert settings.app_env == "development"

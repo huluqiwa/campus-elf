@@ -231,6 +231,17 @@
 - Minor 收口：e5 增加 `_require_bypass_role`/触发器/列宽/tenants 授权幂等兜底与触发器函数 PUBLIC 撤销；迁移测试补租户角色执行拒绝、越权插入置于同一事务；文档补"downgrade d9 不回退 hardening"说明与 TD-095。
 - 审查证据：`ruff`/`mypy` 全绿、**189 passed**、`bash scripts/ci.sh` 全绿、`alembic check` 无漂移、head=`e5c9d1f7a2b4`。
 
+### M1-C 三端登录与令牌：独立审查两轮（2026-10-21）
+
+- 第一轮：**不通过**（1 Blocker + 5 Major + 13 Minor）。Blocker B1：平台路由只校验权限码不校验 realm，而 `permissions` 是全局目录、数据库层不阻止租户角色引用 `platform.*` → 实测租户令牌可读全部租户列表；Major：登出不校验刷新令牌 secret 且审计主体错误、>72 字节口令 500、未知 tenant_id 刷新 500、登录响应缺 spec 要求的 tenant_id/角色、JWT 占位值校验过窄（示例配置重复键覆盖原防线）。
+- 第一轮修复：应用层 `realm="platform"` 断言 + 数据库守卫触发器（`b7d1e3f5a9c2`）+ 自检矩阵校验 + B1 回归测试；登出按哈希校验并记真实操作者；口令按字节拦截（登录 401/改密 422）；未知租户失败审计降级平台事件；`TokenResponse` 补 `tenant_id/roles`；占位值改子串匹配、示例配置去重置空；13 条 Minor 全修（撤销键 realm/前缀/超时、门禁精确路径+库值判定、反账号枚举等时比对、登出必审计、审计带 ip/ua、家族撤销独立提交、回滚归一化 `rotated`、自检覆盖注册函数）。
+- 第二轮：**不通过**（0 Blocker + 1 Major + 9 Minor）。Major M1：新增矩阵自检在无租户上下文下统计 RLS 表恒为 0（空实现）。
+- 第二轮修复：自检改逐租户上下文统计 + "植入越界映射必须拒绝启动"用例；Redis 超时真正传入；staging 也强制强密钥；平台方向守卫与种子矛盾 → `c8e2f4a6b1d3` 移除并写明约束；补齐剩余审计 ip/ua；修掉恒真断言、并发终态断言、测试残留清理、嵌套连接。
+- 复测：`ruff`/`mypy`（95 文件）全绿、后端 **222 passed**、`alembic check` 无漂移、head=`c8e2f4a6b1d3`、本地 `scripts/ci.sh` 全绿。
+- 第三轮（聚焦复审）：**通过**（0 Blocker / 0 Major / 3 Minor）。M1 实测闭环：空租户库通过、第二租户植入越界映射后拒绝启动（错误信息含租户 id）、清理后恢复通过；迁移链 `f1a2→a3f5→b7d1→c8e2` 三次往返幂等、平台方向守卫按设计移除后租户方向仍有效。
+- 第三轮 Minor 收口：自检去掉未使用形参（可读性）、补 staging/占位值密钥测试（参数化三态）；启动自检逐租户串行开会话的容量前瞻登记 TD-109。
+- 最终门禁：222 passed、ruff/mypy 全绿、`alembic check` 无漂移、head=`c8e2f4a6b1d3`、本地 `scripts/ci.sh` 全绿。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

@@ -76,7 +76,6 @@ async def onboarding_env(
     monkeypatch.setenv("SMTP_HOST", os.environ["TEST_SMTP_HOST"])
     monkeypatch.setenv("SMTP_PORT", os.environ["TEST_SMTP_PORT"])
     monkeypatch.setenv("SMTP_FROM", "no-reply@campus-elf.test")
-    monkeypatch.setenv("DEV_PLATFORM_REVIEW_TOKEN", os.environ["TEST_PLATFORM_REVIEW_TOKEN"])
     monkeypatch.delenv("DEV_SKIP_SCHOOL_REVIEW", raising=False)
     get_settings.cache_clear()
 
@@ -649,6 +648,22 @@ async def test_platform_direct_write_paths_are_revoked(onboarding_env: Path) -> 
             with pytest.raises(Exception) as tenant_error:
                 await conn.execute(text("update tenants set name = 'tampered'"))
             assert "permission denied" in str(tenant_error.value).lower()
+
+        # TD-094：公开注册只能走 submit_tenant_registration 函数，平台不能直接插申请单
+        async with platform_engine.connect() as conn:
+            await conn.execute(text("select set_config('app.platform_context', 'on', true)"))
+            with pytest.raises(Exception) as insert_request_error:
+                await conn.execute(
+                    text(
+                        "insert into tenant_registration_requests "
+                        "(school_name, address, leadership, email, qualification_object_key, "
+                        " qualification_sha256, qualification_size, qualification_mime, status) "
+                        "values ('伪造中学', '伪造路', '伪造校长', 'fake@evil.test', "
+                        " 'onboarding/fake/q.pdf', :digest, 10, 'application/pdf', 'pending')"
+                    ),
+                    {"digest": "0" * 64},
+                )
+            assert "permission denied" in str(insert_request_error.value).lower()
 
         async with platform_engine.connect() as conn:
             with pytest.raises(Exception) as function_error:

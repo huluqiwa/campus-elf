@@ -1,7 +1,7 @@
 """数据模型包：导入所有模型，保证 Alembic autogenerate 能发现全部表。"""
 
 from app.db.models.audit import AuditLog
-from app.db.models.identity import RefreshToken, User
+from app.db.models.identity import PlatformRefreshToken, RefreshToken, User
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
 from app.db.models.rbac import (
     PERMISSION_CATALOG,
@@ -21,6 +21,7 @@ __all__ = [
     "AuditLog",
     "DataScope",
     "Permission",
+    "PlatformRefreshToken",
     "PlatformRole",
     "PlatformRolePermission",
     "PlatformUser",

@@ -10,6 +10,12 @@ import os
 import pytest
 
 os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/15")
+# 认证密钥：单元/集成测试不作为密钥强度验证对象（生产由配置校验强制 ≥32 字节且非占位值）
+os.environ.setdefault("JWT_SECRET", "test-only-jwt-secret-0123456789abcdef")
+# 本机服务（PG/Redis/Qdrant/MailHog）不得走系统代理：httpx 在 Windows 会读注册表代理设置，
+# 若不绕过，127.0.0.1 的请求会被发到代理端口（表现为连接被拒）。
+for _proxy_key in ("NO_PROXY", "no_proxy"):
+    os.environ.setdefault(_proxy_key, "127.0.0.1,localhost,::1")
 
 REQUIRED_SERVICE_ENV = (
     "TEST_DATABASE_URL",

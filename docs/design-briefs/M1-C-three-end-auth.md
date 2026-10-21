@@ -124,6 +124,64 @@
 
 独立审查重点关注：令牌明文是否出现于日志/审计/响应；Redis key 是否带租户/realm 边界；刷新重用的并发正确性；`token_version` 与黑名单的一致性；realm 与数据库连接是否真的绑定（不是只校验 claim）；Cookie 安全属性；错误文案是否泄漏账号存在性；审计是否覆盖登录/刷新/登出/改密/重用。
 
-## 9. 实现结果
+## 9. 实现结果（2026-10-21）
 
-待编码后回填。
+- **令牌**：`app/auth/tokens.py`（HS256 JWT 15 分钟、claim 含 realm/tenant_id/token_version/
+  must_change_password/jti/aud/iss；刷新令牌 `v1t.<tenant_id>.<jti>.<secret>` / `v1p.<jti>.<secret>`，
+  只存 SHA-256）；`app/auth/revocation.py`（登出访问令牌 jti 撤销标记，TTL=剩余有效期）。
+- **主体与门禁**：`app/auth/principal.py` 每次请求按 realm 选连接（TD-074，测试用 spy 断言
+  `platform=True` / `tenant_id=...`）、校验账号状态与 `token_version`、首登改密门禁
+  （仅放行 change-password/logout/me）、权限不足写 `auth.permission.denied` 审计。
+- **服务**：`app/auth/service.py` 登录（文案统一 + 失败审计在回滚后独立提交）、刷新轮换
+  （条件更新保证并发唯一成功）、重用检测撤销家族（独立事务落库）、登出、改密（自增版本 +
+  撤销全部家族 + 重签令牌）。
+- **接口**：`POST /auth/login|refresh|logout|change-password`、`GET /auth/me`（`app/api/auth.py`）。
+- **平台审核切换**：`platform.tenant.review`（审核）/`platform.tenant.view`（列表）；
+  `DEV_PLATFORM_REVIEW_TOKEN` 从配置、示例、测试栈删除（TD-078/081 完成）。
+- **TD-094**：迁移 `a3f5c7d9e1b2` 把注册提交收进 `submit_tenant_registration()`，
+  平台不再拥有申请单 INSERT 权限。
+- **TD-067**：Arq 每日 03:30 `cleanup_refresh_tokens`（保留期 30 天，逐租户上下文删除）。
+- **测试**：单元 12（令牌/刷新令牌/指纹）；集成 8（登录成功/失败审计、轮换与重用、登出、
+  改密、平台表隔离、realm↔连接 spy、清理任务保留期）；业务场景 6（首登改密门禁全链路、
+  刷新重用、登出即时失效、平台审核权限与拒绝审计、跨 realm、登录失败文案统一）；
+  M1-B 业务场景改用真实平台账号登录。
+- **未包含（登记 TD-103 → M1-C-UI）**：三端登录页/改密页/路由守卫与 refresh HttpOnly Cookie
+  的前端实现（后端契约已就绪）。
+- **复测**：`ruff`/`mypy` 全绿；后端全量 **221 passed**；`scripts/ci.sh` 全绿；`alembic check` 无漂移。
+
+### 9.1 第一轮独立审查修复（2026-10-21）
+
+审查结论：**不通过**（1 Blocker + 5 Major + 13 Minor）。
+
+| 编号 | 问题 | 修复 |
+|---|---|---|
+| B1 | 平台路由只校验权限码不校验 realm；`permissions` 为全局目录且数据库层不阻止租户角色引用 `platform.*` → 租户令牌可读全部租户列表 | `require_permission(code, realm=...)`，平台路由显式 `realm="platform"`；新增数据库守卫触发器（`b7d1e3f5a9c2`：`role_permissions` 禁 platform 模块、`platform_role_permissions` 仅 platform 模块）；启动自检新增"租户角色不得持有 platform.*"校验；新增 B1 回归测试（临时停用触发器验证应用层断言独立成立 + 拒绝审计 reason=realm_mismatch） |
+| MA1 | 登出不校验刷新令牌 secret，可被第三方登出他人且审计记成受害者 | `_revoke_by_jti` 与刷新同标准比对 `token_hash`（不匹配静默 false）；审计 `actor_id` 改为请求主体，被撤销对象入 metadata；新增"伪造 secret 不能撤销他人家族"集成测试 |
+| MA2 | 口令 >72 字节 → bcrypt ValueError → 500 | 入口按 UTF-8 字节拦截（登录按凭证错误、改密 422）；spec A2 补 72 字节说明；改哈希方案登记 TD-107；新增超长口令用例 |
+| MA3 | 未知 tenant_id 的刷新令牌写审计触发外键违约 → 500 | 失败审计前校验租户存在，不存在时降级为平台事件（`attempted_tenant_id`）；新增集成测试 |
+| MA4 | 登录响应未返回 spec 要求的 tenant_id/角色 | `TokenResponse` 补 `tenant_id`/`roles`（登录/刷新/改密一致），业务测试断言 |
+| MA5 | JWT 占位值集合过窄 + `.env.example` 重复键覆盖原 `change-me`（削弱既有防线） | 占位值改子串匹配（change-me/placeholder/example/your-secret）；示例配置去重并把 `JWT_SECRET` 置空（生产缺值即失败） |
+| Minor | 清理任务平台条数恒 0、撤销键缺 realm/前缀与超时、门禁后缀匹配、门禁用 claim、账号枚举时间侧信道、仅带 access 的登出无审计、审计缺 ip/ua、重用检测审计回滚连带撤销、回滚遇 rotated 行失败、自检未覆盖注册函数 | 全部修复：rowcount 采集+断言；键 `{prefix}:auth:revoked:{realm}:jti:` + socket 超时；门禁改精确路径白名单；门禁以数据库值为准；不存在账号走占位哈希等时比对；登出必写审计（含无 refresh 场景）；审计 metadata 带 ip/ua 哈希；家族撤销独立提交、审计 best-effort；回滚先归一化 `rotated`；自检覆盖 `submit_tenant_registration` owner 与矩阵 |
+
+### 9.2 第二轮独立审查修复（2026-10-21）
+
+审查结论：**不通过**（0 Blocker + 1 Major + 9 Minor）。
+
+| 编号 | 问题 | 修复 |
+|---|---|---|
+| M1 | 新增的矩阵自检在**无租户上下文**的租户连接上统计 `role_permissions`（FORCE RLS → 恒 0），等于空实现 | 改为经平台连接列出租户 → **逐租户上下文**统计；新增用例"植入越界映射 → 自检必须拒绝启动"（含 finally 清理植入数据） |
+| Minor 1 | Redis socket 超时常量定义但未传入 `from_url` | 真正传入 `socket_timeout`/`socket_connect_timeout` |
+| Minor 2 | 非 production 环境（含 staging）不校验 JWT_SECRET 强度，空值可启动 | staging/production 统一强制 ≥32 字节且非占位/示例值 |
+| Minor 3 | 平台方向守卫与 M1-A 种子（平台超管拥有全量权限）矛盾 | 新迁移 `c8e2f4a6b1d3` 移除平台方向守卫（保留租户方向）；`rbac-matrix.md` 写明约束；自检 docstring 与实际一致 |
+| Minor 4 | `auth.refresh.reuse_detected/failed`、`auth.logout`、改密审计缺 ip/ua 哈希 | 全部补齐（含登出接口传哈希） |
+| Minor 5 | 登录响应断言 `"platform.tenant.review" in roles or roles` 恒真 | 改为断言 roles 非空 + `/auth/me` 的 permissions 含权限码 |
+| Minor 6 | 并发刷新用例与串行结果无法区分 | 增加数据库终态断言（仅一条 `rotated_to_jti`、其余 `reuse_detected`） |
+| Minor 7 | B1 回归用例残留植入数据 | `finally` 中删除植入的角色/映射 |
+| Minor 8 | `_record_refresh_failure` 在租户会话内再开平台会话（嵌套双连接） | 先用平台连接判断租户存在，再按需开租户会话 |
+| Minor 9 | 新迁移幂等性 | 确认性说明：单 head、无漂移、临时库 upgrade→downgrade→upgrade 全绿 |
+
+### 9.3 第三轮聚焦复审（通过）
+
+- 结论：**通过**（0 Blocker / 0 Major / 3 Minor）；M1 自检闭环实测成立（植入越界映射 → 拒绝启动且错误信息含租户 id；清理后恢复）。
+- Minor 收口：自检去掉未使用形参；补 staging/占位值 JWT 密钥测试（参数化：空/短/占位/合法）；启动自检逐租户容量前瞻登记 TD-109。
+- 已知未包含（TD-103 → M1-C-UI）：三端登录页、强制改密页、路由守卫与前端令牌存储（后端契约与门禁已就绪）。
