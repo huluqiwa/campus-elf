@@ -12,7 +12,7 @@ export default defineConfig({
   projects: [
     {
       name: "admin",
-      testMatch: /admin.*\.spec\.ts/,
+      testMatch: /[\/]e2e[\/]admin[^\/]*\.spec\.ts$/,
       use: {
         ...devices["Desktop Chrome"],
         channel: "chrome",
@@ -21,7 +21,7 @@ export default defineConfig({
     },
     {
       name: "campus",
-      testMatch: /campus.*\.spec\.ts/,
+      testMatch: /[\/]e2e[\/]campus[^\/]*\.spec\.ts$/,
       use: {
         ...devices["Pixel 5"],
         channel: "chrome",
