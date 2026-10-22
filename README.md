@@ -18,7 +18,7 @@
 - **M1-D2 两步验证（AUTH-04）**：TOTP + 10 枚一次性恢复码；登录改为「密码 → 动态码 → 首登改密」三态（未过第二步不签发任何令牌或 Cookie）；强制策略仅平台运营账号（`MFA_REQUIRE_PLATFORM`，默认关闭）；TOTP 密钥以 AES-256-GCM + realm/user 绑定密文入库，恢复码只存 HMAC 摘要；防重放水印 + 单挑战尝试上限 + 账号锁定；启用/关闭 MFA 轮换全部会话；admin 端绑定页（二维码本地生成）与安全设置页、双端两步验证登录；迁移 `c4d6e8f0a2b3`；两轮独立审查通过（第二轮 0 Blocker / 0 Major）。学生自助绑定按计划 M2 随校管后台交付。
 - **M1-E1 鉴权内核（RBAC-01 部分）**：权限矩阵 v1.2 的 59 个权限码（platform 12 / school 34 / campus 9 / observability 2 / eval 2）与 8 个内置角色出厂默认落库，删除 9 个无引用旧码；`app/rbac` 提供权限目录、realm 单一口径（`TENANT_MODULES`/`code_realm()`）、幂等同步（只补不撤、不覆盖运营改动）与路由清单守卫；迁移 `e5f7a9c1b3d5` 建代码持有的定义表与 `seed_builtin_roles(uuid)`（SECURITY DEFINER、EXECUTE 已收回），两条开通路径同源，并补齐 C 端 `student`/`teacher`；`require_permission(code, realm=)` 先判 realm 再判权限，接入 `campus.chat.use`、`platform.tenant.view`、`platform.tenant.review`，拒绝写 `auth.permission.denied`（只带 path+reason）；权限增删下一次请求即生效且不作废在线会话。矩阵 §3/§4 由测试解析并逐列比对，改一格 √/△ 即有用例变红。数据范围服务端过滤与审批职责分离留给 M1-E2。
 
-当前门禁：后端 **481 passed**（M1-E1 不改前端，前端沿用 M1-D2 的 **32 单测 + 28 E2E**）、`ruff`/`mypy`/`alembic check`/`bandit`/`pip-audit` 全绿、迁移 head `e5f7a9c1b3d5`；M1-D1、M1-D2 均已通过独立复审与远端 CI，M1-E1 第五轮复审通过、远端 CI 结果见 `docs/review-log.md`。
+当前门禁：后端 **481 passed**（M1-E1 不改前端，前端沿用 M1-D2 的 **32 单测 + 28 E2E**）、`ruff`/`mypy`/`alembic check`/`bandit`/`pip-audit` 全绿、迁移 head `e5f7a9c1b3d5`；M1-D1、M1-D2、M1-E1 均已通过独立复审与远端 CI（backend / security；M1-E1 为 `6e916af`）。
 
 进行中/待做：
 

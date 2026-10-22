@@ -18,7 +18,7 @@
 | M1 | M1-C2 会话设备管理（AUTH-06，策略 C） | ✅ 完成（五轮审查通过；设备限额/列表/下线/退出其它/被踢即时失效；简报 `docs/design-briefs/M1-C2-session-devices.md`） |
 | M1 | M1-D1 密码策略/历史/邮件重置、失败锁定（AUTH-03 员工/平台部分、AUTH-05） | ✅ 已完成（第五轮复审通过、348 passed、远端 CI 绿；简报 `docs/design-briefs/M1-D1-password-lockout.md`） |
 | M1 | M1-D2 MFA（AUTH-04） | ✅ 完成（两轮审查通过、第二轮 0B/0M、后端 411 passed、前端 32 单测 + 28 E2E、远端 CI backend/frontend/security 全绿；简报 `docs/design-briefs/M1-D2-mfa.md`） |
-| M1 | M1-E1 鉴权内核：权限矩阵 59 码落库 + 8 内置角色出厂默认 + 接口声明权限（RBAC-01 部分） | ✅ 已提交（第五轮复审通过 0B/0M/3 Minor；后端 481 passed、ruff/mypy/alembic check/bandit 本地全绿、head=`e5f7a9c1b3d5`；远端 CI 结果见本行尾注与 `docs/review-log.md`；简报 `docs/design-briefs/M1-E1-rbac-core.md`） |
+| M1 | M1-E1 鉴权内核：权限矩阵 59 码落库 + 8 内置角色出厂默认 + 接口声明权限（RBAC-01 部分） | ✅ 完成（第五轮复审通过 0B/0M/3 Minor；后端 481 passed、ruff/mypy/alembic check/bandit/pip-audit 本地全绿、head=`e5f7a9c1b3d5`；远端 CI backend #39851973194 / security #39851973099 success；逐轮记录见 `docs/review-log.md`，简报 `docs/design-briefs/M1-E1-rbac-core.md`） |
 | M1 | M1-E2 RBAC 数据范围与服务端过滤、审批职责分离、平台跨租只读（RBAC-02/03，含 TD-149 触发器收紧） | ⏳ 未开始 |
 | M1 | M1-F 审计落库与哈希链（AUD-01） | ⏳ 未开始 |
 | M1 | M1 验收报告 | ⏳ 未开始（需含 TD-110 真实后端全栈 E2E） |

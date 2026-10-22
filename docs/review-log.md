@@ -323,6 +323,7 @@
 - 第五轮 Minor 收口：①`TENANT_PLATFORM_LEAK_CHECK_SQL` 原本把 `('school','campus')` 抄成 SQL 字面量，与 `catalog.TENANT_MODULES`（自称 realm 唯一口径、启动自检已绑它）是两份真相，白名单日后调整会静默漂移 → 改为 `p.module <> all(cast(:tenant_modules as text[]))` 并由 `_tenant_leak_check_params()` 绑定（同步/异步两条后置守卫同一参数；实测传空列表时 `<> all('{}')` 恒真会报错，判据不会静默失效）；②downgrade 第 2 步删 C 端角色只按 `code = ANY(...)`，与第 1 步特意过滤 `is_system` 的口径不对称 → 补 `WHERE is_system`，回滚绝不碰运营自建的同名角色；③`/auth/` 整段免权限码（M2 若在 `/auth/` 下加特权接口，进白名单即只校验"已认证"）→ 并入 TD-139 的 M2 复核项。
 - 第五轮修复后复测：`ruff check app tests` 全绿、`mypy --no-incremental app tests`（128 文件）无问题、`bandit -r app -x tests` 与 `bandit -r alembic -s B608` 退出码 0、受影响用例 44 条（`test_rbac_sync.py` + `test_migration_rbac_rollback.py` + `test_rbac_matrix_unit.py`）全绿；后端全量 **481 passed**（7 分 02 秒）。
 - 最终门禁：后端 **481 passed**、`ruff`/`mypy`（128 文件）/`bandit`×2 全绿、`alembic check` 无漂移、head=`e5f7a9c1b3d5`。本期不改前端，故无新增 Playwright 用例（该项在简报 §8 登记）。
+- 远端 CI（`6e916af`）：`backend` #39851973194 success、`security` #39851973099 success；`frontend`/`evals` 未触发（无对应路径改动）。
 
 ## 高风险功能复审记录
 
