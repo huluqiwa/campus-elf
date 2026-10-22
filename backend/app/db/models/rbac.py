@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    PrimaryKeyConstraint,
     String,
     UniqueConstraint,
 )
@@ -181,6 +182,50 @@ class PlatformUserRole(UUIDPrimaryKeyMixin, Base):
     platform_role_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("platform_roles.id", ondelete="CASCADE"), nullable=False
     )
+
+
+# ---------------------------------------------------------------------------
+# 内置角色「出厂默认」定义表（M1-E1，代码所有的数据）
+#
+# 为什么入库而不是抄进 SQL：`provision_tenant()` / `seed_builtin_roles()` 是数据库函数，
+# 开通新租户时要建内置角色并授默认权限。把权限码清单抄进函数体就会有两份真相
+# （`seeds.py` 一份、SQL 一份）——新增一个权限码却忘了改函数，新租户静默少一条权限。
+# 现在函数只读这两张表，`app/rbac` 的同步每次按 `seeds.py` 整表重写它们。
+#
+# 它们**不是**运营配置：实际生效的映射在 `roles`/`role_permissions`，运营改完同步不会覆盖。
+# ---------------------------------------------------------------------------
+class RbacBuiltinRole(Base):
+    """内置角色清单（realm + 角色码 + 显示名）。"""
+
+    __tablename__ = "rbac_builtin_roles"
+    __table_args__ = (
+        PrimaryKeyConstraint("realm", "code"),
+        CheckConstraint("realm IN ('platform', 'tenant')", name="realm_valid"),
+    )
+
+    realm: Mapped[str] = mapped_column(String(16), nullable=False)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+class RbacBuiltinRoleDefault(Base):
+    """内置角色的出厂默认权限映射（按 realm + 角色码 + 权限码）。"""
+
+    __tablename__ = "rbac_builtin_role_defaults"
+    __table_args__ = (
+        PrimaryKeyConstraint("realm", "role_code", "permission_code"),
+        ForeignKeyConstraint(
+            ["permission_code"],
+            ["permissions.code"],
+            name="fk_rbac_builtin_role_defaults_permission_code_permissions",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("realm IN ('platform', 'tenant')", name="realm_valid"),
+    )
+
+    realm: Mapped[str] = mapped_column(String(16), nullable=False)
+    role_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    permission_code: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 # 供种子数据与校验使用的最小权限目录（M1-A 只落目录，实际授权在 M1-E 细化）

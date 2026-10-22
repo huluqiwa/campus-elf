@@ -59,6 +59,9 @@ TABLES_ALLOWED_WITHOUT_TENANT_ID = {
     "platform_role_permissions",
     "tenant_registration_requests",
     "school_review_records",
+    # M1-E1：内置角色出厂默认的定义表（代码所有的全局元数据，与 permissions 同性质）
+    "rbac_builtin_roles",
+    "rbac_builtin_role_defaults",
     "alembic_version",
 }
 

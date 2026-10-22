@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import db_session
+from app.rbac.catalog import TENANT_MODULES
 
 # 租户级表（含 tenants 自身）；audit_logs 允许 tenant_id 为空但有租户/平台策略
 REQUIRED_RLS_TABLES: tuple[str, ...] = (
@@ -158,14 +159,19 @@ async def _check_review_function_owner(session: AsyncSession) -> None:
 
 
 async def _check_realm_permission_matrix() -> None:
-    """逐租户校验：租户角色不得持有 platform.* 权限（B1 第二道防线）。
+    """逐租户校验：租户角色不得持有租户域（`school`/`campus`）外的权限（B1 第二道防线）。
 
     `role_permissions` 是 FORCE RLS 表，**没有租户上下文时一行都看不到**——因此不能用
     "无上下文的 count(*)" 取证（那恒为 0，等于空实现）。这里先经平台连接列出租户，
     再逐个在租户上下文内统计；平台侧不限制模块（平台超管按设计拥有全量权限）。
 
+    判据用 `catalog.TENANT_MODULES` 而不是写死 `module = 'platform'`：`observability`/`eval`
+    也属平台运维域（矩阵 §3.4 + 2026-10-23 定稿"不下放租户角色"），只按 `platform` 判分会让
+    这两类码在被手工 INSERT 进租户角色后连启动自检都放行——而 DB 触发器同样只挡 `platform`
+    （收紧见 TD-149），代码侧这三处（种子自检、同步守卫、本检查）是当前的全部防线。
+
     异常:
-        DatabaseSelfCheckError: 发现租户角色映射了 platform.* 权限。
+        DatabaseSelfCheckError: 发现租户角色映射了租户域外的权限。
     """
 
     async with db_session(platform=True) as platform_session:
@@ -179,12 +185,13 @@ async def _check_realm_permission_matrix() -> None:
                 text(
                     "select count(*) from role_permissions rp "
                     "join permissions p on p.id = rp.permission_id "
-                    "where p.module = 'platform'"
-                )
+                    "where p.module <> all(cast(:tenant_modules as text[]))"
+                ),
+                {"tenant_modules": sorted(TENANT_MODULES)},
             )
         if violations:
             raise DatabaseSelfCheckError(
-                f"租户 {tenant_id} 有 {violations} 条角色映射到 platform.* 权限（realm 越界）"
+                f"租户 {tenant_id} 有 {violations} 条角色映射到租户域（school/campus）外的权限（realm 越界）"
             )
 
 

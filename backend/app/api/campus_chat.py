@@ -7,20 +7,25 @@ M0 只验证骨架：事件序列 `meta → step* → done`、`stop_reason` 记�
 step: stage/label；done: tokens_in/tokens_out/first_token_ms/latency_ms/stop_reason；
 error: code/message/retryable/partial）。
 
+鉴权（M1-E1 起）：`campus.chat.use` + 租户 realm（学生/教师 C 端角色默认持有）；
+trace 里的租户与用户身份取自认证主体，不再是占位值。
+
 开关：`DEV_SKELETON_LOOP_ENABLED`（默认 false）；关闭时返回 404。生产环境由
-`Settings` 校验直接拒绝开启该开关（空壳无认证）。真实 Loop 在 M4 接入认证/租户上下文后替换本实现。
+`Settings` 校验直接拒绝开启该开关——空壳不产生回答，上线它没有业务意义。真实 Loop 在
+M4 替换本实现（届时同步去掉该开关）。
 """
 
 import asyncio
 import time
 from collections.abc import AsyncIterator
-from typing import cast
+from typing import Annotated, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.auth.principal import Principal, require_permission
 from app.config import get_settings
 from app.core.sse import SSE_HEADERS, SSE_MEDIA_TYPE, format_sse
 from app.harness.contracts import AgentEventType, StopReason, TraceRecord, TraceSpan
@@ -28,9 +33,7 @@ from app.harness.trace import TraceRecorder, TraceSink
 
 router = APIRouter(prefix="/campus", tags=["campus"])
 
-# M0 无认证层；占位身份在 M1 由认证/租户上下文替换（不参与任何隔离判定）。
-_PLACEHOLDER_TENANT_ID = UUID("00000000-0000-0000-0000-000000000000")
-_PLACEHOLDER_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
+ChatTurnDep = require_permission("campus.chat.use", realm="tenant")
 
 # 空壳不调用模型：token/首 token 等计数恒为 0（不用字面量，避免被误判为硬编码口令）。
 _SKELETON_COUNTER = 0
@@ -74,23 +77,34 @@ def _trace_sink(request: Request) -> TraceSink:
 
 
 @router.post("/chat/turns")
-async def create_chat_turn(request: Request, payload: ChatTurnRequest) -> StreamingResponse:
+async def create_chat_turn(
+    request: Request,
+    payload: ChatTurnRequest,
+    principal: Annotated[Principal, ChatTurnDep],
+) -> StreamingResponse:
     """空壳回合：SSE 返回 meta/step/done，并保证每个已开始回合写入本地 trace。
 
     参数:
         request: FastAPI 请求（用于读取 app.state.trace_sink）。
         payload: 对话请求体。
+        principal: 已鉴权的租户主体（`campus.chat.use`）。
 
     返回值:
         StreamingResponse: `text/event-stream`。
 
     异常:
-        HTTPException: 开关关闭时 404；请求体非法时 422。
+        HTTPException: 开关关闭时 404；请求体非法时 422；租户身份缺失时 403。
     """
 
     settings = get_settings()
     if not settings.dev_skeleton_loop_enabled:
         raise HTTPException(status_code=404, detail="not found")
+
+    # realm 已由 require_permission 断言为 tenant，因此 tenant_id 必然存在；
+    # 这里显式收窄类型而不是 assert（bandit 禁止在 app/ 用 assert 当运行时守卫）。
+    tenant_id = principal.tenant_id
+    if tenant_id is None:
+        raise HTTPException(status_code=403, detail="缺少租户上下文")
 
     turn_id = uuid4()
     trace_id = uuid4().hex
@@ -105,8 +119,8 @@ async def create_chat_turn(request: Request, payload: ChatTurnRequest) -> Stream
         recorder.record_turn(
             TraceRecord(
                 trace_id=trace_id,
-                tenant_id=_PLACEHOLDER_TENANT_ID,
-                user_id=_PLACEHOLDER_USER_ID,
+                tenant_id=tenant_id,
+                user_id=principal.user_id,
                 conversation_id=conversation_uuid,
                 turn_id=turn_id,
                 intents=["skeleton"],
@@ -141,7 +155,7 @@ async def create_chat_turn(request: Request, payload: ChatTurnRequest) -> Stream
                 spans.append(
                     TraceSpan(
                         trace_id=trace_id,
-                        tenant_id=_PLACEHOLDER_TENANT_ID,
+                        tenant_id=tenant_id,
                         span_type="stage",
                         name=stage,
                         start_ms=stage_started_ms,

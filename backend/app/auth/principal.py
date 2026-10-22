@@ -10,6 +10,7 @@
   会自增 `token_version`，不会出现"改完还被挡"）。
 """
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,6 +26,8 @@ from app.auth.tokens import Realm, TokenError, decode_access_token
 from app.config import get_settings
 from app.db.session import db_session
 from app.tenant import context as tenant_context
+
+logger = logging.getLogger(__name__)
 
 # 首登改密期间仍然允许访问的接口（**精确路径**，不做后缀匹配，避免未来路由误放行）
 _GATE_ALLOWED_SUFFIXES = (
@@ -288,19 +291,22 @@ async def get_optional_principal(
 OptionalPrincipal = Annotated[Principal | None, Depends(get_optional_principal)]
 
 
-def require_permission(code: str, *, realm: Realm | None = None) -> object:
-    """构造"需要某权限码（可选限定 realm）"的依赖。
+def require_permission(code: str, *, realm: Realm) -> object:
+    """构造"需要某权限码且限定 realm"的依赖。
 
-    **realm 必须显式限定**：权限目录是全局的（platform.* 与校方/C 端码同表），
-    数据库层也不能保证租户角色不会引用 platform.* 码；因此平台路由必须传
-    `realm="platform"`，仅靠权限码不足以构成路由级边界（审查 B1）。
+    **realm 必传**：权限目录是全局的（platform.* 与校方/C 端码同表），数据库层也不能保证
+    租户角色不会引用 platform.* 码；因此平台路由必须传 `realm="platform"`，租户/C 端路由必须
+    传 `realm="tenant"`，仅靠权限码不足以构成路由级边界（审查 B1、M1-E1 简报 §3.3）。
 
     校验失败时写 `auth.permission.denied` 审计（含真实主体与拒绝原因），再返回 403；
     审计写入失败不影响拒绝结果（权限校验绝不因审计故障放行）。
+
+    依赖函数上带 `__rbac_permission__`/`__rbac_realm__` 标记，供路由鉴权清单测试
+    （`tests/test_route_permission_manifest_unit.py`）从依赖树读回声明，避免装饰器双写漂移。
     """
 
     async def _dependency(request: Request, principal: CurrentPrincipal) -> Principal:
-        if realm is not None and principal.realm != realm:
+        if principal.realm != realm:
             await _audit_denied(principal, code, request, reason="realm_mismatch")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -314,6 +320,8 @@ def require_permission(code: str, *, realm: Realm | None = None) -> object:
             )
         return principal
 
+    _dependency.__rbac_permission__ = code  # type: ignore[attr-defined]
+    _dependency.__rbac_realm__ = realm  # type: ignore[attr-defined]
     return Depends(_dependency)
 
 
@@ -352,5 +360,15 @@ async def _audit_denied(
                     metadata={"path": request.url.path, "reason": reason},
                     request_id=getattr(request.state, "request_id", None),
                 )
-    except Exception:  # 审计故障不得放行或阻断权限拒绝
+    except Exception as exc:  # 审计故障不得放行或阻断权限拒绝
+        # 拒绝仍然生效，但"谁在什么时候被挡了"必须留下痕迹供运维排查——静默吞掉
+        # 等于安全事件失去可观测性。
+        # 只记异常类型，不用 exc_info：SQLAlchemy 会把 `[SQL: ...] [parameters: ...]` 拼进
+        # 异常字符串，打开 traceback 就等于把 SQL 参数（路径、主体 id）写进日志（红线）。
+        logger.warning(
+            "权限拒绝审计写入失败：%s.%s",
+            type(exc).__module__,
+            type(exc).__name__,
+            extra={"permission": code},
+        )
         return

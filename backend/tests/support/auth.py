@@ -112,8 +112,15 @@ async def seed_tenant_user(
     mfa_enabled: bool = False,
     mfa_secret_enc: str | None = None,
     mfa_last_used_step: int | None = None,
+    permissions: tuple[str, ...] = (),
 ) -> tuple[UUID, UUID]:
-    """写入租户与用户（复用已有同 school_code 的租户），返回 (tenant_id, user_id)。"""
+    """写入租户与用户（复用已有同 school_code 的租户），返回 (tenant_id, user_id)。
+
+    参数:
+        permissions: 授予该用户的权限码；非空时创建一个**非系统**测试角色并绑定，
+            走真实 `user_roles → role_permissions → permissions` 链路（与运行时鉴权同源）。
+            内置角色（student/teacher/…）由租户开通流程产生，测试里不占用其角色码。
+    """
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session, session.begin():
@@ -150,7 +157,30 @@ async def seed_tenant_user(
                 "mfa_last_used_step": mfa_last_used_step,
             },
         )
-        return tenant_id, user_id
+        if permissions:
+            role_code = f"tenant_test_role_{uuid4().hex[:8]}"
+            role_id = await session.scalar(
+                text(
+                    "insert into roles (tenant_id, code, name, is_system) "
+                    "values (:tenant_id, :code, :name, false) returning id"
+                ),
+                {"tenant_id": tenant_id, "code": role_code, "name": role_code},
+            )
+            await session.execute(
+                text(
+                    "insert into role_permissions (tenant_id, role_id, permission_id) "
+                    "select :tenant_id, :role_id, p.id from permissions p where p.code = any(:codes)"
+                ),
+                {"tenant_id": tenant_id, "role_id": role_id, "codes": list(permissions)},
+            )
+            await session.execute(
+                text(
+                    "insert into user_roles (tenant_id, user_id, role_id) "
+                    "values (:tenant_id, :user_id, :role_id)"
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
+            )
+        return UUID(str(tenant_id)), UUID(str(user_id))
 
 
 async def login_platform(
@@ -163,6 +193,24 @@ async def login_platform(
     response = await client.post(
         "/api/v1/auth/login",
         json={"realm": "platform", "account": account, "password": password},
+    )
+    assert response.status_code == 200, response.text
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def login_tenant(
+    client: AsyncClient,
+    *,
+    school_code: str,
+    login_id: str,
+    password: str,
+) -> dict[str, str]:
+    """租户用户登录，返回 Authorization 头（走真实登录，不手工签发令牌）。"""
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"realm": "tenant", "school_code": school_code, "login_id": login_id, "password": password},
     )
     assert response.status_code == 200, response.text
     token = response.json()["access_token"]

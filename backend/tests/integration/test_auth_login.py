@@ -567,17 +567,36 @@ async def test_db_guard_rejects_platform_permission_for_tenant_role(auth_env: No
 
 
 @pytest.mark.asyncio
-async def test_selfcheck_detects_tenant_role_with_platform_permission(auth_env: None) -> None:
-    """M1 复审：矩阵自检必须能发现"租户角色持有 platform.*"（不能因 RLS 恒为 0）。"""
+@pytest.mark.parametrize(
+    ("bad_code", "school_code"),
+    [
+        ("platform.tenant.view", "SCH-SELFCHECK-PLAT"),
+        ("observability.trace.view", "SCH-SELFCHECK-OBS"),
+    ],
+)
+async def test_selfcheck_detects_tenant_role_with_out_of_realm_permission(
+    auth_env: None, bad_code: str, school_code: str
+) -> None:
+    """M1 复审 + 第四轮审查 M1：启动自检必须发现"租户角色持有租户域外的权限"（不能因 RLS 恒为 0）。
+
+    两个码分别代表两种越权形态：`platform.*` 由 DB 触发器硬挡（这里临时禁用来造数据），
+    `observability.*` **触发器不挡**（TD-149 才收紧）——若判据写死 `module = 'platform'`，
+    第二种形态会连启动自检都放行，所以这条用例是代码侧白名单的取证点。
+    """
 
     from app.db.selfcheck import DatabaseSelfCheckError, verify_runtime_database
-
-    tenant_id, _ = await _seed_tenant_user(login_id="S-1008", password=TENANT_PASSWORD)
 
     engine = make_test_engine("admin")
     try:
         factory = make_session_factory(engine)
         async with factory() as session, session.begin():
+            tenant_id = await session.scalar(
+                text(
+                    "insert into tenants (school_code, name, status) "
+                    "values (:code, '越界自检中学', 'active') returning id"
+                ),
+                {"code": school_code},
+            )
             await session.execute(
                 text("alter table role_permissions disable trigger role_permissions_realm_guard")
             )
@@ -592,20 +611,19 @@ async def test_selfcheck_detects_tenant_role_with_platform_permission(auth_env: 
                 await session.execute(
                     text(
                         "insert into role_permissions (tenant_id, role_id, permission_id) "
-                        "select :tid, :rid, id from permissions "
-                        "where code = 'platform.tenant.view'"
+                        "select :tid, :rid, id from permissions where code = :code"
                     ),
-                    {"tid": tenant_id, "rid": role_id},
+                    {"tid": tenant_id, "rid": role_id, "code": bad_code},
                 )
             finally:
                 await session.execute(
                     text("alter table role_permissions enable trigger role_permissions_realm_guard")
                 )
 
-        with pytest.raises(DatabaseSelfCheckError, match="platform"):
+        with pytest.raises(DatabaseSelfCheckError, match="realm 越界"):
             await verify_runtime_database()
     finally:
-        # 清理植入数据，避免与其他用例相互影响
+        # 清理植入数据，避免与其他用例相互影响（自检会扫全部租户，残留会让后续用例必失败）
         try:
             factory = make_session_factory(engine)
             async with factory() as session, session.begin():
@@ -616,5 +634,8 @@ async def test_selfcheck_detects_tenant_role_with_platform_permission(auth_env: 
                     )
                 )
                 await session.execute(text("delete from roles where code = 'violation_role'"))
+                await session.execute(
+                    text("delete from tenants where school_code = :code"), {"code": school_code}
+                )
         finally:
             await engine.dispose()

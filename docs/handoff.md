@@ -18,16 +18,17 @@
 | M1 | M1-C2 会话设备管理（AUTH-06，策略 C） | ✅ 完成（五轮审查通过；设备限额/列表/下线/退出其它/被踢即时失效；简报 `docs/design-briefs/M1-C2-session-devices.md`） |
 | M1 | M1-D1 密码策略/历史/邮件重置、失败锁定（AUTH-03 员工/平台部分、AUTH-05） | ✅ 已完成（第五轮复审通过、348 passed、远端 CI 绿；简报 `docs/design-briefs/M1-D1-password-lockout.md`） |
 | M1 | M1-D2 MFA（AUTH-04） | ✅ 完成（两轮审查通过、第二轮 0B/0M、后端 411 passed、前端 32 单测 + 28 E2E、远端 CI backend/frontend/security 全绿；简报 `docs/design-briefs/M1-D2-mfa.md`） |
-| M1 | M1-E RBAC 与数据范围（RBAC-01/02/03） | ⏳ 未开始 |
+| M1 | M1-E1 鉴权内核：权限矩阵 59 码落库 + 8 内置角色出厂默认 + 接口声明权限（RBAC-01 部分） | ✅ 已提交（第五轮复审通过 0B/0M/3 Minor；后端 481 passed、ruff/mypy/alembic check/bandit 本地全绿、head=`e5f7a9c1b3d5`；远端 CI 结果见本行尾注与 `docs/review-log.md`；简报 `docs/design-briefs/M1-E1-rbac-core.md`） |
+| M1 | M1-E2 RBAC 数据范围与服务端过滤、审批职责分离、平台跨租只读（RBAC-02/03，含 TD-149 触发器收紧） | ⏳ 未开始 |
 | M1 | M1-F 审计落库与哈希链（AUD-01） | ⏳ 未开始 |
 | M1 | M1 验收报告 | ⏳ 未开始（需含 TD-110 真实后端全栈 E2E） |
 | M2/M3/M4 | 组织与人员 / 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 ORG-05、KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M1-E（RBAC 与数据范围）→ M1-F（审计哈希链）→ M1 验收报告 → M2 → M3 → M4。
-- 最近提交：`main` 已含 M1-D1 交付与其后的文档回填/安全标注提交（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
+- **建议的下一步顺序**：M1-E2（数据范围服务端过滤 + 审批职责分离 + 平台跨租只读 + TD-149 触发器收紧）→ M1-F（审计哈希链）→ M1 验收报告 → M2 → M3 → M4。
+- 最近提交：`main` 已含 M1-D2 MFA 与 M1-E1 鉴权内核交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
-- 数据库迁移 head：`c4d6e8f0a2b3`（M1-D2 MFA）；`alembic check` 应无漂移。
+- 数据库迁移 head：`e5f7a9c1b3d5`（M1-E1 权限矩阵落库）；`alembic check` 应无漂移。
 
 ---
 

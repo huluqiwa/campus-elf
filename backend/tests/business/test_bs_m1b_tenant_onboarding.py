@@ -190,7 +190,13 @@ async def test_bs_m1b_registration_to_activation(client: AsyncClient) -> None:
 
     assert admin.user_type == "school_admin"
     assert admin.must_change_password is True
-    assert role_codes == {"school_super_admin", "school_admin", "teacher_b_end"}
+    assert role_codes == {
+        "school_super_admin",
+        "school_admin",
+        "teacher_b_end",
+        "student",
+        "teacher",
+    }
     assert len(bindings) == 1
 
     # 6) 邮件：初始密码可登录（哈希校验）

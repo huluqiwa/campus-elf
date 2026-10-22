@@ -16,12 +16,13 @@
 - **M1-C2 会话设备管理（AUTH-06，策略 C）**：访问令牌 `sid` + Redis 会话标记实现被踢即时失效；租户 3 / 平台 2 台设备上限、超限踢最久未用；设备列表、单台/退出其它设备；跨用户/跨租统一 404 并写 `auth.session.revoke_denied`；登出按 family 去重审计、Redis 故障 best-effort；五轮独立审查通过（迁移 `d4e6f8a0b2c1`）。
 - **M1-D1 密码与锁定（AUTH-03 员工/平台、AUTH-05）**：密码策略（10~128 字符且 ≤72 UTF-8 字节、3 类字符、不含登录名）、最近 5 次历史、bcrypt cost 12；5 次失败锁 15 分钟；员工/平台邮件重置（30 分钟单次令牌、fragment 链接、申请/确认 IP 限流、后台发信、并发单次消费）；平台账号用 `python -m app.platform_admin` 初始化/维护邮箱；admin/campus 忘记密码与重置页；迁移 `b2d4f6a8c0e1`。学生校管重置按计划 M2 交付。
 - **M1-D2 两步验证（AUTH-04）**：TOTP + 10 枚一次性恢复码；登录改为「密码 → 动态码 → 首登改密」三态（未过第二步不签发任何令牌或 Cookie）；强制策略仅平台运营账号（`MFA_REQUIRE_PLATFORM`，默认关闭）；TOTP 密钥以 AES-256-GCM + realm/user 绑定密文入库，恢复码只存 HMAC 摘要；防重放水印 + 单挑战尝试上限 + 账号锁定；启用/关闭 MFA 轮换全部会话；admin 端绑定页（二维码本地生成）与安全设置页、双端两步验证登录；迁移 `c4d6e8f0a2b3`；两轮独立审查通过（第二轮 0 Blocker / 0 Major）。学生自助绑定按计划 M2 随校管后台交付。
+- **M1-E1 鉴权内核（RBAC-01 部分）**：权限矩阵 v1.2 的 59 个权限码（platform 12 / school 34 / campus 9 / observability 2 / eval 2）与 8 个内置角色出厂默认落库，删除 9 个无引用旧码；`app/rbac` 提供权限目录、realm 单一口径（`TENANT_MODULES`/`code_realm()`）、幂等同步（只补不撤、不覆盖运营改动）与路由清单守卫；迁移 `e5f7a9c1b3d5` 建代码持有的定义表与 `seed_builtin_roles(uuid)`（SECURITY DEFINER、EXECUTE 已收回），两条开通路径同源，并补齐 C 端 `student`/`teacher`；`require_permission(code, realm=)` 先判 realm 再判权限，接入 `campus.chat.use`、`platform.tenant.view`、`platform.tenant.review`，拒绝写 `auth.permission.denied`（只带 path+reason）；权限增删下一次请求即生效且不作废在线会话。矩阵 §3/§4 由测试解析并逐列比对，改一格 √/△ 即有用例变红。数据范围服务端过滤与审批职责分离留给 M1-E2。
 
-当前门禁：后端 **411 passed**、前端 **32 单测 + 28 E2E 全绿**、`ruff`/`mypy`/`alembic check`/`bandit`/`pip-audit` 全绿；M1-D1 与 M1-D2 均已通过独立复审与远端 CI（backend/frontend/security）。
+当前门禁：后端 **481 passed**（M1-E1 不改前端，前端沿用 M1-D2 的 **32 单测 + 28 E2E**）、`ruff`/`mypy`/`alembic check`/`bandit`/`pip-audit` 全绿、迁移 head `e5f7a9c1b3d5`；M1-D1、M1-D2 均已通过独立复审与远端 CI，M1-E1 第五轮复审通过、远端 CI 结果见 `docs/review-log.md`。
 
 进行中/待做：
 
-- **M1-E** RBAC 与数据范围、**M1-F** 审计哈希链；随后出 **M1 验收报告**（含真实后端全栈 E2E，TD-110）。
+- **M1-E2** RBAC 数据范围与服务端过滤（含 TD-149 触发器收紧）、**M1-F** 审计哈希链；随后出 **M1 验收报告**（含真实后端全栈 E2E，TD-110）。
 - **M2/M3/M4** 未开始；其中 SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。
 
 ## 技术栈（已锁定）

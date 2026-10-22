@@ -785,6 +785,13 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 - 密码 bcrypt cost 12；初始密码随机生成（默认 12 位；平台账号按账号长度加长）；首登改密；历史 5；最小 10、至少 3 类、最大 128 字符且 ≤72 UTF-8 字节；禁止含学号/工号。
 - 15 分钟内 5 次失败锁定 15 分钟，对外统一凭证错误文案并审计真实原因；密码重置清锁。MFA TOTP 可选（M1-D2）。
 - 角色/权限/数据范围矩阵见 `docs/rbac-matrix.md`。
+- **RBAC 落地口径（M1-E1，2026-10-23）**：
+  - 权限项目录跟代码走 — `app/rbac/catalog.py`（59 码，`module`/`action` 由码前缀派生），迁移 `e5f7a9c1b3d5` 经 `sync_rbac_definitions()` upsert 到 `permissions`；库里出现目录外的码 = 界面能勾但后端没有校验点的假开关，因此**新增权限项必须发版**。
+  - 角色↔权限映射与数据范围是**数据**：内置角色与其出厂默认放在两张代码持有的定义表 `rbac_builtin_roles`/`rbac_builtin_role_defaults`，新租户由 `provision_tenant()` 与平台审核 `review_registration_request()` 共同调用 `public.seed_builtin_roles(tenant_id)`（SECURITY DEFINER）写入；存量租户由同步补齐。运营在库里的增删改（界面 M2）不被同步覆盖。
+  - 补写分两种口径：超管（`school_super_admin`/`platform_super_admin`）**只补不撤**（语义是跟着目录全量走）；其他内置角色仅在**该角色尚无任何映射**时写默认（否则会把运营撤销的码塞回去）。见 `app/rbac/seeds.py:FULL_SCOPE_ROLES`。
+  - 每个接口都必须声明权限：`require_permission(码, realm=…)`（realm 必传，权限目录是全局的，码本身不构成跨 realm 边界）；免鉴权路由进显式白名单并写理由，由 `tests/test_route_permission_manifest_unit.py` 钉住（忘挂鉴权、幽灵码、白名单过期或越类都会让 CI 红）。
+  - **热更新语义**：`Principal` 每请求从库读角色与权限，映射改动下一次请求即生效，**不作废在线会话**（不递增 `token_version`；会话轮换只用于改密、MFA 变更、踢设备这类账号级安全事件）。代价是每请求数条小 join，基线由 `tests/integration/test_rbac_sql_baseline.py` 钉住（TD-100 目标 M6）。
+  - **热更新的边界**：本条只说"权限判据每请求从库读"。踢下线/设备撤销走 Redis 会话标记，Redis 故障时对 `is_active` fail-open（`app/auth/revocation.py:165`），被踢设备最长仍可用 15 分钟（TD-111 → M6）；需要立即断开某账号时按账号级安全事件做会话轮换，不要指望收回权限能断会话。
 - 审批分权：提交人不能自批；超管例外默认关闭；SaaS 审核员不得审核自己提交学校。
 
 ---

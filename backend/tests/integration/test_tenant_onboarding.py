@@ -207,7 +207,7 @@ async def test_approve_provisions_tenant_roles_admin_review_and_email(
     assert request.tenant_id == outcome.tenant_id
     assert "tenant.approve" in audit_actions
 
-    # 租户视角（租户上下文）：3 个内置角色 + 超管账号与角色绑定
+    # 租户视角（租户上下文）：5 个内置角色（M1-E1 起含 C 端 student/teacher）+ 超管账号与角色绑定
     async with db_session(tenant_id=outcome.tenant_id) as session:
         roles = (await session.execute(select(Role))).scalars().all()
         admin = (
@@ -215,7 +215,13 @@ async def test_approve_provisions_tenant_roles_admin_review_and_email(
         ).scalar_one()
         user_roles = (await session.execute(select(UserRole))).scalars().all()
 
-    assert {role.code for role in roles} == {"school_super_admin", "school_admin", "teacher_b_end"}
+    assert {role.code for role in roles} == {
+        "school_super_admin",
+        "school_admin",
+        "teacher_b_end",
+        "student",
+        "teacher",
+    }
     assert admin.user_type == "school_admin"
     assert admin.must_change_password is True
     assert admin.status == "active"
@@ -389,6 +395,17 @@ async def test_platform_role_cannot_insert_identity_into_existing_tenant(
                     {"tenant_id": approved.tenant_id},
                 )
             assert "permission denied" in str(role_error.value).lower()
+
+        # M1-E1：`seed_builtin_roles(uuid)` 只由两个开通函数（SECURITY DEFINER）内部调用，
+        # 平台连接不得直接 EXECUTE——否则拿到平台凭据就能对任意租户重种内置角色映射。
+        async with platform_engine.connect() as conn:
+            can_execute = await conn.scalar(
+                text(
+                    "select has_function_privilege("
+                    "'campus_elf_platform', 'public.seed_builtin_roles(uuid)', 'execute')"
+                )
+            )
+            assert can_execute is False, "平台连接被 grants 了 seed_builtin_roles 的执行权"
     finally:
         await platform_engine.dispose()
 
