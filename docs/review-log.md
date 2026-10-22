@@ -297,7 +297,8 @@
 - 复测（第二轮复审前）：后端 **411 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（116 文件）无问题、`alembic check` 无漂移、head=`c4d6e8f0a2b3`；前端 typecheck/lint/prettier/build 全绿、api-client **32 单测**、Playwright **28 E2E**。
 - 第二轮复审：**通过**（0 Blocker / 0 Major）。确认 Major 已闭环、三项 Minor 修复正确，未发现新缺陷；硬性不变量成立（未完成第二步不发会话/Cookie、secret 与恢复码明文只在激活响应出现一次且 `Cache-Control: no-store`、二维码本地渲染、待激活密钥仅存 Redis 并 fail-closed、Redis 故障 503 不降级为密码单因素）。
 - 最终门禁：后端 **411 passed**、`ruff`/`mypy`（116 文件）/`alembic check` 全绿；前端 **32 单测 + 28 E2E**、lint/format/typecheck/build 全绿。
-- 远端 CI：待推送后回填。
+- 远端 CI（`5add509`）：`backend` #39771902296 success、`frontend` #39771902306 success、`security` #39771902298 success；`evals` 未触发（无对应路径改动）。
+- 门禁补记：首次本地 `scripts/ci.sh` 在 `security: bandit（app）` 失败（`app/auth/service.py` 待激活分支用 `assert row is not None` 触发 B101，Low/High-confidence 会让 bandit 非零退出）；已改为 `if failure_reason is None and row is not None` 的类型收窄守卫，落空分支由既有 `RuntimeError` fail-closed 兜住。复跑本地 CI 24 步全绿后才提交。
 
 ## 高风险功能复审记录
 

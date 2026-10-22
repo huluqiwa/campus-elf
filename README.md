@@ -17,7 +17,7 @@
 - **M1-D1 密码与锁定（AUTH-03 员工/平台、AUTH-05）**：密码策略（10~128 字符且 ≤72 UTF-8 字节、3 类字符、不含登录名）、最近 5 次历史、bcrypt cost 12；5 次失败锁 15 分钟；员工/平台邮件重置（30 分钟单次令牌、fragment 链接、申请/确认 IP 限流、后台发信、并发单次消费）；平台账号用 `python -m app.platform_admin` 初始化/维护邮箱；admin/campus 忘记密码与重置页；迁移 `b2d4f6a8c0e1`。学生校管重置按计划 M2 交付。
 - **M1-D2 两步验证（AUTH-04）**：TOTP + 10 枚一次性恢复码；登录改为「密码 → 动态码 → 首登改密」三态（未过第二步不签发任何令牌或 Cookie）；强制策略仅平台运营账号（`MFA_REQUIRE_PLATFORM`，默认关闭）；TOTP 密钥以 AES-256-GCM + realm/user 绑定密文入库，恢复码只存 HMAC 摘要；防重放水印 + 单挑战尝试上限 + 账号锁定；启用/关闭 MFA 轮换全部会话；admin 端绑定页（二维码本地生成）与安全设置页、双端两步验证登录；迁移 `c4d6e8f0a2b3`；两轮独立审查通过（第二轮 0 Blocker / 0 Major）。学生自助绑定按计划 M2 随校管后台交付。
 
-当前门禁：后端 **411 passed**、前端 **32 单测 + 28 E2E 全绿**、`ruff`/`mypy`/`alembic check` 全绿；M1-D1 已通过第五轮独立复审与远端 CI，M1-D2 待推送后回填远端 CI 结果。
+当前门禁：后端 **411 passed**、前端 **32 单测 + 28 E2E 全绿**、`ruff`/`mypy`/`alembic check`/`bandit`/`pip-audit` 全绿；M1-D1 与 M1-D2 均已通过独立复审与远端 CI（backend/frontend/security）。
 
 进行中/待做：
 

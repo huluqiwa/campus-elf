@@ -354,7 +354,7 @@ TDD 红→绿：
 | 第一轮 | 不通过（0B + 1 Major + 4 Minor） | Major：`mfa_recovery_codes` 缺真实跨租隔离用例 → 已补（跨租 select 为空、A 的 UPDATE 命中 0 行、B 的 `used_at` 仍 NULL）。Minor：`decode_mfa_token` 缺 realm/tenant 组合守卫 → 已补 + 伪造令牌单测；`verify_mfa` 注释与消费顺序不一致 → 已改写为「GETDEL 是投递前唯一闸门」；登录时挑战注册 fail-open（仅 warning）→ 已改为抛 `RedisUnavailableError` 并返回 503，补 fail-closed 回归；恢复码熵偏低 → TD-135 已延后 M6（与 TD-129 再生成能力一并处理） |
 | 第二轮 | 通过（0B / 0M） | 确认 Major 闭环、三项 Minor 修复正确，无新缺陷 |
 
-最终门禁：后端 411 passed、`ruff`/`mypy`（116 文件）/`alembic check` 全绿、head `c4d6e8f0a2b3`；前端 typecheck/lint/prettier/build 全绿、32 单测 + 28 E2E。远端 CI 结果待推送后回填。
+最终门禁：后端 411 passed、`ruff`/`mypy`（116 文件）/`alembic check` 全绿、head `c4d6e8f0a2b3`；前端 typecheck/lint/prettier/build 全绿、32 单测 + 28 E2E；本地 `scripts/ci.sh` 24 步全绿（首轮在 `bandit -r app` 因 `assert row is not None` 触发 B101 失败，改为分支内类型收窄后通过）。远端 CI（`5add509`）：backend #39771902296、frontend #39771902306、security #39771902298 全 success；evals 未触发。
 
 未做并已登记的取舍：WebAuthn/Passkey（TD-124）、记住设备（TD-127）、MFA 独立限流（TD-128）、恢复码再生成与熵提升（TD-129/TD-135）、租户强制与校管重置（TD-126）、KEK 轮换（TD-125）、策略切换 15 分钟窗口（TD-132）、待激活密钥仅 Redis（TD-133）、同窗口重放 UX（TD-134）。
 
