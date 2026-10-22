@@ -24,6 +24,7 @@ from app.db.session import db_session, dispose_engine
 from app.main import create_app
 from tests.support.auth import (
     TEST_PLATFORM_PASSWORD,
+    as_token_pair,
     seed_platform_user,
     seed_tenant_user,
 )
@@ -195,8 +196,10 @@ async def test_tenant_reset_request_and_confirm_full_flow(
         password=TENANT_PASSWORD,
         email=email,
     )
-    pair = await service.login_tenant(
-        school_code=SCHOOL_CODE, login_id="S-4001", password=TENANT_PASSWORD
+    pair = as_token_pair(
+        await service.login_tenant(
+            school_code=SCHOOL_CODE, login_id="S-4001", password=TENANT_PASSWORD
+        )
     )
     # 锁定中的账号仍可申请重置，并应在重置成功后清零
     async with admin_engine.begin() as conn:
@@ -505,7 +508,9 @@ async def test_platform_reset_request_and_confirm(
     email = _unique_email("platform-reset")
     account = "ops-reset-d1"
     await seed_platform_user(admin_engine, account=account, email=email)
-    pair = await service.login_platform(account=account, password=TEST_PLATFORM_PASSWORD)
+    pair = as_token_pair(
+        await service.login_platform(account=account, password=TEST_PLATFORM_PASSWORD)
+    )
 
     await service.request_password_reset(realm="platform", account=account)
     token = _latest_reset_token(email)
@@ -588,7 +593,9 @@ async def test_platform_account_provisioning_closes_email_reset_loop(
     assert created is not None
     assert created.role_code == platform_admin.DEFAULT_PLATFORM_ROLE
 
-    pair = await service.login_platform(account=account, password=created.initial_password)
+    pair = as_token_pair(
+        await service.login_platform(account=account, password=created.initial_password)
+    )
     assert pair.must_change_password is True
 
     with pytest.raises(platform_admin.PlatformAccountProvisionError):

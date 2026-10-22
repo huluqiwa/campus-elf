@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { AuthTokens, LoginOutcome } from "./auth";
 import { createAuthSession, passwordPolicyError, toUserMessage } from "./auth";
 
 /** 构造可编排的 fetch 替身：按 URL 后缀匹配处理器，并记录调用顺序。 */
@@ -45,18 +46,27 @@ function tokenBody(overrides: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
+/** 登录三态里只取会话令牌（测试用：断言这些用例确实直接登录成功）。 */
+function sessionTokens(outcome: LoginOutcome): AuthTokens {
+  if (outcome.status !== "authenticated") {
+    throw new Error(`期望登录成功，实际得到 ${outcome.status}`);
+  }
+  return outcome.tokens;
+}
+
 describe("createAuthSession", () => {
   it("登录成功后发送带 Cookie 的凭据请求并保存内存令牌", async () => {
     const { fetchImpl, calls } = fetchStub([
-      { match: "/api/v1/auth/login", respond: () => jsonResponse(200, tokenBody()) },
+      {
+        match: "/api/v1/auth/login",
+        respond: () => jsonResponse(200, { status: "authenticated", ...tokenBody() }),
+      },
     ]);
     const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
 
-    const tokens = await session.loginTenant({
-      schoolCode: "SCH-1",
-      loginId: "S-1",
-      password: "pw",
-    });
+    const tokens = sessionTokens(
+      await session.loginTenant({ schoolCode: "SCH-1", loginId: "S-1", password: "pw" }),
+    );
 
     expect(tokens.accessToken).toBe("access-1");
     expect(tokens.roles).toEqual(["student"]);
@@ -441,5 +451,250 @@ describe("改密 401 刷新重放（第二轮 Minor 1）", () => {
     expect(toUserMessage(new Error("学校编号、账号或密码不正确"), "兜底")).toBe(
       "学校编号、账号或密码不正确",
     );
+  });
+});
+
+describe("MFA（M1-D2）", () => {
+  it("已绑定账号登录只得到挑战令牌：不写会话、不回调令牌更新", async () => {
+    const onTokensRefreshed = vi.fn();
+    const { fetchImpl } = fetchStub([
+      {
+        match: "/api/v1/auth/login",
+        respond: () =>
+          jsonResponse(200, {
+            status: "mfa_required",
+            mfa_token: "mfa-challenge-token",
+            expires_in: 300,
+            methods: ["totp"],
+          }),
+      },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl, onTokensRefreshed });
+
+    const outcome = await session.loginTenant({
+      schoolCode: "SCH-1",
+      loginId: "S-1",
+      password: "pw",
+    });
+
+    expect(outcome).toEqual({
+      status: "mfaRequired",
+      mfaToken: "mfa-challenge-token",
+      expiresIn: 300,
+      methods: ["totp"],
+    });
+    expect(session.getAccessToken()).toBeNull();
+    expect(onTokensRefreshed).not.toHaveBeenCalled();
+  });
+
+  it("第二步校验成功后才保存会话令牌", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/auth/login")) {
+        return jsonResponse(200, {
+          status: "mfa_required",
+          mfa_token: "mfa-challenge-token",
+          expires_in: 300,
+          methods: ["totp"],
+        });
+      }
+      if (url.includes("/auth/mfa/verify")) {
+        seen.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return jsonResponse(200, { status: "authenticated", ...tokenBody() });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const outcome = await session.loginTenant({
+      schoolCode: "SCH-1",
+      loginId: "S-1",
+      password: "pw",
+    });
+    expect(session.getAccessToken()).toBeNull();
+    if (outcome.status !== "mfaRequired") throw new Error("应为动态码步骤");
+
+    const tokens = await session.verifyMfa(outcome.mfaToken, "123456");
+
+    expect(tokens.accessToken).toBe("access-1");
+    expect(seen).toEqual([{ mfa_token: "mfa-challenge-token", code: "123456" }]);
+  });
+
+  it("第二步失败不触发静默刷新（没有会话可刷新）", async () => {
+    const calls: string[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return jsonResponse(401, { detail: "学校编号、账号或密码不正确" });
+    }) as typeof fetch;
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    await expect(session.verifyMfa("mfa-challenge-token", "000000")).rejects.toThrow("不正确");
+    expect(calls).toEqual(["http://api/api/v1/auth/mfa/verify"]);
+  });
+
+  it("强制绑定：绑定令牌作为 Bearer 发起 enroll/activate，且拿到恢复码", async () => {
+    const requests: Array<{ url: string; auth: string | null; body: Record<string, unknown> }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const headers = new Headers(init?.headers ?? {});
+      requests.push({
+        url,
+        auth: headers.get("authorization"),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      if (url.includes("/auth/login")) {
+        return jsonResponse(200, {
+          status: "mfa_enrollment_required",
+          enroll_token: "enroll-token",
+          expires_in: 600,
+        });
+      }
+      if (url.includes("/auth/mfa/enroll")) {
+        return jsonResponse(200, {
+          secret: "JBSWY3DPEHPK3PXP",
+          otpauth_uri: "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP",
+          expires_in: 600,
+        });
+      }
+      if (url.includes("/auth/mfa/activate")) {
+        return jsonResponse(200, {
+          ...tokenBody({ realm: "platform" }),
+          recovery_codes: ["AAAAA-BBBBB", "CCCCC-DDDDD"],
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const outcome = await session.loginPlatform({ account: "ops", password: "pw" });
+    expect(outcome).toEqual({
+      status: "mfaEnrollmentRequired",
+      enrollToken: "enroll-token",
+      expiresIn: 600,
+    });
+    // 绑定阶段没有任何会话
+    expect(session.getAccessToken()).toBeNull();
+
+    const enrollment = await session.enrollMfaWithToken("enroll-token");
+    expect(enrollment).toEqual({
+      secret: "JBSWY3DPEHPK3PXP",
+      otpauthUri: "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP",
+      expiresIn: 600,
+    });
+
+    const activation = await session.activateMfa("123456", "enroll-token");
+    expect(activation.recoveryCodes).toEqual(["AAAAA-BBBBB", "CCCCC-DDDDD"]);
+    expect(activation.tokens.realm).toBe("platform");
+    expect(session.getAccessToken()).toBe("access-1");
+
+    expect(requests.filter((item) => item.url.includes("/auth/mfa/"))).toEqual([
+      {
+        url: "http://api/api/v1/auth/mfa/enroll",
+        auth: "Bearer enroll-token",
+        body: {},
+      },
+      {
+        url: "http://api/api/v1/auth/mfa/activate",
+        auth: "Bearer enroll-token",
+        body: { code: "123456" },
+      },
+    ]);
+  });
+
+  it("已登录用户自助绑定：enroll 带访问令牌与当前密码", async () => {
+    const requests: Array<{ url: string; auth: string | null; body: Record<string, unknown> }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const headers = new Headers(init?.headers ?? {});
+      requests.push({
+        url,
+        auth: headers.get("authorization"),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      if (url.includes("/auth/login")) {
+        return jsonResponse(200, { status: "authenticated", ...tokenBody() });
+      }
+      if (url.includes("/auth/mfa/enroll")) {
+        return jsonResponse(200, {
+          secret: "SEC",
+          otpauth_uri: "otpauth://totp/x",
+          expires_in: 600,
+        });
+      }
+      if (url.includes("/auth/mfa/activate")) {
+        return jsonResponse(200, { ...tokenBody(), recovery_codes: ["AAAAA-BBBBB"] });
+      }
+      if (url.includes("/auth/mfa/disable")) {
+        return jsonResponse(200, tokenBody({ access_token: "access-after-disable" }));
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+    await session.loginTenant({ schoolCode: "SCH-1", loginId: "S-1", password: "pw" });
+
+    await session.enrollMfa("Old-Password-1");
+    const activation = await session.activateMfa("123456");
+    expect(activation.recoveryCodes).toEqual(["AAAAA-BBBBB"]);
+
+    const disabled = await session.disableMfa("Old-Password-1", "123456");
+    expect(disabled.accessToken).toBe("access-after-disable");
+
+    expect(
+      requests.map((item) => [item.url.replace("http://api/api/v1/auth", ""), item.auth]),
+    ).toEqual([
+      ["/login", null],
+      ["/mfa/enroll", "Bearer access-1"],
+      ["/mfa/activate", "Bearer access-1"],
+      ["/mfa/disable", "Bearer access-1"],
+    ]);
+  });
+
+  it("/auth/me 暴露 MFA 状态（供安全设置页与强制绑定门禁使用）", async () => {
+    const { fetchImpl } = fetchStub([
+      {
+        match: "/api/v1/auth/me",
+        respond: () =>
+          jsonResponse(200, {
+            user_id: "u-1",
+            realm: "platform",
+            tenant_id: null,
+            must_change_password: false,
+            roles: [],
+            permissions: [],
+            mfa_enabled: false,
+            mfa_required: true,
+          }),
+      },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const me = await session.me();
+
+    expect(me.mfaEnabled).toBe(false);
+    expect(me.mfaRequired).toBe(true);
+  });
+
+  it("旧版后端未返回 MFA 字段时按未启用/不强制处理", async () => {
+    const { fetchImpl } = fetchStub([
+      {
+        match: "/api/v1/auth/me",
+        respond: () =>
+          jsonResponse(200, {
+            user_id: "u-1",
+            realm: "tenant",
+            tenant_id: null,
+            must_change_password: false,
+            roles: [],
+            permissions: [],
+          }),
+      },
+    ]);
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const me = await session.me();
+
+    expect(me.mfaEnabled).toBe(false);
+    expect(me.mfaRequired).toBe(false);
   });
 });

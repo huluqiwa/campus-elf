@@ -18,7 +18,11 @@ from app.auth.principal import get_current_principal
 from app.auth.tokens import decode_access_token
 from app.config import get_settings
 from app.db.session import db_session, dispose_engine
-from tests.support.auth import TEST_PLATFORM_PASSWORD, seed_platform_user
+from tests.support.auth import (
+    TEST_PLATFORM_PASSWORD,
+    as_token_pair,
+    seed_platform_user,
+)
 from tests.support.db import (
     clean_test_data,
     database_url,
@@ -135,12 +139,14 @@ async def _login(
 ) -> service.TokenPair:
     """租户登录（固定 IP，UA 可区分设备）。"""
 
-    return await service.login_tenant(
-        school_code=school_code,
-        login_id=login_id,
-        password=password,
-        ip="127.0.0.1",
-        user_agent=user_agent,
+    return as_token_pair(
+        await service.login_tenant(
+            school_code=school_code,
+            login_id=login_id,
+            password=password,
+            ip="127.0.0.1",
+            user_agent=user_agent,
+        )
     )
 
 
@@ -548,14 +554,20 @@ async def test_platform_limit_is_stricter(session_env: None) -> None:
     finally:
         await engine.dispose()
 
-    p1 = await service.login_platform(
-        account="ops-sessions", password=TEST_PLATFORM_PASSWORD, user_agent=CHROME_WINDOWS
+    p1 = as_token_pair(
+        await service.login_platform(
+            account="ops-sessions", password=TEST_PLATFORM_PASSWORD, user_agent=CHROME_WINDOWS
+        )
     )
-    p2 = await service.login_platform(
-        account="ops-sessions", password=TEST_PLATFORM_PASSWORD, user_agent=SAFARI_IOS
+    p2 = as_token_pair(
+        await service.login_platform(
+            account="ops-sessions", password=TEST_PLATFORM_PASSWORD, user_agent=SAFARI_IOS
+        )
     )
-    p3 = await service.login_platform(
-        account="ops-sessions", password=TEST_PLATFORM_PASSWORD, user_agent=FIREFOX_MAC
+    p3 = as_token_pair(
+        await service.login_platform(
+            account="ops-sessions", password=TEST_PLATFORM_PASSWORD, user_agent=FIREFOX_MAC
+        )
     )
 
     assert await _active_family_count_platform(p1.user_id) == 2

@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.db.session import db_session, dispose_engine
 from tests.support.auth import (
     TEST_PLATFORM_PASSWORD,
+    as_token_pair,
     seed_platform_user,
     seed_tenant_user,
 )
@@ -168,8 +169,10 @@ async def test_tenant_login_locks_after_five_failures(
             {"uid": user_id},
         )
 
-    pair = await service.login_tenant(
-        school_code=SCHOOL_CODE, login_id="S-3001", password=TENANT_PASSWORD
+    pair = as_token_pair(
+        await service.login_tenant(
+            school_code=SCHOOL_CODE, login_id="S-3001", password=TENANT_PASSWORD
+        )
     )
     assert pair.user_id == user_id
     row = await _user_row(tenant_id, user_id)

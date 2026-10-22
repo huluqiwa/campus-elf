@@ -10,6 +10,7 @@ from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
@@ -46,6 +47,15 @@ class User(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
             "status IN ('active', 'locked', 'disabled', 'deleted')", name="status_valid"
         ),
         CheckConstraint("failed_login_attempts >= 0", name="failed_login_attempts_nonnegative"),
+        # 已启用 MFA 必须有加密 secret；未启用时允许存在"待激活" secret
+        CheckConstraint(
+            "NOT mfa_enabled OR mfa_secret_enc IS NOT NULL",
+            name="mfa_secret_required_when_enabled",
+        ),
+        CheckConstraint(
+            "mfa_last_used_step IS NULL OR mfa_last_used_step >= 0",
+            name="mfa_last_used_step_nonnegative",
+        ),
     )
 
     user_type: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -60,6 +70,8 @@ class User(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     must_change_password: Mapped[bool] = mapped_column(nullable=False, default=True)
     mfa_secret_enc: Mapped[str | None] = mapped_column(Text)
     mfa_enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
+    # 最近一次成功使用的 TOTP 时间步（防同一步内重放）
+    mfa_last_used_step: Mapped[int | None] = mapped_column(BigInteger)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 权限/状态变更时自增：access token 校验时比对，旧令牌立即失效
     token_version: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
@@ -90,7 +102,7 @@ class RefreshToken(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
             "revoked_reason IS NULL OR revoked_reason IN "
             "('logout', 'password_change', 'reuse_detected', 'rotated', 'admin_revoke', "
             "'account_deleted', 'expired', 'session_kicked', 'session_revoked', "
-            "'password_reset')",
+            "'password_reset', 'mfa_change')",
             name="revoked_reason_valid",
         ),
         # 复合外键：令牌只能属于同租户用户
@@ -121,6 +133,10 @@ class RefreshToken(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
     revoked_reason: Mapped[str | None] = mapped_column(String(32))
     ua_hash: Mapped[str | None] = mapped_column(String(64))
     ip_hash: Mapped[str | None] = mapped_column(String(64))
+    # 该刷新链是否完成过 MFA（平台强制策略开启时，false 的旧会话刷新会被拒绝）
+    mfa_verified: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
 
 
 class PlatformRefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -136,7 +152,7 @@ class PlatformRefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "revoked_reason IS NULL OR revoked_reason IN "
             "('logout', 'password_change', 'reuse_detected', 'rotated', "
             "'admin_revoke', 'account_deleted', 'expired', 'session_kicked', "
-            "'session_revoked', 'password_reset')",
+            "'session_revoked', 'password_reset', 'mfa_change')",
             name="revoked_reason_valid",
         ),
         ForeignKeyConstraint(
@@ -162,6 +178,9 @@ class PlatformRefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     revoked_reason: Mapped[str | None] = mapped_column(String(32))
     ua_hash: Mapped[str | None] = mapped_column(String(64))
     ip_hash: Mapped[str | None] = mapped_column(String(64))
+    mfa_verified: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
 
 
 class PasswordHistory(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
@@ -241,6 +260,65 @@ class PlatformPasswordHistory(UUIDPrimaryKeyMixin, Base):
 
     platform_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MfaRecoveryCode(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
+    """租户用户 MFA 恢复码（只存 HMAC 摘要；一次性，启用时整批重发）。"""
+
+    __tablename__ = "mfa_recovery_codes"
+    __table_args__ = (
+        Index(
+            "ix_mfa_recovery_codes_tenant_user_created_at",
+            "tenant_id",
+            "user_id",
+            "created_at",
+        ),
+        UniqueConstraint(
+            "tenant_id", "user_id", "code_hash", name="uq_mfa_recovery_codes_tenant_user_hash"
+        ),
+        ForeignKeyConstraint(
+            ["user_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_mfa_recovery_codes_user_id_tenant_id_users",
+            ondelete="CASCADE",
+        ),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PlatformMfaRecoveryCode(UUIDPrimaryKeyMixin, Base):
+    """平台账号 MFA 恢复码（平台表，不带 tenant_id，仅平台连接可访问）。"""
+
+    __tablename__ = "platform_mfa_recovery_codes"
+    __table_args__ = (
+        Index(
+            "ix_platform_mfa_recovery_codes_user_created_at",
+            "platform_user_id",
+            "created_at",
+        ),
+        UniqueConstraint(
+            "platform_user_id", "code_hash", name="uq_platform_mfa_recovery_codes_user_hash"
+        ),
+        ForeignKeyConstraint(
+            ["platform_user_id"],
+            ["platform_users.id"],
+            name="fk_platform_mfa_recovery_codes_platform_user_id",
+            ondelete="CASCADE",
+        ),
+    )
+
+    platform_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

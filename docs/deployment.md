@@ -175,11 +175,18 @@ location /api/v1/school/kb/build-jobs/ {
   具备 `BYPASSRLS` 的运维角色；临时数据修复脚本应显式 `SET ROLE campus_elf_platform`（或临时 `ALTER TABLE … NO FORCE`，事后恢复）。
 - 角色与授权**不随迁移回滚**（集群级对象）；需要清理时手工 `DROP ROLE`（见 `scripts/test-stack.sh::cleanup_legacy_roles` 的做法）。
 - **启动自检（TD-073）**：`APP_ENV=staging|production` 时应用启动会执行 `verify_runtime_database()`——**租户与平台两个连接**角色都不得是超级用户或带 `BYPASSRLS`；逐表要求 FORCE RLS、每条策略都引用租户/平台上下文且只授予两个应用组角色；审核函数 owner 必须可绕过 FORCE RLS；未设置租户上下文时租户数据必须不可见。任一不满足直接拒绝启动。
-- **staging/production 配置校验强制项**：`DATABASE_URL`、`PLATFORM_DATABASE_URL`、`QDRANT_URL`、真实 `SMTP_HOST/SMTP_FROM` + `SMTP_USERNAME/SMTP_PASSWORD` + `SMTP_USE_TLS|SMTP_START_TLS`（二选一，MailHog/明文 SMTP 一律拒绝）、`JWT_SECRET`（≥32 字节随机值）、`PASSWORD_RESET_URL_BASE`（https）、`AUTH_COOKIE_SECURE=true`；生产另强制 S3 四项；`DEV_*` 开关一律禁止。任一缺失/非法即启动失败。`MIGRATION_DATABASE_URL` **不注入 API/Worker**，仅迁移 Job 使用；该角色需超级用户或 `BYPASSRLS`。
+- **staging/production 配置校验强制项**：`DATABASE_URL`、`PLATFORM_DATABASE_URL`、`QDRANT_URL`、真实 `SMTP_HOST/SMTP_FROM` + `SMTP_USERNAME/SMTP_PASSWORD` + `SMTP_USE_TLS|SMTP_START_TLS`（二选一，MailHog/明文 SMTP 一律拒绝）、`JWT_SECRET`（≥32 字节随机值）、`ENCRYPTION_KEK`（标准 base64 的 32 字节随机值，`openssl rand -base64 32`；占位值/长度不符即启动失败）、`PASSWORD_RESET_URL_BASE`（https）、`AUTH_COOKIE_SECURE=true`；生产另强制 S3 四项；`DEV_*` 开关一律禁止。任一缺失/非法即启动失败。`MIGRATION_DATABASE_URL` **不注入 API/Worker**，仅迁移 Job 使用；该角色需超级用户或 `BYPASSRLS`。
+- **MFA（AUTH-04，M1-D2）**：`ENCRYPTION_KEK` 用于加密 TOTP 密钥（AES-256-GCM，AAD 绑定 realm+user）与派生恢复码 HMAC 子密钥（HKDF），**所有环境必填且不入库、不入日志、不回显**；丢失该密钥等于全部 MFA 绑定失效（需按下方 CLI 逐账号重置），因此纳入密钥备份与轮换流程（轮换工具见 TD-125）。`MFA_REQUIRE_PLATFORM`（默认 `false`）**建议生产开启**：开启后平台运营账号必须绑定验证器才能登录，策略由关转开时旧会话在刷新时被撤销（已签发访问令牌最长 15 分钟自然收敛，TD-132），建议在低峰开启并公告。相关可调项：`MFA_TOTP_ISSUER`（默认 `CampusCompanionElf`）/`MFA_TOTP_INTERVAL_SECONDS`（30）/`MFA_TOTP_WINDOW_STEPS`（±1 步）、`MFA_CHALLENGE_TTL_SECONDS`（默认 300）、`MFA_CHALLENGE_MAX_ATTEMPTS`（默认 5）、`MFA_ENROLL_TOKEN_TTL_SECONDS`（默认 600）、`MFA_RECOVERY_CODE_COUNT`（默认 10）、`JWT_AUDIENCE_MFA`。待激活密钥只存 Redis（TTL 内有效），Redis 故障时绑定流程 fail-closed。
 - **平台账号初始化（无注册 UI）**：部署后执行
   `docker compose exec api python -m app.platform_admin --account <账号> --email <邮箱>`，
   初始密码仅在终端打印一次，账号默认 `must_change_password=true`；已有账号改邮箱用
   `--update-email-only`（同事务作废未使用重置令牌）。请通过安全渠道交付初始密码，勿写入工单/日志。
+- **平台账号 MFA 破窗（运营侧丢验证器）**：`docker compose exec api python -m app.platform_admin --account <账号> --reset-mfa`
+  清除该账号的 TOTP 密钥/恢复码/失败计数与锁定，自增 `token_version` 并撤销全部刷新会话（`admin_revoke`），
+  写审计 `platform.user.mfa_reset`（账号掩码、撤销会话数）；命令**不打印任何密钥或验证码**，可安全留存在运维记录中。
+  需要同时更新邮箱可加 `--email <新邮箱>`。强制策略下该账号下次登录重新绑定。租户侧校管/员工重置按计划 M2 交付（TD-126）。
+- **网关与响应体**：`/auth/mfa/enroll` 与 `/auth/mfa/activate` 的响应分别含 TOTP secret 与恢复码明文，均带
+  `Cache-Control: no-store`；Nginx/网关**不得开启响应体日志或缓冲落盘**， access log 只记路径与状态（`$request_body` 类字段禁止配置到这两个路由）。
 - **平台开通能力**：平台运行角色对 `users/roles/role_permissions/user_roles` 零权限；申请单仅 SELECT+INSERT、审核记录仅 SELECT、租户仅 SELECT + 列级 `UPDATE(status,status_reason)`。开通/审核只能 `EXECUTE review_registration_request(...)`（`SECURITY DEFINER`，函数内锁申请、写审核记录与审计）。该函数 owner 必须是超级用户或 `BYPASSRLS`（自检与迁移都会强制），否则写入会被 FORCE RLS 拒绝。
 
 ## 7. Langfuse 独立主机
@@ -274,3 +281,6 @@ pnpm --filter campus dev
 - [ ] 跨租隔离测试全量通过。
 - [ ] 压测报告入库；发布/回滚零 5xx。
 - [ ] 生产开关/功能开关默认关闭。
+- [ ] `ENCRYPTION_KEK` 已随机生成并纳入密钥备份/轮换记录；未出现在镜像、仓库、日志或 `.env` 提交中。
+- [ ] 生产 `MFA_REQUIRE_PLATFORM=true` 已按公告在低峰开启；平台运营账号完成绑定；`--reset-mfa` 破窗流程与审计可演练。
+- [ ] `/auth/mfa/enroll`、`/auth/mfa/activate` 响应未被网关日志/缓存记录（`no-store` 生效）。

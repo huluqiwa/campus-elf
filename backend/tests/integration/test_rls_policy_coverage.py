@@ -54,6 +54,7 @@ TABLES_ALLOWED_WITHOUT_TENANT_ID = {
     "platform_refresh_tokens",
     "platform_password_history",
     "platform_password_reset_tokens",
+    "platform_mfa_recovery_codes",
     "permissions",
     "platform_role_permissions",
     "tenant_registration_requests",

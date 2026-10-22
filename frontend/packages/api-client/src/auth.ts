@@ -26,6 +26,40 @@ export interface AuthUser {
   mustChangePassword: boolean;
   roles: string[];
   permissions: string[];
+  mfaEnabled: boolean;
+  mfaRequired: boolean;
+}
+
+/** 登录需要动态码（已绑定）：只拿到短时挑战令牌，此时还没有会话。 */
+export interface MfaChallengeOutcome {
+  status: "mfaRequired";
+  mfaToken: string;
+  expiresIn: number;
+  methods: string[];
+}
+
+/** 平台要求必须绑定但还没绑定：只拿到受限绑定令牌。 */
+export interface MfaEnrollmentOutcome {
+  status: "mfaEnrollmentRequired";
+  enrollToken: string;
+  expiresIn: number;
+}
+
+/** 登录三态：直接进会话 / 输动态码 / 先绑定验证器。 */
+export type LoginOutcome =
+  { status: "authenticated"; tokens: AuthTokens } | MfaChallengeOutcome | MfaEnrollmentOutcome;
+
+/** 绑定信息：secret 只在内存中使用，禁止写 localStorage/日志。 */
+export interface MfaEnrollment {
+  secret: string;
+  otpauthUri: string;
+  expiresIn: number;
+}
+
+/** 激活结果：新会话 + 一次性恢复码（此后再也看不到）。 */
+export interface MfaActivation {
+  tokens: AuthTokens;
+  recoveryCodes: string[];
 }
 
 export interface TenantLoginInput {
@@ -102,8 +136,18 @@ export interface AuthSessionOptions {
 export interface AuthSession {
   getAccessToken(): string | null;
   getTokens(): AuthTokens | null;
-  loginTenant(input: TenantLoginInput): Promise<AuthTokens>;
-  loginPlatform(input: PlatformLoginInput): Promise<AuthTokens>;
+  loginTenant(input: TenantLoginInput): Promise<LoginOutcome>;
+  loginPlatform(input: PlatformLoginInput): Promise<LoginOutcome>;
+  /** 登录第二步：TOTP 6 位码或一次性恢复码；成功才签发会话。 */
+  verifyMfa(mfaToken: string, code: string): Promise<AuthTokens>;
+  /** 已登录用户发起绑定：必须重新验证当前密码。 */
+  enrollMfa(currentPassword: string): Promise<MfaEnrollment>;
+  /** 强制绑定阶段（尚无会话）：用登录返回的绑定令牌发起。 */
+  enrollMfaWithToken(enrollToken: string): Promise<MfaEnrollment>;
+  /** 激活绑定：成功签发新会话并返回一次性恢复码；`enrollToken` 用于强制绑定阶段。 */
+  activateMfa(code: string, enrollToken?: string): Promise<MfaActivation>;
+  /** 关闭绑定：密码 + 动态码/恢复码，成功签发新会话。 */
+  disableMfa(currentPassword: string, code: string): Promise<AuthTokens>;
   /** 页面加载时用 Cookie 静默恢复会话（失败返回 null，不触发 onUnauthorized）。 */
   restore(): Promise<AuthTokens | null>;
   refresh(): Promise<AuthTokens>;
@@ -128,6 +172,7 @@ const NO_REFRESH_PATHS = new Set<string>([
   "/api/v1/auth/login",
   "/api/v1/auth/refresh",
   "/api/v1/auth/logout",
+  "/api/v1/auth/mfa/verify",
 ]);
 
 /** 后端 /auth/me 的原始响应（snake_case），前端统一映射为 camelCase。 */
@@ -138,6 +183,8 @@ interface MePayload {
   must_change_password: boolean;
   roles: string[];
   permissions: string[];
+  mfa_enabled?: boolean;
+  mfa_required?: boolean;
 }
 
 interface TokenPayload {
@@ -147,6 +194,22 @@ interface TokenPayload {
   tenant_id: string | null;
   roles: string[];
   realm: Realm;
+}
+
+/** /auth/login 的三态响应（按 `status` 判别）。 */
+type LoginPayload =
+  | (TokenPayload & { status: "authenticated" })
+  | { status: "mfa_required"; mfa_token: string; expires_in: number; methods: string[] }
+  | { status: "mfa_enrollment_required"; enroll_token: string; expires_in: number };
+
+interface MfaEnrollPayload {
+  secret: string;
+  otpauth_uri: string;
+  expires_in: number;
+}
+
+interface MfaActivatePayload extends TokenPayload {
+  recovery_codes: string[];
 }
 
 /** 面向用户的错误文案：技术性/网络错误统一兜底，避免把 "Failed to fetch" 一类直出界面。 */
@@ -205,13 +268,26 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
     };
   }
 
-  async function post<T>(path: string, body: unknown, opts?: { auth?: boolean }): Promise<T> {
+  function toEnrollment(payload: MfaEnrollPayload): MfaEnrollment {
+    return {
+      secret: payload.secret,
+      otpauthUri: payload.otpauth_uri,
+      expiresIn: payload.expires_in,
+    };
+  }
+
+  async function post<T>(
+    path: string,
+    body: unknown,
+    opts?: { auth?: boolean; bearer?: string },
+  ): Promise<T> {
+    const bearer = opts?.bearer ?? (opts?.auth && tokens ? tokens.accessToken : undefined);
     const response = await fetchImpl(`${baseUrl}${path}`, {
       method: "POST",
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        ...(opts?.auth && tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : {}),
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
       },
       body: JSON.stringify(body ?? {}),
     });
@@ -307,25 +383,93 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
     return (await response.json()) as T;
   }
 
+  /** 登录三态映射：只有 `authenticated` 才写入会话令牌。 */
+  function toLoginOutcome(payload: LoginPayload): LoginOutcome {
+    if (payload.status === "mfa_required") {
+      return {
+        status: "mfaRequired",
+        mfaToken: payload.mfa_token,
+        expiresIn: payload.expires_in,
+        methods: payload.methods ?? ["totp"],
+      };
+    }
+    if (payload.status === "mfa_enrollment_required") {
+      return {
+        status: "mfaEnrollmentRequired",
+        enrollToken: payload.enroll_token,
+        expiresIn: payload.expires_in,
+      };
+    }
+    return { status: "authenticated", tokens: setTokens(toTokens(payload)) };
+  }
+
   return {
     getAccessToken: () => tokens?.accessToken ?? null,
     getTokens: () => tokens,
 
-    async loginTenant(input: TenantLoginInput): Promise<AuthTokens> {
-      const payload = await post<TokenPayload>("/api/v1/auth/login", {
+    async loginTenant(input: TenantLoginInput): Promise<LoginOutcome> {
+      const payload = await post<LoginPayload>("/api/v1/auth/login", {
         realm: "tenant",
         school_code: input.schoolCode,
         login_id: input.loginId,
         password: input.password,
       });
-      return setTokens(toTokens(payload));
+      return toLoginOutcome(payload);
     },
 
-    async loginPlatform(input: PlatformLoginInput): Promise<AuthTokens> {
-      const payload = await post<TokenPayload>("/api/v1/auth/login", {
+    async loginPlatform(input: PlatformLoginInput): Promise<LoginOutcome> {
+      const payload = await post<LoginPayload>("/api/v1/auth/login", {
         realm: "platform",
         account: input.account,
         password: input.password,
+      });
+      return toLoginOutcome(payload);
+    },
+
+    async verifyMfa(mfaToken: string, code: string): Promise<AuthTokens> {
+      const payload = await post<TokenPayload>("/api/v1/auth/mfa/verify", {
+        mfa_token: mfaToken,
+        code,
+      });
+      return setTokens(toTokens(payload));
+    },
+
+    async enrollMfa(currentPassword: string): Promise<MfaEnrollment> {
+      const payload = await post<MfaEnrollPayload>(
+        "/api/v1/auth/mfa/enroll",
+        { current_password: currentPassword },
+        { auth: true },
+      );
+      return toEnrollment(payload);
+    },
+
+    async enrollMfaWithToken(enrollToken: string): Promise<MfaEnrollment> {
+      const payload = await post<MfaEnrollPayload>(
+        "/api/v1/auth/mfa/enroll",
+        {},
+        { bearer: enrollToken },
+      );
+      return toEnrollment(payload);
+    },
+
+    async activateMfa(code: string, enrollToken?: string): Promise<MfaActivation> {
+      const payload = await post<MfaActivatePayload>(
+        "/api/v1/auth/mfa/activate",
+        { code },
+        enrollToken ? { bearer: enrollToken } : { auth: true },
+      );
+      return {
+        tokens: setTokens(toTokens(payload)),
+        recoveryCodes: payload.recovery_codes ?? [],
+      };
+    },
+
+    async disableMfa(currentPassword: string, code: string): Promise<AuthTokens> {
+      // 走 request()：访问令牌恰好过期时先刷新一次再重放
+      const payload = await request<TokenPayload>("/api/v1/auth/mfa/disable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_password: currentPassword, code }),
       });
       return setTokens(toTokens(payload));
     },
@@ -396,6 +540,8 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
         mustChangePassword: payload.must_change_password,
         roles: payload.roles ?? [],
         permissions: payload.permissions ?? [],
+        mfaEnabled: payload.mfa_enabled ?? false,
+        mfaRequired: payload.mfa_required ?? false,
       };
     },
 

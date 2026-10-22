@@ -32,6 +32,7 @@ TENANT_TABLES = (
     "refresh_tokens",
     "password_reset_tokens",
     "password_history",
+    "mfa_recovery_codes",
     "roles",
     "users",
 )

@@ -47,6 +47,9 @@ async function logout(): Promise<void> {
       <el-button data-testid="go-change-password" @click="router.push({ name: 'change-password' })">
         修改密码
       </el-button>
+      <el-button data-testid="go-security" @click="router.push({ name: 'security' })">
+        安全设置
+      </el-button>
       <el-button type="primary" data-testid="logout" @click="logout">退出登录</el-button>
     </div>
   </main>

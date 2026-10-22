@@ -8,6 +8,8 @@ export interface MockUser {
   mustChangePassword?: boolean;
   roles?: string[];
   permissions?: string[];
+  mfaEnabled?: boolean;
+  mfaRequired?: boolean;
 }
 
 export interface MockAuthOptions {
@@ -17,10 +19,22 @@ export interface MockAuthOptions {
   mustChangePasswordOnLogin?: boolean;
   /** 登录接口是否失败（返回统一文案）。 */
   loginFails?: boolean;
+  /** 登录返回 mfa_required：已绑定用户先过密码、再过动态码（M1-D2）。 */
+  mfaRequiredOnLogin?: boolean;
+  /** 登录返回 mfa_enrollment_required：平台强制绑定，只给一次性绑定令牌。 */
+  mfaEnrollmentRequiredOnLogin?: boolean;
   /** 用户信息。 */
   user?: MockUser;
   /** 登录失败文案。 */
   loginErrorMessage?: string;
+}
+
+/** 记录 MFA 相关请求，供断言"确实带了什么"，而非只看页面跳转。 */
+export interface AuthMockHandles {
+  verifyBodies: Record<string, unknown>[];
+  enrollAuthHeaders: (string | null)[];
+  activateBodies: Record<string, unknown>[];
+  disableBodies: Record<string, unknown>[];
 }
 
 function tokenBody(options: MockAuthOptions, mustChangePassword: boolean): Record<string, unknown> {
@@ -40,7 +54,7 @@ function tokenBody(options: MockAuthOptions, mustChangePassword: boolean): Recor
   };
 }
 
-function userBody(options: MockAuthOptions): Record<string, unknown> {
+function userBody(options: MockAuthOptions, mfaEnabled: boolean): Record<string, unknown> {
   return {
     user_id: options.user?.userId ?? "22222222-2222-2222-2222-222222222222",
     realm: options.user?.realm ?? "tenant",
@@ -48,6 +62,8 @@ function userBody(options: MockAuthOptions): Record<string, unknown> {
     must_change_password: options.user?.mustChangePassword ?? false,
     roles: options.user?.roles ?? ["school_super_admin"],
     permissions: options.user?.permissions ?? [],
+    mfa_enabled: mfaEnabled,
+    mfa_required: options.user?.mfaRequired ?? false,
   };
 }
 
@@ -118,17 +134,30 @@ export async function mockPasswordReset(
 }
 
 /**
- * 统一 mock 认证接口（**有状态**）：refresh/me/login/change-password/logout 与 health。
+ * 统一 mock 认证接口（**有状态**）：refresh/me/login/change-password/logout/mfa 与 health。
  *
  * 状态语义与真实后端一致：
  * - `authenticated` 表示"初始是否已登录"（决定 refresh/me 是否成功）；
  * - 登录成功后 /auth/me 才开始返回用户，否则返回 401（避免"未登录却取到用户"的假绿）；
  * - 改密成功后 must_change_password 变为 false，/auth/me 随之更新；
- * - 登出后 refresh/me 回到 401。
+ * - 登出后 refresh/me 回到 401；
+ * - MFA：登录返回 mfa_required/mfa_enrollment_required 时不建立会话（refresh/me 仍 401），
+ *   直到 verify/activate 成功才 loggedIn=true；activate 后 mfa_enabled 变 true、disable 变 false。
  */
-export async function mockAuth(page: Page, options: MockAuthOptions = {}): Promise<void> {
+export async function mockAuth(
+  page: Page,
+  options: MockAuthOptions = {},
+): Promise<AuthMockHandles> {
   let loggedIn = options.authenticated ?? true;
   let mustChange = options.user?.mustChangePassword ?? options.mustChangePasswordOnLogin ?? false;
+  let mfaEnabled = options.user?.mfaEnabled ?? options.mfaRequiredOnLogin === true;
+
+  const handles: AuthMockHandles = {
+    verifyBodies: [],
+    enrollAuthHeaders: [],
+    activateBodies: [],
+    disableBodies: [],
+  };
 
   await page.route("**/api/v1/auth/refresh", (route) =>
     loggedIn
@@ -151,7 +180,10 @@ export async function mockAuth(page: Page, options: MockAuthOptions = {}): Promi
           status: 200,
           contentType: "application/json",
           body: JSON.stringify(
-            userBody({ ...options, user: { ...options.user, mustChangePassword: mustChange } }),
+            userBody(
+              { ...options, user: { ...options.user, mustChangePassword: mustChange } },
+              mfaEnabled,
+            ),
           ),
         })
       : route.fulfill({
@@ -171,7 +203,84 @@ export async function mockAuth(page: Page, options: MockAuthOptions = {}): Promi
         }),
       });
     }
+    if (options.mfaRequiredOnLogin) {
+      // 密码通过但未建会话：只返回挑战令牌
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "mfa_required",
+          mfa_token: "e2e-mfa-challenge-token",
+          expires_in: 300,
+          methods: ["totp"],
+        }),
+      });
+    }
+    if (options.mfaEnrollmentRequiredOnLogin) {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "mfa_enrollment_required",
+          enroll_token: "e2e-enroll-token",
+          expires_in: 600,
+        }),
+      });
+    }
     loggedIn = true;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(tokenBody(options, mustChange)),
+    });
+  });
+
+  // 登录第二步：动态码/恢复码校验成功后建立会话
+  await page.route("**/api/v1/auth/mfa/verify", (route) => {
+    handles.verifyBodies.push((route.request().postDataJSON() ?? {}) as Record<string, unknown>);
+    loggedIn = true;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(tokenBody(options, mustChange)),
+    });
+  });
+
+  // 取回绑定密钥：强制绑定用 enroll_token Bearer，自助绑定用会话 Bearer
+  await page.route("**/api/v1/auth/mfa/enroll", (route) => {
+    handles.enrollAuthHeaders.push(route.request().headers().authorization ?? null);
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Cache-Control": "no-store" },
+      body: JSON.stringify({
+        secret: "JBSWY3DPEHPK3PXP",
+        otpauth_uri:
+          "otpauth://totp/%E6%A0%A1%E5%9B%AD%E9%99%AA%E4%BC%B4%E7%B2%BE%E7%81%B5%3Ae2e?secret=JBSWY3DPEHPK3PXP&issuer=CampusElf",
+        expires_in: 600,
+      }),
+    });
+  });
+
+  // 激活：建立会话 + 一次性恢复码，并把 mfa_enabled 翻转为 true
+  await page.route("**/api/v1/auth/mfa/activate", (route) => {
+    handles.activateBodies.push((route.request().postDataJSON() ?? {}) as Record<string, unknown>);
+    loggedIn = true;
+    mfaEnabled = true;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...tokenBody(options, mustChange),
+        recovery_codes: ["AAAA-BBBB-CCCC", "DDDD-EEEE-FFFF"],
+      }),
+    });
+  });
+
+  // 关闭：mfa_enabled 翻转回 false，返回新的会话令牌（会话轮换）
+  await page.route("**/api/v1/auth/mfa/disable", (route) => {
+    handles.disableBodies.push((route.request().postDataJSON() ?? {}) as Record<string, unknown>);
+    mfaEnabled = false;
     return route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -209,4 +318,6 @@ export async function mockAuth(page: Page, options: MockAuthOptions = {}): Promi
       }),
     }),
   );
+
+  return handles;
 }

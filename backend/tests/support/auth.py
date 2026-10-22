@@ -10,10 +10,18 @@ from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from app.auth import service
 from app.auth.passwords import hash_password
 
 # 测试平台账号默认口令（≥10 位；不作为密钥使用）
 TEST_PLATFORM_PASSWORD = "Platform-Test-Pass-1"
+
+
+def as_token_pair(outcome: service.LoginOutcome) -> service.TokenPair:
+    """收窄登录结果：断言该账号未启用 MFA，直接拿到了会话令牌。"""
+
+    assert isinstance(outcome, service.TokenPair), f"期望直接签发会话，实际得到 {outcome}"
+    return outcome
 
 
 async def seed_platform_user(
@@ -25,6 +33,9 @@ async def seed_platform_user(
     must_change_password: bool = False,
     status: str = "active",
     email: str | None = None,
+    mfa_enabled: bool = False,
+    mfa_secret_enc: str | None = None,
+    mfa_last_used_step: int | None = None,
 ) -> str:
     """写入一个具备指定权限码的平台账号，返回账号名。
 
@@ -36,6 +47,9 @@ async def seed_platform_user(
         must_change_password: 是否处于首登改密状态。
         status: active/disabled。
         email: 密码重置收件地址（None 表示未登记）。
+        mfa_enabled: 是否已启用 MFA。
+        mfa_secret_enc: 加密后的 TOTP secret（由测试用 KEK 加密）。
+        mfa_last_used_step: TOTP 重放水位。
 
     返回值:
         账号名。
@@ -46,8 +60,10 @@ async def seed_platform_user(
         user_id = await session.scalar(
             text(
                 "insert into platform_users "
-                "(account, email, password_hash, status, must_change_password, mfa_enabled) "
-                "values (:account, :email, :hash, :status, :must_change, false) returning id"
+                "(account, email, password_hash, status, must_change_password, mfa_enabled, "
+                "mfa_secret_enc, mfa_last_used_step) "
+                "values (:account, :email, :hash, :status, :must_change, :mfa_enabled, "
+                ":mfa_secret_enc, :mfa_last_used_step) returning id"
             ),
             {
                 "account": account,
@@ -55,6 +71,9 @@ async def seed_platform_user(
                 "hash": hash_password(password),
                 "status": status,
                 "must_change": must_change_password,
+                "mfa_enabled": mfa_enabled,
+                "mfa_secret_enc": mfa_secret_enc,
+                "mfa_last_used_step": mfa_last_used_step,
             },
         )
         role_code = f"platform_test_role_{uuid4().hex[:8]}"
@@ -90,6 +109,9 @@ async def seed_tenant_user(
     email: str | None = None,
     must_change_password: bool = False,
     status: str = "active",
+    mfa_enabled: bool = False,
+    mfa_secret_enc: str | None = None,
+    mfa_last_used_step: int | None = None,
 ) -> tuple[UUID, UUID]:
     """写入租户与用户（复用已有同 school_code 的租户），返回 (tenant_id, user_id)。"""
 
@@ -109,9 +131,11 @@ async def seed_tenant_user(
         user_id = await session.scalar(
             text(
                 "insert into users (tenant_id, user_type, login_id, display_name, email, "
-                "password_hash, status, must_change_password, mfa_enabled) "
+                "password_hash, status, must_change_password, mfa_enabled, "
+                "mfa_secret_enc, mfa_last_used_step) "
                 "values (:tenant_id, :user_type, :login_id, '测试用户', :email, :hash, "
-                ":status, :must_change, false) returning id"
+                ":status, :must_change, :mfa_enabled, :mfa_secret_enc, :mfa_last_used_step) "
+                "returning id"
             ),
             {
                 "tenant_id": tenant_id,
@@ -121,6 +145,9 @@ async def seed_tenant_user(
                 "hash": hash_password(password),
                 "status": status,
                 "must_change": must_change_password,
+                "mfa_enabled": mfa_enabled,
+                "mfa_secret_enc": mfa_secret_enc,
+                "mfa_last_used_step": mfa_last_used_step,
             },
         )
         return tenant_id, user_id

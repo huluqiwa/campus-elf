@@ -10,7 +10,7 @@
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, String, Text, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -49,6 +49,14 @@ class PlatformUser(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("status IN ('active', 'disabled')", name="status_valid"),
         CheckConstraint("failed_login_attempts >= 0", name="failed_login_attempts_nonnegative"),
+        CheckConstraint(
+            "NOT mfa_enabled OR mfa_secret_enc IS NOT NULL",
+            name="mfa_secret_required_when_enabled",
+        ),
+        CheckConstraint(
+            "mfa_last_used_step IS NULL OR mfa_last_used_step >= 0",
+            name="mfa_last_used_step_nonnegative",
+        ),
     )
 
     account: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
@@ -60,6 +68,8 @@ class PlatformUser(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     must_change_password: Mapped[bool] = mapped_column(nullable=False, default=True)
     mfa_secret_enc: Mapped[str | None] = mapped_column(Text)
     mfa_enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
+    # 最近一次成功使用的 TOTP 时间步（防同一步内重放）
+    mfa_last_used_step: Mapped[int | None] = mapped_column(BigInteger)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 权限/状态变更时自增，使已签发的 access token 立即失效（校验时比对）
     token_version: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")

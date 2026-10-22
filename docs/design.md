@@ -374,13 +374,16 @@ audit_logs: 仅追加，prev_hash/hash 链
 | POST | `/api/v1/auth/refresh` | 刷新令牌轮换；旧令牌重用 → 撤销整个家族（`reuse_detected`） |
 | POST | `/api/v1/auth/logout` | 撤销刷新令牌家族（可选 body 携带 refresh_token）+ 当前访问令牌 jti 立即进入撤销集合 |
 | POST | `/api/v1/auth/change-password` | 首登改密/主动改密；自增 `token_version` + 撤销全部家族 + 返回新令牌 |
-| GET | `/api/v1/auth/me` | 当前主体、realm、权限码（前端菜单用；服务端仍逐请求校验） |
+| GET | `/api/v1/auth/me` | 当前主体、realm、权限码（前端菜单用；服务端仍逐请求校验）；M1-D2 起增加 `mfa_enabled` 与 `mfa_required`（按 realm 强制策略） |
 | GET | `/api/v1/auth/sessions` | 我的登录设备列表（设备标签、最近使用、是否当前；只显示自己的） |
 | DELETE | `/api/v1/auth/sessions/{session_id}` | 下线指定设备（仅限本人会话） |
 | POST | `/api/v1/auth/sessions/revoke-others` | 退出其它设备（保留当前） |
 | POST | `/api/v1/auth/password-reset/request` | 员工/平台账号邮件重置；恒 202；令牌 30 分钟单次使用（M1-D1） |
 | POST | `/api/v1/auth/password-reset/confirm` | 重置令牌；成功 204，要求重新登录；无效/过期/已用 400、弱密码 422、同 IP 超限 429（带 `Retry-After`，不写审计）（M1-D1） |
-| POST | `/api/v1/auth/mfa/enroll` / `/api/v1/auth/mfa/verify` | TOTP 可选（M1-D2） |
+| POST | `/api/v1/auth/mfa/verify` | MFA 第二步：`{mfa_token, code}` 校验 TOTP 或恢复码；成功才签发令牌 + 刷新 Cookie，失败统一凭证错误并计入锁定（M1-D2） |
+| POST | `/api/v1/auth/mfa/enroll` | 自助绑定：访问令牌需带 `current_password`；平台强制策略下改用登录返回的 `enroll_token`（免密码）；返回 `secret`/`otpauth_uri`（响应 `Cache-Control: no-store`）（M1-D2） |
+| POST | `/api/v1/auth/mfa/activate` | 校验绑定验证码：启用 MFA、生成 10 枚一次性恢复码（仅此响应明文）、轮换全部会话并下发新令牌（M1-D2） |
+| POST | `/api/v1/auth/mfa/disable` | 关闭 MFA：需当前密码 + TOTP/恢复码；`MFA_REQUIRE_PLATFORM` 开启时对平台 realm 返回 403；同样轮换全部会话（M1-D2） |
 
 **令牌契约**
 - 访问令牌：HS256 JWT，15 分钟；claim `sub/realm/tenant_id/jti/token_version/must_change_password/iss/aud/exp`；`aud` 按 realm 区分（`campus-elf-tenant` / `campus-elf-platform`），跨 realm 混用直接拒绝（TD-074）。
@@ -391,7 +394,16 @@ audit_logs: 仅追加，prev_hash/hash 链
 - 密码策略与历史（M1-D1）：最小 10 / 最大 128 字符且 ≤72 UTF-8 字节（bcrypt 上限）、至少 3 类字符、不得包含学号/工号、最近 5 次历史；bcrypt cost 12；初始密码随机生成（默认 12 位，平台账号按账号长度加长）且首登强制改密。
 - 登录失败锁定（M1-D1）：15 分钟内累计 5 次认证失败锁定 15 分钟；计数/窗口/锁定字段在 `users` 与 `platform_users`；成功登录清零，密码重置清锁；锁定期间对外统一凭证错误文案，审计记录 `locked` 真实原因。
 - 密码重置（M1-D1）：租户按“学校编号+登录名”、平台按账号申请，发往库内邮箱；恒 202；令牌 `v1rt.<tenant_id>.<secret>` / `v1rp.<secret>`，库内只存 secret 的 SHA-256，30 分钟单次使用；确认成功 204，撤销全部会话与刷新家族，要求重新登录；学生校管重置在 M2 交付。
+- MFA（AUTH-04，M1-D2）：第二因素为 TOTP（6 位 / 30 秒 / 校验窗口 ±1 步）+ 10 枚一次性恢复码；租户用户自助启用，平台 realm 由 `MFA_REQUIRE_PLATFORM` 强制（默认 false，生产建议开启，只影响平台 realm）。
+- MFA 密钥：`pyotp.random_base32(32)` 生成，AES-256-GCM 加密后存 `users.mfa_secret_enc` / `platform_users.mfa_secret_enc`，密文格式 `v1.<b64url(nonce)>.<b64url(ct)>`，AAD = `mfa:{realm}:{user_id}`（跨用户/跨 realm 搬移密文解密失败）；密钥来自必填 `ENCRYPTION_KEK`（标准 base64 的 32 字节，staging/production 拒绝占位值）。解密失败视为数据/密钥损坏：fail-closed 500 + 审计 `auth.mfa.secret_invalid`。
+- MFA 恢复码：`XXXXX-XXXXX`，归一化后以 `HMAC-SHA256(HKDF(KEK, info="mfa-recovery-codes-v1"), "{realm}:{user_id}:{code}")` 存 `mfa_recovery_codes`（租户，RLS）/ `platform_mfa_recovery_codes`；`UPDATE ... WHERE used_at IS NULL RETURNING id` 保证单次消费；只存哈希，明文仅在激活响应出现一次。
+- MFA 待激活密钥不落库：AES-GCM 密文存 Redis `{prefix}:auth:mfa:pending:{realm}:{user_id}`（TTL=`MFA_ENROLL_TOKEN_TTL_SECONDS`），Redis 不可用即 fail-closed（503）；重复发起覆盖旧密钥，激活或过期后删除（TD-133）。
+- 登录状态机（M1-D2）：密码 → 是否需要第二因素（已开启，或平台 realm 且策略强制）→ 未绑定则签发受限 `mfa_enroll` 令牌、已绑定则签发 `mfa_challenge` → 校验通过才 `_issue_tokens` 建立会话。挑战/绑定令牌为 HS256 JWT：`aud=campus-elf-mfa`、`purpose=mfa_challenge|mfa_enroll`，含 `sub/realm/tenant_id/jti/token_version`，**不能**当访问令牌使用（realm audience 不匹配）；挑战在 Redis 一次性消费（成功即删除）并限制单挑战尝试次数；两者都不写 Cookie/localStorage，前端只放内存。MFA 分支不签发任何令牌、不设刷新 Cookie、不写 `auth.login.success`。
+- MFA 声明与会话标记：访问令牌增加 `amr`（仅密码 `["pwd"]`，完成第二因素 `["pwd","totp"]`，恢复码同记 `totp`）；`refresh_tokens.mfa_verified` / `platform_refresh_tokens.mfa_verified` 记录会话是否已完成 MFA。策略由关转开后，未完成 MFA 的旧会话在刷新时被拒绝并撤销家族（`mfa_change`）；`/auth/change-password` 重签时保留当前会话的 `amr`/`mfa_verified`，不降级。`GET /auth/me` 增加 `mfa_enabled` 与 `mfa_required`（按 realm 策略）。
+- MFA 变更即轮换：`activate`/`disable` 一律 `token_version+1`、撤销该账号全部刷新家族（`revoked_reason=mfa_change`）、删除 Redis 旧会话标记（≤15 分钟的旧访问令牌下一请求立即 401），并为当前流程签发新令牌；密码重置**不关闭** MFA，重置后仍需第二因素。
+- MFA 失败与锁定：错误 TOTP/恢复码、绑定验证码错误、关闭校验失败均复用 AUTH-05 计数（5 次/15 分钟锁 15 分钟），对外统一凭证错误文案；审计 `auth.mfa.enrollment_failed` / `activation_failed` / `disable_failed` 只记 reason/failed_attempts/lock_applied 与 IP/UA 哈希，`auth.mfa.activated` 记恢复码数量与 `sessions_revoked`，`auth.mfa.recovery_used` 记 `phase=login|disable`；任何审计/日志/响应不得出现 secret、otpauth URI、验证码、恢复码明文（恢复码明文只在该激活响应出现一次）。
 - 身份/权限每次请求从数据库读取（不缓存快照）：停用账号、权限变更、`token_version` 变化立即生效。
+
 - 首登改密门禁：`must_change_password` 为真时只放行 `/auth/change-password`、`/auth/logout`、`/auth/me`，其余接口 403。
 - realm↔连接绑定：平台主体只使用平台连接、租户主体只使用租户连接（TD-074）；**平台路由必须显式声明 `realm="platform"`**（`permissions` 是全局目录，权限码本身不构成 realm 边界），权限/realm 不符写 `auth.permission.denied` 审计（含 reason）；数据库层另有 `role_permissions`/`platform_role_permissions` 的 realm/模块守卫触发器（`b7d1e3f5a9c2`）。
 - 权限模块边界：租户角色禁止引用 `platform.*`（触发器 `role_permissions_realm_guard` + 启动自检逐租户校验）；平台角色允许持有全量权限（运营方超集角色，`c8e2f4a6b1d3` 移除平台方向守卫）。

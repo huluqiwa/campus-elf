@@ -17,17 +17,17 @@
 | M1 | M1-C-UI 三端登录页/强制改密页/守卫/HttpOnly 刷新 Cookie | ✅ 完成（两轮审查通过） |
 | M1 | M1-C2 会话设备管理（AUTH-06，策略 C） | ✅ 完成（五轮审查通过；设备限额/列表/下线/退出其它/被踢即时失效；简报 `docs/design-briefs/M1-C2-session-devices.md`） |
 | M1 | M1-D1 密码策略/历史/邮件重置、失败锁定（AUTH-03 员工/平台部分、AUTH-05） | ✅ 已完成（第五轮复审通过、348 passed、远端 CI 绿；简报 `docs/design-briefs/M1-D1-password-lockout.md`） |
-| M1 | M1-D2 MFA（AUTH-04） | ⏳ 未开始（独立简报） |
+| M1 | M1-D2 MFA（AUTH-04） | 🟡 本地完成（两轮审查通过、第二轮 0B/0M、后端 411 passed、前端 32 单测 + 28 E2E；简报 `docs/design-briefs/M1-D2-mfa.md`；**待推送 + 远端 CI 绿才算收口**） |
 | M1 | M1-E RBAC 与数据范围（RBAC-01/02/03） | ⏳ 未开始 |
 | M1 | M1-F 审计落库与哈希链（AUD-01） | ⏳ 未开始 |
 | M1 | M1 验收报告 | ⏳ 未开始（需含 TD-110 真实后端全栈 E2E） |
 | M2/M3/M4 | 组织与人员 / 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 ORG-05、KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M1-D1 收口 → M1-D2（MFA）→ M1-E → M1-F → M1 验收报告 → M2 → M3 → M4。
-- 最近提交：`main` 含 M1-C2 收口 `692e867` 及其后的文档回填提交；工作树应保持干净。
+- **建议的下一步顺序**：M1-D2 收口（推送 + CI）→ M1-E（RBAC 与数据范围）→ M1-F（审计哈希链）→ M1 验收报告 → M2 → M3 → M4。
+- 最近提交：`main` 已含 M1-D1 交付与其后的文档回填/安全标注提交（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
-- 数据库迁移 head：`b2d4f6a8c0e1`（M1-D1）；`alembic check` 应无漂移。
+- 数据库迁移 head：`c4d6e8f0a2b3`（M1-D2 MFA）；`alembic check` 应无漂移。
 
 ---
 
@@ -35,7 +35,7 @@
 
 ```bash
 # 0) 一次性：本地配置（.env 不入库）
-cp .env.example .env      # 至少补 JWT_SECRET（≥32 字节；生成：openssl rand -hex 32）
+cp .env.example .env      # 必须补 JWT_SECRET（≥32 字节，openssl rand -hex 32）与 ENCRYPTION_KEK（32 字节 base64，openssl rand -base64 32）
 
 # 1) 起测试栈（postgres/redis/qdrant/mailhog → 4 个 healthy）
 bash scripts/test-stack.sh up
@@ -46,14 +46,14 @@ cd backend
 uv sync --frozen
 uv run ruff check app tests
 uv run mypy --no-incremental app tests
-REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 348 passed）
+REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 411 passed）
 uv run alembic -x db_url="$TEST_DATABASE_URL" check   # 迁移漂移检查
 
 # 3) 前端
 cd ../frontend
 pnpm install --frozen-lockfile
 pnpm lint && pnpm format:check && pnpm typecheck && pnpm test:unit && pnpm build
-pnpm test:e2e                                     # 需系统 Chrome（channel: chrome），当前 25 单测 / 22 E2E
+pnpm test:e2e                                     # 需系统 Chrome（channel: chrome），当前 32 单测 / 28 E2E
 
 # 4) 一键本地 CI（与远端工作流一一对应；--with-e2e 追加 Playwright）
 cd .. && bash scripts/ci.sh            # 或 bash scripts/ci.sh --with-e2e
@@ -69,6 +69,7 @@ cd .. && bash scripts/ci.sh            # 或 bash scripts/ci.sh --with-e2e
 4. **测试库重置**（仅测试库）：`drop schema public cascade; create schema public; grant usage on schema public to public;` 然后 `alembic ... upgrade head`。
 5. **MailHog 端口**：测试栈 SMTP=51025、API=58025（不是 1025/8025，那是开发栈）。测试必须用 `TEST_SMTP_*`/`TEST_MAILHOG_API`，不要写死默认端口（CI 上会因 1025 无服务而 502）。
 6. **测试栈容器重启后**：偶发端口转发短暂异常，重跑 `bash scripts/test-stack.sh up` 即可。
+7. **Playwright 必须在 `frontend/` 根目录跑**（配置是 `frontend/playwright.config.ts`，用系统 Chrome + `webServer` 起 4173/4174 预览）。在 `frontend/e2e/` 里跑找不到配置 → 既没有 `baseURL`（`Cannot navigate to invalid URL`），又会退回未安装的 Playwright Chromium（`Executable doesn't exist ... chromium_headless_shell`）；本机装了系统 Chrome，正确做法是回根目录跑，不必下载浏览器。
 
 ### 2.1 接手时先做"环境自检"（新工具跑这几条，然后汇报，别猜）
 
@@ -76,7 +77,7 @@ cd .. && bash scripts/ci.sh            # 或 bash scripts/ci.sh --with-e2e
 uname -a                                   # 是否 Linux/macOS/Windows(Git Bash/WSL)
 docker ps --format '{{.Names}} {{.Status}}' | head        # 能否操作 Docker；测试栈是否已在跑
 test -f .env && echo ".env 存在" || echo ".env 缺失"      # .env 不入库，缺失需从 .env.example 复制
-grep -q '^JWT_SECRET=.\+' .env 2>/dev/null && echo "JWT_SECRET 已配" || echo "JWT_SECRET 缺失/为空"
+for k in JWT_SECRET ENCRYPTION_KEK; do grep -q "^$k=.\+" .env 2>/dev/null && echo "$k 已配" || echo "$k 缺失/为空"; done
 gh auth status 2>&1 | head -5               # 能否查远端 CI
 git ls-remote origin -h refs/heads/main     # 能否访问远端仓库（SSH/HTTPS 权限）
 env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 127.0.0.1）
@@ -85,7 +86,7 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 **要求它按这五项汇报**（每项写"能满足 / 不能满足 / 需要你提供"）：
 1. 能否运行 Docker 与 bash（不能跑 Docker ⇒ 集成/业务场景测试与 e2e 无法本地执行，只能用单元测试 + 远端 CI 代替，必须在汇报里说明）；
 2. 测试栈是否已启动（没起则先 `bash scripts/test-stack.sh up`）；
-3. `.env` 与 `JWT_SECRET` 是否就绪（缺失则从 `.env.example` 复制并生成 32 字节随机值）；
+3. `.env` 与 `JWT_SECRET`/`ENCRYPTION_KEK` 是否就绪（缺失则从 `.env.example` 复制并分别生成 `openssl rand -hex 32` / `openssl rand -base64 32`；KEK 缺失会导致应用启动失败与 MFA 用例无法运行）；
 4. 能否访问 GitHub 并查询 CI（`gh auth login` / SSH key / PAT）；
 5. **是否具备"第二上下文/子 agent"能力**——这是独立审查门禁的前提；不满足时按 §6 的替代方案执行，并明确告知用户本轮的审查由谁做。
 
@@ -150,6 +151,7 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 ## 5. 不可逾越的红线（详见 AGENTS.md §3~§5）
 
 - 密钥/口令/令牌只从 `.env` 或密钥管理读取：**不入库、不入日志/审计/trace、不回显、不提交**。
+- MFA（M1-D2）：`ENCRYPTION_KEK` 同上（必填、base64 32 字节，禁止提交/回显）；TOTP secret 只以 AES-256-GCM 密文入库，恢复码只存 HMAC；secret / otpauth URI / 验证码 / 恢复码明文**一律不进日志、审计、错误响应**，只在激活响应出现一次并带 `Cache-Control: no-store`；密码正确但未完成 MFA 时不得签发任何令牌或 Cookie。
 - 多租户：所有业务表/查询/缓存 Key/对象路径/Qdrant collection 带租户边界；数据访问层强制 `tenant_id` 过滤 + PostgreSQL RLS 兜底；跨租默认拒绝；不信任前端传入的 tenant_id/role。
 - 生产环境：`DEV_SKIP_SCHOOL_REVIEW`、`DEV_SKIP_FILE_SCAN`、`DEV_SKELETON_LOOP_ENABLED` 必须关闭（配置校验已强制）；`AUTH_COOKIE_SECURE=true`、`AUTH_REFRESH_TOKEN_IN_BODY=false`。
 - 知识库门禁：审批通过前不得解析/切块/嵌入/索引；未审批调用构建必须 409 + 审计。
@@ -198,7 +200,7 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 
 - 仓库访问：`git@github.com:huluqiwa/campus-elf.git` 的 SSH key，或改用 HTTPS + PAT；`gh auth login`（查询 CI 用）。
 - Docker Desktop 已启动（测试栈 4 个容器）。
-- 本地 `.env`（从 `.env.example` 复制，至少补 `JWT_SECRET`）。
+- 本地 `.env`（从 `.env.example` 复制，必须补 `JWT_SECRET` 与 `ENCRYPTION_KEK`）。
 - 明确告诉它"哪个模型/工具负责写代码、哪个负责审查"，避免自查自批。
 
 ---

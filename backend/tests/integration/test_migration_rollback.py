@@ -23,6 +23,7 @@ pytestmark = [pytest.mark.integration]
 M1A_REVISION = "779f731db342"
 M1C2_PREVIOUS_REVISION = "c8e2f4a6b1d3"
 D1_PREVIOUS_REVISION = "d4e6f8a0b2c1"
+D1_REVISION = "b2d4f6a8c0e1"
 
 
 def _alembic_config(url: str) -> Config:
@@ -647,6 +648,161 @@ def test_m1c2_downgrade_with_session_reasons_then_upgrade() -> None:
         assert asyncio.run(_m1c2_backfill_mismatches(temp_dsn)) == 0
     finally:
         asyncio.run(_drop_database(dsn, temp_database))
+
+
+async def _seed_m1d2_mfa_state(dsn: str) -> None:
+    """写入启用 MFA 的用户、恢复码与 mfa_change 刷新令牌行。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        tenant_id = await connection.fetchval(
+            "insert into tenants (school_code, name, status, activated_at) "
+            "values ('SCH-D2ROLL', 'D2 回滚中学', 'active', now()) returning id"
+        )
+        user_id = await connection.fetchval(
+            "insert into users (tenant_id, user_type, login_id, password_hash, "
+            "status, must_change_password, mfa_enabled, mfa_secret_enc, mfa_last_used_step) "
+            "values ($1, 'student', 'd2-rollback@school.edu', '$2b$12$fake', "
+            "'active', false, true, 'v1.nonce.ciphertext', 123) returning id",
+            tenant_id,
+        )
+        await connection.execute(
+            "insert into refresh_tokens (tenant_id, user_id, jti, family_id, "
+            "token_hash, expires_at, last_seen_at, revoked_at, revoked_reason, mfa_verified) "
+            "values ($1, $2, gen_random_uuid(), gen_random_uuid(), $3, "
+            "now() + interval '1 day', now(), now(), 'mfa_change', true)",
+            tenant_id,
+            user_id,
+            "f" * 64,
+        )
+        await connection.execute(
+            "insert into mfa_recovery_codes (tenant_id, user_id, code_hash) values ($1, $2, $3)",
+            tenant_id,
+            user_id,
+            "a" * 64,
+        )
+
+        platform_user_id = await connection.fetchval(
+            "insert into platform_users (account, password_hash, status, "
+            "must_change_password, mfa_enabled, mfa_secret_enc, mfa_last_used_step) "
+            "values ('d2-rollback-ops', '$2b$12$fake', 'active', false, true, "
+            "'v1.nonce.ciphertext', 456) returning id"
+        )
+        await connection.execute(
+            "insert into platform_refresh_tokens (platform_user_id, jti, family_id, "
+            "token_hash, expires_at, last_seen_at, revoked_at, revoked_reason, mfa_verified) "
+            "values ($1, gen_random_uuid(), gen_random_uuid(), $2, "
+            "now() + interval '1 day', now(), now(), 'mfa_change', true)",
+            platform_user_id,
+            "b" * 64,
+        )
+        await connection.execute(
+            "insert into platform_mfa_recovery_codes (platform_user_id, code_hash) values ($1, $2)",
+            platform_user_id,
+            "c" * 64,
+        )
+    finally:
+        await connection.close()
+
+
+async def _d2_rollback_state(dsn: str) -> tuple[list[str], bool, bool]:
+    """返回回滚后的撤销原因、MFA 表是否删除、MFA 列是否删除。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        tenant_reasons = [
+            str(row["revoked_reason"])
+            for row in await connection.fetch("select revoked_reason from refresh_tokens")
+        ]
+        platform_reasons = [
+            str(row["revoked_reason"])
+            for row in await connection.fetch("select revoked_reason from platform_refresh_tokens")
+        ]
+        tables_gone = await connection.fetchval(
+            "select to_regclass('mfa_recovery_codes') is null "
+            "and to_regclass('platform_mfa_recovery_codes') is null"
+        )
+        columns_gone = await connection.fetchval(
+            "select count(*) = 0 from information_schema.columns "
+            "where column_name in ('mfa_last_used_step', 'mfa_verified') "
+            "and table_name in ('users', 'platform_users', 'refresh_tokens', "
+            "'platform_refresh_tokens')"
+        )
+        return tenant_reasons + platform_reasons, bool(tables_gone), bool(columns_gone)
+    finally:
+        await connection.close()
+
+
+def test_m1d2_downgrade_normalizes_mfa_change_reason_then_upgrade() -> None:
+    """含 mfa_change 撤销原因时可 downgrade（归一化为 admin_revoke），再 upgrade。"""
+
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL 未设置；先运行 scripts/test-stack.sh up 并导出 TEST_*")
+    assert_test_database_dsn(admin_url)
+
+    dsn, database = _admin_dsn(admin_url)
+    temp_database = f"{database}_m1d2rollback"
+    temp_dsn = dsn.rsplit("/", 1)[0] + f"/{temp_database}"
+    temp_url = admin_url.rsplit("/", 1)[0] + f"/{temp_database}"
+
+    asyncio.run(_create_database(dsn, temp_database))
+    try:
+        config = _alembic_config(temp_url)
+        command.upgrade(config, "head")
+        asyncio.run(_seed_m1d2_mfa_state(temp_dsn))
+
+        command.downgrade(config, D1_REVISION)
+
+        reasons, tables_gone, columns_gone = asyncio.run(_d2_rollback_state(temp_dsn))
+        assert reasons == ["admin_revoke", "admin_revoke"]
+        assert tables_gone is True
+        assert columns_gone is True
+
+        command.upgrade(config, "head")
+        assert asyncio.run(_table_exists(temp_dsn, "mfa_recovery_codes")) is True
+        assert asyncio.run(_table_exists(temp_dsn, "platform_mfa_recovery_codes")) is True
+    finally:
+        asyncio.run(_drop_database(dsn, temp_database))
+
+
+def test_m1d2_upgrade_fails_fast_on_enabled_mfa_without_secret() -> None:
+    """存量行 mfa_enabled=true 但 secret 为空时，升级必须失败并提示先修复数据。"""
+
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL 未设置；先运行 scripts/test-stack.sh up 并导出 TEST_*")
+    assert_test_database_dsn(admin_url)
+
+    dsn, database = _admin_dsn(admin_url)
+    temp_database = f"{database}_m1d2precheck"
+    temp_dsn = dsn.rsplit("/", 1)[0] + f"/{temp_database}"
+    temp_url = admin_url.rsplit("/", 1)[0] + f"/{temp_database}"
+
+    asyncio.run(_create_database(dsn, temp_database))
+    try:
+        config = _alembic_config(temp_url)
+        command.upgrade(config, D1_REVISION)
+        asyncio.run(_seed_invalid_mfa_row(temp_dsn))
+
+        with pytest.raises(RuntimeError, match="mfa_secret_enc"):
+            command.upgrade(config, "head")
+    finally:
+        asyncio.run(_drop_database(dsn, temp_database))
+
+
+async def _seed_invalid_mfa_row(dsn: str) -> None:
+    """在 D1 schema 下写入 mfa_enabled=true 且无 secret 的平台账号。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        await connection.execute(
+            "insert into platform_users (account, password_hash, status, "
+            "must_change_password, mfa_enabled) "
+            "values ('d2-invalid-ops', '$2b$12$fake', 'active', false, true)"
+        )
+    finally:
+        await connection.close()
 
 
 async def _seed_d1_password_reset_reason(dsn: str) -> None:

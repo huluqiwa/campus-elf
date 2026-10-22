@@ -1,25 +1,38 @@
-"""认证接口（M1-C）：三端登录、刷新、登出、首登改密、当前身份。
+"""认证接口（M1-C/M1-D2）：三端登录、刷新、登出、首登改密、MFA、当前身份。
 
 - `POST /auth/login`：`realm=tenant` 用"学校编号 + 学号/工号 + 密码"；`realm=platform` 用"账号 + 密码"。
+- `POST /auth/mfa/verify`：登录第二步（TOTP/恢复码）。
+- `POST /auth/mfa/enroll|activate|disable`：绑定、激活、关闭 TOTP；绑定/激活/关闭都会轮换会话。
 - `POST /auth/refresh`：刷新令牌轮换；检测到重用 → 401 并撤销整个家族。
 - `POST /auth/logout`：撤销刷新令牌家族 + 把当前访问令牌 jti 加入撤销集合（立即失效）。
 - `POST /auth/change-password`：首登改密也走这里；成功后返回新令牌（旧令牌立即失效）。
 - `GET /auth/me`：返回主体与权限（前端据此渲染菜单；服务端仍逐请求校验）。
 
-令牌明文只在响应体出现，不写日志/审计（`docs/AGENTS.md` 安全红线）。
+令牌明文只在响应体出现，不写日志/审计（`AGENTS.md` 安全红线）。
 """
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.client_ip import resolve_client_ip
 from app.auth import revocation, service, sessions, tokens
-from app.auth.principal import CurrentPrincipal, OptionalPrincipal
+from app.auth.mfa import decode_mfa_token
+from app.auth.principal import CurrentPrincipal, OptionalPrincipal, get_current_principal
 from app.auth.service import AuthError
+from app.auth.tokens import TokenError
 from app.config import get_settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -64,6 +77,75 @@ class TokenResponse(BaseModel):
     must_change_password: bool
     tenant_id: str | None = None
     roles: list[str] = []
+
+
+class LoginAuthenticatedResponse(TokenResponse):
+    """登录完成（未开启 MFA 或已完成第二步）。"""
+
+    status: Literal["authenticated"] = "authenticated"
+
+
+class MfaRequiredResponse(BaseModel):
+    """已绑定 MFA：进入第二步（不签发会话、不设 Cookie）。"""
+
+    status: Literal["mfa_required"] = "mfa_required"
+    mfa_token: str
+    expires_in: int
+    methods: list[Literal["totp"]] = ["totp"]
+
+
+class MfaEnrollmentRequiredResponse(BaseModel):
+    """平台强制 MFA 且未绑定：返回受限绑定令牌（不签发会话、不设 Cookie）。"""
+
+    status: Literal["mfa_enrollment_required"] = "mfa_enrollment_required"
+    enroll_token: str
+    expires_in: int
+
+
+LoginResponse = Annotated[
+    LoginAuthenticatedResponse | MfaRequiredResponse | MfaEnrollmentRequiredResponse,
+    Field(discriminator="status"),
+]
+
+
+class MfaVerifyRequest(BaseModel):
+    """MFA 第二步校验（TOTP 6 位数字或一次性恢复码）。"""
+
+    mfa_token: str = Field(min_length=8, max_length=4096)
+    code: str = Field(min_length=1, max_length=32)
+
+
+class MfaEnrollRequest(BaseModel):
+    """开始绑定 TOTP；使用访问令牌时必须提供当前密码。"""
+
+    current_password: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class MfaEnrollResponse(BaseModel):
+    """绑定信息（secret 只在此响应出现，不写日志/审计）。"""
+
+    secret: str
+    otpauth_uri: str
+    expires_in: int
+
+
+class MfaActivateRequest(BaseModel):
+    """激活 TOTP：提交 Authenticator 生成的验证码。"""
+
+    code: str = Field(min_length=1, max_length=32)
+
+
+class MfaActivateResponse(TokenResponse):
+    """激活结果：新会话 + 一次性恢复码（仅此响应可见）。"""
+
+    recovery_codes: list[str]
+
+
+class MfaDisableRequest(BaseModel):
+    """关闭 MFA：需要当前密码 + TOTP/恢复码。"""
+
+    current_password: str = Field(min_length=1, max_length=128)
+    code: str = Field(min_length=1, max_length=32)
 
 
 class RefreshRequest(BaseModel):
@@ -130,6 +212,8 @@ class MeResponse(BaseModel):
     must_change_password: bool
     roles: list[str]
     permissions: list[str]
+    mfa_enabled: bool = False
+    mfa_required: bool = False
 
 
 class OkResponse(BaseModel):
@@ -221,9 +305,75 @@ def _token_response(pair: service.TokenPair) -> TokenResponse:
     )
 
 
-@router.post("/login", response_model=TokenResponse, response_model_exclude_none=True)
-async def login(payload: LoginRequest, request: Request, response: Response) -> TokenResponse:
+def _bearer_token(authorization: str | None) -> str:
+    """从 Authorization 头提取 Bearer 令牌（MFA 绑定接口用）。"""
+
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="缺少访问令牌",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="缺少访问令牌",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token
+
+
+async def _resolve_mfa_actor(
+    request: Request, authorization: Annotated[str | None, Header()] = None
+) -> service.MfaActor:
+    """MFA 绑定/激活主体：普通访问令牌，或强制绑定阶段的受限 enroll 令牌。
+
+    访问令牌走完整的每请求校验（撤销、账号状态、token_version、首登门禁）；
+    enroll 令牌只能用于绑定/激活，且仍由服务层校验账号状态与 token_version。
+    """
+
+    try:
+        principal = await get_current_principal(request, authorization)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            raise
+    else:
+        return service.MfaActor(
+            user_id=principal.user_id,
+            realm=principal.realm,
+            tenant_id=principal.tenant_id,
+            from_enroll_token=False,
+        )
+
+    token = _bearer_token(authorization)
+    try:
+        claims = decode_mfa_token(get_settings(), token, expected_purpose="mfa_enroll")
+    except TokenError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=exc.message,
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+    return service.MfaActor(
+        user_id=claims.subject,
+        realm=claims.realm,
+        tenant_id=claims.tenant_id,
+        token_version=claims.token_version,
+        from_enroll_token=True,
+    )
+
+
+MfaActorDep = Annotated[service.MfaActor, Depends(_resolve_mfa_actor)]
+
+
+@router.post("/login", response_model=LoginResponse, response_model_exclude_none=True)
+async def login(payload: LoginRequest, request: Request, response: Response) -> LoginResponse:
     """三端登录。
+
+    - 未开启 MFA：直接返回令牌并下发刷新 Cookie；
+    - 已绑定 MFA：返回 `mfa_required` 与短时挑战令牌，**不签发会话/Cookie**；
+    - 平台强制 MFA 且未绑定：返回 `mfa_enrollment_required` 与绑定令牌。
 
     异常:
         HTTPException: 401 凭证错误（文案统一，不区分账号/学校是否存在）。
@@ -234,7 +384,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     user_agent = request.headers.get("user-agent")
     try:
         if payload.realm == "tenant":
-            pair = await service.login_tenant(
+            outcome = await service.login_tenant(
                 school_code=payload.school_code or "",
                 login_id=payload.login_id or "",
                 password=payload.password,
@@ -243,13 +393,123 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
                 request_id=request_id,
             )
         else:
-            pair = await service.login_platform(
+            outcome = await service.login_platform(
                 account=payload.account or "",
                 password=payload.password,
                 ip=client_ip,
                 user_agent=user_agent,
                 request_id=request_id,
             )
+    except AuthError as exc:
+        raise _http_error(exc) from exc
+
+    if isinstance(outcome, service.MfaChallenge):
+        return MfaRequiredResponse(mfa_token=outcome.mfa_token, expires_in=outcome.expires_in)
+    if isinstance(outcome, service.MfaEnrollmentRequired):
+        return MfaEnrollmentRequiredResponse(
+            enroll_token=outcome.enroll_token, expires_in=outcome.expires_in
+        )
+    _set_refresh_cookie(response, outcome.refresh_token)
+    return LoginAuthenticatedResponse(**_token_response(outcome).model_dump())
+
+
+@router.post("/mfa/verify", response_model=TokenResponse, response_model_exclude_none=True)
+async def verify_mfa(
+    payload: MfaVerifyRequest, request: Request, response: Response
+) -> TokenResponse:
+    """登录第二步：TOTP 或一次性恢复码；成功后签发会话并下发刷新 Cookie。"""
+
+    try:
+        pair = await service.verify_mfa(
+            mfa_token=payload.mfa_token,
+            code=payload.code,
+            ip=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except AuthError as exc:
+        raise _http_error(exc) from exc
+    _set_refresh_cookie(response, pair.refresh_token)
+    return _token_response(pair)
+
+
+@router.post("/mfa/enroll", response_model=MfaEnrollResponse)
+async def enroll_mfa(
+    request: Request,
+    response: Response,
+    actor: MfaActorDep,
+    payload: MfaEnrollRequest | None = None,
+) -> MfaEnrollResponse:
+    """开始绑定 TOTP：返回 secret 与 otpauth URI，10 分钟内完成激活。
+
+    使用访问令牌时必须重新输入当前密码；强制绑定阶段的 enroll 令牌已在登录时
+    校验过密码，可省略。
+    """
+
+    try:
+        enrollment = await service.enroll_mfa(
+            actor=actor,
+            current_password=payload.current_password if payload else None,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except AuthError as exc:
+        raise _http_error(exc) from exc
+    # 响应含 TOTP secret：禁止任何中间层缓存
+    response.headers["Cache-Control"] = "no-store"
+    return MfaEnrollResponse(
+        secret=enrollment.secret,
+        otpauth_uri=enrollment.otpauth_uri,
+        expires_in=enrollment.expires_in,
+    )
+
+
+@router.post("/mfa/activate", response_model=MfaActivateResponse, response_model_exclude_none=True)
+async def activate_mfa(
+    payload: MfaActivateRequest,
+    actor: MfaActorDep,
+    request: Request,
+    response: Response,
+) -> MfaActivateResponse:
+    """激活 TOTP：生成 10 个一次性恢复码，轮换全部会话并下发新刷新 Cookie。"""
+
+    try:
+        activation = await service.activate_mfa(
+            actor=actor,
+            code=payload.code,
+            ip=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except AuthError as exc:
+        raise _http_error(exc) from exc
+    _set_refresh_cookie(response, activation.pair.refresh_token)
+    response.headers["Cache-Control"] = "no-store"
+    return MfaActivateResponse(
+        **_token_response(activation.pair).model_dump(),
+        recovery_codes=activation.recovery_codes,
+    )
+
+
+@router.post("/mfa/disable", response_model=TokenResponse, response_model_exclude_none=True)
+async def disable_mfa(
+    payload: MfaDisableRequest,
+    principal: CurrentPrincipal,
+    request: Request,
+    response: Response,
+) -> TokenResponse:
+    """关闭 MFA：校验密码 + TOTP/恢复码，清空绑定并轮换全部会话。"""
+
+    try:
+        pair = await service.disable_mfa(
+            principal_user_id=principal.user_id,
+            realm=principal.realm,
+            tenant_id=principal.tenant_id,
+            current_password=payload.current_password,
+            code=payload.code,
+            ip=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            request_id=getattr(request.state, "request_id", None),
+        )
     except AuthError as exc:
         raise _http_error(exc) from exc
     _set_refresh_cookie(response, pair.refresh_token)
@@ -382,6 +642,8 @@ async def change_password(
             tenant_id=principal.tenant_id,
             current_password=payload.current_password,
             new_password=payload.new_password,
+            # 保留当前会话的 MFA 完成状态（强制策略下改密不得降级为仅密码会话）
+            mfa_verified=principal.mfa_verified,
             ip=resolve_client_ip(request),
             user_agent=request.headers.get("user-agent"),
             request_id=getattr(request.state, "request_id", None),
@@ -513,6 +775,11 @@ async def revoke_my_session(
 async def me(principal: CurrentPrincipal) -> MeResponse:
     """返回当前主体与权限集合。"""
 
+    mfa_enabled = await service.is_mfa_enabled(
+        realm=principal.realm,
+        tenant_id=principal.tenant_id,
+        user_id=principal.user_id,
+    )
     return MeResponse(
         user_id=str(principal.user_id),
         realm=principal.realm,
@@ -520,4 +787,6 @@ async def me(principal: CurrentPrincipal) -> MeResponse:
         must_change_password=principal.must_change_password,
         roles=sorted(principal.roles),
         permissions=sorted(principal.permissions),
+        mfa_enabled=mfa_enabled,
+        mfa_required=principal.realm == "platform" and get_settings().mfa_require_platform,
     )

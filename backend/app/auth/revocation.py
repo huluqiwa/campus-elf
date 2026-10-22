@@ -23,11 +23,21 @@ from app.config import get_settings
 _KEY_TEMPLATE = "{prefix}:auth:revoked:{realm}:jti:{jti}"
 _SESSION_KEY_TEMPLATE = "{prefix}:auth:session:{realm}:{sid}"
 _RATE_LIMIT_KEY_TEMPLATE = "{prefix}:auth:ratelimit:{scope}:{identity}"
+_MFA_CHALLENGE_KEY_TEMPLATE = "{prefix}:auth:mfa:challenge:{realm}:{jti}"
+_MFA_PENDING_KEY_TEMPLATE = "{prefix}:auth:mfa:pending:{realm}:{user_id}"
 _Realm = Literal["tenant", "platform"]
 _client: aioredis.Redis | None = None
 # Redis 异常不得拖垮已鉴权请求：连接/读写超时短且显式设置（TD-102）
 _SOCKET_TIMEOUT_SECONDS = 2.0
 logger = logging.getLogger(__name__)
+
+
+class RedisUnavailableError(RuntimeError):
+    """MFA 第二步所需的 Redis 状态不可读写。
+
+    会话标记可以 fail-open（由 `token_version` 兜底），但挑战的一次性消费与尝试
+    上限没有数据库兜底，因此 MFA 路径遇到 Redis 故障必须 fail-closed（简报 §3.3）。
+    """
 
 
 def _redis() -> aioredis.Redis:
@@ -165,6 +175,126 @@ async def is_active(jti: str, session_id: UUID, *, realm: _Realm = "tenant") -> 
         logger.warning("Redis 不可用，跳过会话存在性检查（realm=%s）：%s", realm, exc)
         return True
     return values[0] is None and values[1] is not None
+
+
+def _mfa_challenge_key(jti: str, realm: _Realm) -> str:
+    """MFA 挑战状态键（记录尝试次数与是否仍可用）。"""
+
+    return _MFA_CHALLENGE_KEY_TEMPLATE.format(
+        prefix=get_settings().redis_prefix, realm=realm, jti=jti
+    )
+
+
+async def register_mfa_challenge(jti: str, *, realm: _Realm, ttl_seconds: int) -> None:
+    """登记一次登录挑战（密码校验通过后调用）。
+
+    初始计数为 0：`begin_mfa_challenge_attempt` 先自增再判定，保证允许
+    `max_attempts` 次真实尝试（而不是少一次）。
+
+    Redis 故障抛 `RedisUnavailableError`（fail-closed）：挑战状态是尝试上限与
+    单次消费的唯一载体，登记失败却仍签发挑战令牌会让后续 verify 只能给出
+    误导性的"会话过期"，登录应直接返回 503（与 verify 侧口径一致）。
+    """
+
+    try:
+        await _redis().set(_mfa_challenge_key(jti, realm), "0", ex=max(int(ttl_seconds), 1))
+    except RedisError as exc:
+        logger.warning("MFA 挑战登记失败（realm=%s）：%s", realm, exc)
+        raise RedisUnavailableError("MFA 挑战状态不可用") from exc
+
+
+async def begin_mfa_challenge_attempt(
+    jti: str, *, realm: _Realm, ttl_seconds: int, max_attempts: int
+) -> int | None:
+    """开始一次 MFA 校验尝试，返回当前尝试序号；挑战不存在/已用/超限返回 None。
+
+    Redis 故障抛 `RedisUnavailableError`（fail-closed）：挑战的单次消费与尝试上限
+    只存在于 Redis，放行等于两者同时失效（简报 §3.3）。
+    """
+
+    key = _mfa_challenge_key(jti, realm)
+    try:
+        async with _redis().pipeline(transaction=True) as pipe:
+            pipe.exists(key)
+            pipe.incr(key)
+            # 保持登录时设定的剩余 TTL；仅在键缺失时补一个窗口
+            pipe.expire(key, max(int(ttl_seconds), 1), nx=True)
+            exists, count, _ = await pipe.execute()
+    except RedisError as exc:
+        logger.warning("MFA 挑战状态读取失败（realm=%s），拒绝本次校验：%s", realm, exc)
+        raise RedisUnavailableError("MFA 挑战状态不可用") from exc
+    if not int(exists):
+        return None
+    if int(count) > max_attempts:
+        return None
+    return int(count)
+
+
+async def consume_mfa_challenge(jti: str, *, realm: _Realm) -> bool:
+    """原子消费挑战（GETDEL）；返回该挑战此前是否仍存在，Redis 故障抛 `RedisUnavailableError`。
+
+    必须在签发会话的数据库写入之前调用：这样"校验成功但挑战未消费"的状态不存在，
+    同一挑战不可能被二次兑换；若随后的数据库事务失败，用户只需重新登录。
+    """
+
+    key = _mfa_challenge_key(jti, realm)
+    try:
+        consumed = await _redis().getdel(key)
+    except RedisError as exc:
+        logger.warning("MFA 挑战消费失败（realm=%s）：%s", realm, exc)
+        raise RedisUnavailableError("MFA 挑战状态不可用") from exc
+    return consumed is not None
+
+
+def _mfa_pending_key(realm: _Realm, user_id: UUID | str) -> str:
+    """待激活 TOTP 密文的键名（按 realm + 用户，同一账号只保留最新一次绑定）。"""
+
+    return _MFA_PENDING_KEY_TEMPLATE.format(
+        prefix=get_settings().redis_prefix, realm=realm, user_id=user_id
+    )
+
+
+async def store_mfa_pending_secret(
+    ciphertext: str, *, realm: _Realm, user_id: UUID | str, ttl_seconds: int
+) -> bool:
+    """保存待激活的加密 secret（覆盖旧值）；写入失败返回 False。
+
+    与登录降级不同，绑定流程 fail-closed：写不进 Redis 就无法完成激活，
+    应直接告知用户稍后重试，而不是展示一个永远无法激活的 secret。
+    """
+
+    try:
+        await _redis().set(
+            _mfa_pending_key(realm, user_id), ciphertext, ex=max(int(ttl_seconds), 1)
+        )
+    except RedisError as exc:
+        logger.warning("MFA 待激活 secret 写入失败（realm=%s）：%s", realm, exc)
+        return False
+    return True
+
+
+async def get_mfa_pending_secret(*, realm: _Realm, user_id: UUID | str) -> str | None:
+    """读取待激活的加密 secret；不存在返回 None（绑定过期）。
+
+    Redis 故障抛 `RedisUnavailableError`，由调用方返回 503：不能把"服务不可用"
+    说成"绑定已过期"，否则用户会误以为需要重新发起绑定。
+    """
+
+    try:
+        value: str | None = await _redis().get(_mfa_pending_key(realm, user_id))
+        return value
+    except RedisError as exc:
+        logger.warning("MFA 待激活 secret 读取失败（realm=%s）：%s", realm, exc)
+        raise RedisUnavailableError("MFA 待激活密钥不可读") from exc
+
+
+async def delete_mfa_pending_secret(*, realm: _Realm, user_id: UUID | str) -> None:
+    """激活成功或运维重置后删除待激活 secret；失败只告警，由 TTL 兜底。"""
+
+    try:
+        await _redis().delete(_mfa_pending_key(realm, user_id))
+    except RedisError as exc:
+        logger.warning("MFA 待激活 secret 清理失败（realm=%s）：%s", realm, exc)
 
 
 async def allow_rate_limit(scope: str, identity: str, *, limit: int, window_seconds: int) -> bool:

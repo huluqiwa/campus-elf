@@ -53,6 +53,15 @@ class AccessClaims:
     token_version: int
     must_change_password: bool
     expires_at: datetime
+    # 认证方法（RFC 8176）：密码登录 ["pwd"]，完成 MFA 后 ["pwd","totp"]；
+    # 旧令牌无该 claim 时为空集合，按"未完成 MFA"处理
+    amr: frozenset[str] = frozenset()
+
+    @property
+    def mfa_verified(self) -> bool:
+        """该会话是否完成过多因素认证。"""
+
+        return "totp" in self.amr
 
 
 def audience_for(settings: Settings, realm: Realm) -> str:
@@ -70,6 +79,7 @@ def create_access_token(
     family_id: UUID,
     token_version: int,
     must_change_password: bool,
+    amr: tuple[str, ...] = ("pwd",),
     now: datetime | None = None,
 ) -> tuple[str, AccessClaims]:
     """签发访问令牌。
@@ -82,6 +92,7 @@ def create_access_token(
         family_id: 刷新令牌家族 id（访问令牌 `sid`，用于会话级即时失效）。
         token_version: 用户当前版本号（权限/状态变更后自增，旧令牌立即失效）。
         must_change_password: 是否处于"首登必须改密"状态。
+        amr: 认证方法列表；完成 MFA 时为 `("pwd", "totp")`。
         now: 可选当前时间（测试注入）。
 
     返回值:
@@ -107,6 +118,7 @@ def create_access_token(
         "sid": str(family_id),
         "token_version": token_version,
         "must_change_password": must_change_password,
+        "amr": list(amr),
         "iss": settings.jwt_issuer,
         "aud": audience_for(settings, realm),
         "iat": int(issued.timestamp()),
@@ -127,6 +139,7 @@ def create_access_token(
         token_version=token_version,
         must_change_password=must_change_password,
         expires_at=expires_at,
+        amr=frozenset(amr),
     )
     return encoded, claims
 
@@ -190,9 +203,18 @@ def decode_access_token(settings: Settings, token: str) -> AccessClaims:
             token_version=int(payload.get("token_version", -1)),
             must_change_password=bool(payload.get("must_change_password", True)),
             expires_at=datetime.fromtimestamp(int(payload["exp"]), tz=UTC),
+            amr=_parse_amr(payload.get("amr")),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise TokenError("TOKEN_INVALID", "令牌无效") from exc
+
+
+def _parse_amr(value: object) -> frozenset[str]:
+    """解析 `amr` claim；缺失/非字符串列表按未完成 MFA 处理。"""
+
+    if not isinstance(value, list):
+        return frozenset()
+    return frozenset(item for item in value if isinstance(item, str))
 
 
 def generate_refresh_token() -> str:

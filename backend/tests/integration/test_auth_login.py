@@ -14,7 +14,11 @@ from app.auth.principal import get_current_principal
 from app.auth.tokens import create_access_token
 from app.config import Settings, get_settings
 from app.db.session import db_session, dispose_engine
-from tests.support.auth import TEST_PLATFORM_PASSWORD, seed_platform_user
+from tests.support.auth import (
+    TEST_PLATFORM_PASSWORD,
+    as_token_pair,
+    seed_platform_user,
+)
 from tests.support.db import (
     clean_test_data,
     database_url,
@@ -111,8 +115,10 @@ async def test_tenant_login_success_and_failure_audit(auth_env: None) -> None:
 
     tenant_id, user_id = await _seed_tenant_user(login_id="S-1001", password=TENANT_PASSWORD)
 
-    pair = await service.login_tenant(
-        school_code="SCH-AUTHTEST1", login_id="S-1001", password=TENANT_PASSWORD
+    pair = as_token_pair(
+        await service.login_tenant(
+            school_code="SCH-AUTHTEST1", login_id="S-1001", password=TENANT_PASSWORD
+        )
     )
     assert pair.realm == "tenant"
     assert pair.user_id == user_id
@@ -149,8 +155,10 @@ async def test_refresh_rotation_and_reuse_detection(auth_env: None) -> None:
     """刷新轮换旧令牌标记 rotated；旧令牌再次使用 → 撤销整个家族并审计。"""
 
     tenant_id, _ = await _seed_tenant_user(login_id="S-1002", password=TENANT_PASSWORD)
-    pair = await service.login_tenant(
-        school_code="SCH-AUTHTEST1", login_id="S-1002", password=TENANT_PASSWORD
+    pair = as_token_pair(
+        await service.login_tenant(
+            school_code="SCH-AUTHTEST1", login_id="S-1002", password=TENANT_PASSWORD
+        )
     )
 
     rotated = await service.refresh_tokens(refresh_token=pair.refresh_token)
@@ -190,8 +198,10 @@ async def test_logout_revokes_family(auth_env: None) -> None:
     """登出撤销刷新令牌家族，之后刷新失败。"""
 
     _, user_id = await _seed_tenant_user(login_id="S-1003", password=TENANT_PASSWORD)
-    pair = await service.login_tenant(
-        school_code="SCH-AUTHTEST1", login_id="S-1003", password=TENANT_PASSWORD
+    pair = as_token_pair(
+        await service.login_tenant(
+            school_code="SCH-AUTHTEST1", login_id="S-1003", password=TENANT_PASSWORD
+        )
     )
 
     await service.revoke_refresh_family(
@@ -212,8 +222,10 @@ async def test_change_password_revokes_sessions_and_clears_flag(auth_env: None) 
     tenant_id, user_id = await _seed_tenant_user(
         login_id="S-1004", password=TENANT_PASSWORD, must_change_password=True
     )
-    pair = await service.login_tenant(
-        school_code="SCH-AUTHTEST1", login_id="S-1004", password=TENANT_PASSWORD
+    pair = as_token_pair(
+        await service.login_tenant(
+            school_code="SCH-AUTHTEST1", login_id="S-1004", password=TENANT_PASSWORD
+        )
     )
     assert pair.must_change_password is True
 
@@ -268,7 +280,9 @@ async def test_platform_login_and_refresh_use_platform_table(auth_env: None) -> 
     finally:
         await engine.dispose()
 
-    pair = await service.login_platform(account="ops-auth", password=TEST_PLATFORM_PASSWORD)
+    pair = as_token_pair(
+        await service.login_platform(account="ops-auth", password=TEST_PLATFORM_PASSWORD)
+    )
     assert pair.realm == "platform"
     assert pair.tenant_id is None
 
@@ -462,8 +476,10 @@ async def test_logout_requires_valid_refresh_secret(auth_env: None) -> None:
     """登出必须校验刷新令牌 secret：伪造 secret 不能撤销他人家族，审计也不记他人。"""
 
     tenant_id, user_id = await _seed_tenant_user(login_id="S-1007", password=TENANT_PASSWORD)
-    pair = await service.login_tenant(
-        school_code="SCH-AUTHTEST1", login_id="S-1007", password=TENANT_PASSWORD
+    pair = as_token_pair(
+        await service.login_tenant(
+            school_code="SCH-AUTHTEST1", login_id="S-1007", password=TENANT_PASSWORD
+        )
     )
     _, _, jti = service.parse_refresh_token(pair.refresh_token)
 

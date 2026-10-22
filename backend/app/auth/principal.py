@@ -55,6 +55,8 @@ class Principal:
     must_change_password: bool
     roles: frozenset[str]
     permissions: frozenset[str]
+    # 当前会话是否完成过 MFA（来自访问令牌 amr；改密重签时原样保留）
+    mfa_verified: bool = False
 
     def has_permission(self, code: str) -> bool:
         """是否具备某权限码。"""
@@ -259,6 +261,7 @@ async def get_current_principal(
         expires_at=claims.expires_at,
         roles=roles,
         permissions=permissions,
+        mfa_verified=claims.mfa_verified,
     )
 
 

@@ -274,6 +274,70 @@ async def test_cross_tenant_parent_reference_is_rejected(
 
 
 @pytest.mark.asyncio
+async def test_mfa_recovery_codes_are_tenant_isolated(
+    session_factory: async_sessionmaker[AsyncSession],
+    platform_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """恢复码表跨租隔离（spec 关键用例 #9）：A 租连接读不到、也改不动 B 租的恢复码。"""
+
+    tenant_a, tenant_b, user_a, user_b = await _seed_two_tenants(
+        session_factory, platform_session_factory
+    )
+
+    async def seed_code(
+        factory: async_sessionmaker[AsyncSession], tenant_id: UUID, user_id: UUID, code_hash: str
+    ) -> None:
+        async with factory() as session, session.begin():
+            await prepare_tenant_context(session, tenant_id)
+            await session.execute(
+                text(
+                    "insert into mfa_recovery_codes (tenant_id, user_id, code_hash) "
+                    "values (:tid, :uid, :hash)"
+                ),
+                {"tid": tenant_id, "uid": user_id, "hash": code_hash},
+            )
+
+    await seed_code(session_factory, tenant_a, user_a, "hash-a")
+    await seed_code(session_factory, tenant_b, user_b, "hash-b")
+
+    async with session_factory() as session, session.begin():
+        await prepare_tenant_context(session, tenant_a)
+        visible = (
+            await session.execute(
+                text("select code_hash from mfa_recovery_codes order by code_hash")
+            )
+        ).all()
+        cross = (
+            await session.execute(
+                text("select id from mfa_recovery_codes where tenant_id = :tid"),
+                {"tid": tenant_b},
+            )
+        ).all()
+        # 即便显式带 B 租的 user_id 做"消费"更新，RLS 也让它命中 0 行（用不掉别人的码）
+        await session.execute(
+            text(
+                "update mfa_recovery_codes set used_at = now() "
+                "where user_id = :uid and used_at is null"
+            ),
+            {"uid": user_b},
+        )
+
+    assert [row.code_hash for row in visible] == ["hash-a"]
+    assert cross == []
+
+    # B 租的码仍在且未被消费（A 租的连接做的那次 update 命中 0 行）
+    async with session_factory() as session, session.begin():
+        await prepare_tenant_context(session, tenant_b)
+        b_rows = (
+            await session.execute(
+                text("select used_at from mfa_recovery_codes where user_id = :uid"),
+                {"uid": user_b},
+            )
+        ).all()
+    assert len(b_rows) == 1 and b_rows[0].used_at is None
+
+
+@pytest.mark.asyncio
 async def test_context_does_not_leak_across_pooled_connections(
     session_factory: async_sessionmaker[AsyncSession],
     platform_session_factory: async_sessionmaker[AsyncSession],

@@ -1,5 +1,7 @@
 """配置校验测试（生产前提与敏感信息不外泄）。"""
 
+import base64
+
 import pytest
 from pydantic import ValidationError
 
@@ -262,3 +264,41 @@ def test_production_cookie_settings_defaults_are_valid() -> None:
 
     assert settings.auth_refresh_token_in_body is False
     assert settings.auth_cookie_path == "/api/v1/auth"
+
+
+def test_encryption_kek_must_be_base64_32_bytes() -> None:
+    """KEK 在所有环境都必须是 base64 编码的 32 字节（否则启动失败）。"""
+
+    with pytest.raises(ValidationError, match="ENCRYPTION_KEK"):
+        Settings(_env_file=None, encryption_kek="not-base64!!")
+    with pytest.raises(ValidationError, match="ENCRYPTION_KEK"):
+        Settings(
+            _env_file=None,
+            encryption_kek=base64.b64encode(b"x" * 16).decode(),
+        )
+
+
+def test_non_dev_rejects_placeholder_encryption_kek() -> None:
+    """staging/production 拒绝明显占位值的 KEK；development 允许。"""
+
+    placeholder = base64.b64encode(b"change-me" * 3 + b"abcde").decode()
+
+    with pytest.raises(ValidationError, match="占位"):
+        _staging_settings(encryption_kek=placeholder)
+
+    settings = Settings(_env_file=None, encryption_kek=placeholder)
+    assert settings.app_env == "development"
+
+
+def test_mfa_defaults() -> None:
+    """MFA 默认：平台不强制、30 秒步长、±1 步、10 个恢复码。"""
+
+    settings = Settings(_env_file=None)
+
+    assert settings.mfa_require_platform is False
+    assert settings.mfa_totp_interval_seconds == 30
+    assert settings.mfa_totp_window_steps == 1
+    assert settings.mfa_challenge_ttl_seconds == 300
+    assert settings.mfa_challenge_max_attempts == 5
+    assert settings.mfa_recovery_code_count == 10
+    assert "encryption_kek=SecretStr('**********')" in repr(settings)

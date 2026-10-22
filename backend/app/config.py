@@ -3,6 +3,8 @@
 所有配置通过环境变量或 .env 注入；密钥不得写入代码或日志。
 """
 
+import base64
+import binascii
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -74,6 +76,8 @@ class Settings(BaseSettings):
     jwt_audience_platform: str = "campus-elf-platform"
     # 密钥版本（header kid）；轮换时可并存多个 kid，当前签发用 active
     jwt_active_kid: str = "k1"
+    # MFA 挑战/强制绑定令牌的独立 audience（不能当 access token 使用）
+    jwt_audience_mfa: str = "campus-elf-mfa"
     access_token_ttl_seconds: int = 900
     refresh_token_ttl_seconds: int = 604800
     # 同一账号同时保持登录的设备上限：超限踢最久未用（平台账号权限更大，默认更严）
@@ -107,6 +111,22 @@ class Settings(BaseSettings):
     # 重置邮件里的前端链接前缀（confirm 接口由前端调用）；非开发环境必须 HTTPS
     password_reset_url_base: str = "http://127.0.0.1:5173/reset-password"
 
+    # ---------- MFA（M1-D2） ----------
+    # MFA secret 与恢复码派生密钥：base64 编码的 32 字节；只从 .env/密钥管理注入。
+    # 生成：openssl rand -base64 32
+    encryption_kek: SecretStr
+    # 平台 realm 强制 MFA（默认关闭；生产部署可按需开启）。租户用户始终可选。
+    mfa_require_platform: bool = False
+    mfa_totp_issuer: str = "CampusCompanionElf"
+    mfa_totp_interval_seconds: int = Field(default=30, ge=15, le=60)
+    # 允许的时钟偏移（步数）：±1 步 = ±30 秒；0 表示只接受当前步
+    mfa_totp_window_steps: int = Field(default=1, ge=0, le=2)
+    mfa_challenge_ttl_seconds: int = Field(default=300, ge=60, le=900)
+    mfa_enroll_token_ttl_seconds: int = Field(default=600, ge=120, le=1800)
+    # 单次挑战最多尝试次数（失败同时计入 AUTH-05 账号锁定）
+    mfa_challenge_max_attempts: int = Field(default=5, ge=1, le=10)
+    mfa_recovery_code_count: int = Field(default=10, ge=5, le=20)
+
     # 邮件（开发用 MailHog：127.0.0.1:1025；生产由 SMTP 服务商提供）
     smtp_host: str = "127.0.0.1"
     smtp_port: int = 1025
@@ -126,6 +146,38 @@ class Settings(BaseSettings):
     s3_secret_key: SecretStr | None = None
     s3_bucket: str = "campus-elf"
 
+    def _validate_encryption_kek(self) -> None:
+        """校验字段加密密钥：必须是 base64 编码的 32 字节。"""
+
+        raw = self.encryption_kek.get_secret_value().strip()
+        try:
+            decoded = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(
+                "ENCRYPTION_KEK 必须是 base64 编码的 32 字节密钥"
+                "（生成：openssl rand -base64 32）"
+            ) from exc
+        if len(decoded) != 32:
+            raise ValueError(
+                "ENCRYPTION_KEK 必须是 base64 编码的 32 字节密钥"
+                "（生成：openssl rand -base64 32）"
+            )
+        if self.app_env not in {"development", "test"}:
+            # 占位值通常整体不是合法 base64；这里额外检查"被 base64 编码过的占位短语"
+            lowered = raw.lower()
+            lowered_bytes = decoded.lower()
+            markers = (b"change-me", b"changeme", b"placeholder")
+            if "change-me" in lowered or "changeme" in lowered or "placeholder" in lowered:
+                raise ValueError(
+                    f"{self.app_env} 环境 ENCRYPTION_KEK 禁止使用占位值"
+                    "（生成：openssl rand -base64 32）"
+                )
+            if any(marker in lowered_bytes for marker in markers):
+                raise ValueError(
+                    f"{self.app_env} 环境 ENCRYPTION_KEK 禁止使用占位值"
+                    "（生成：openssl rand -base64 32）"
+                )
+
     @model_validator(mode="after")
     def _require_production_safety(self) -> "Settings":
         """生产环境必须满足的两类前提，避免带着开发形态上线。
@@ -134,6 +186,8 @@ class Settings(BaseSettings):
         2. 开发专用开关必须关闭——空壳 Loop 无认证，开启即等于开放未鉴权入口
            （"生产开关可绕过"按审查清单属阻塞项）。
         """
+
+        self._validate_encryption_kek()
 
         reset_url = urlsplit(self.password_reset_url_base)
         if (

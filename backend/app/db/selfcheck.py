@@ -27,6 +27,7 @@ REQUIRED_RLS_TABLES: tuple[str, ...] = (
     "refresh_tokens",
     "password_history",
     "password_reset_tokens",
+    "mfa_recovery_codes",
     "audit_logs",
 )
 

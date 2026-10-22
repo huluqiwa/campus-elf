@@ -5,6 +5,7 @@
    终止整个测试会话（而不是静默 skip，让租户隔离用例在流水线里"消失"）。
 """
 
+import base64
 import os
 
 import pytest
@@ -12,6 +13,8 @@ import pytest
 os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/15")
 # 认证密钥：单元/集成测试不作为密钥强度验证对象（生产由配置校验强制 ≥32 字节且非占位值）
 os.environ.setdefault("JWT_SECRET", "test-only-jwt-secret-0123456789abcdef")
+# 字段加密测试密钥：固定 32 字节 base64，仅用于测试库中的 MFA secret 往返
+os.environ.setdefault("ENCRYPTION_KEK", base64.b64encode(b"0" * 32).decode())
 # 本机服务（PG/Redis/Qdrant/MailHog）不得走系统代理：httpx 在 Windows 会读注册表代理设置，
 # 若不绕过，127.0.0.1 的请求会被发到代理端口（表现为连接被拒）。
 for _proxy_key in ("NO_PROXY", "no_proxy"):

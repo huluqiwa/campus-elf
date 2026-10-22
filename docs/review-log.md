@@ -287,6 +287,18 @@
 - 最终门禁：后端 **348 passed**、`ruff check`/`mypy`（106 文件）/`alembic check` 全绿；前端 **25 单测 + 22 E2E**、lint/format/typecheck/build 全绿。
 - 远端 CI：`backend` #39669833089 success、`frontend` #39669067278 success、`security` #39669833371 success（首轮 #39669067241 因 bandit 将 10 条密码表 SQL 字面量误报 B105 失败；仅对这些 SQL 行加 `# nosec B105` 后通过）；`evals` 未触发（无相关路径改动）。
 
+### M1-D2 MFA（两步验证）：两轮审查与修复（2026-10-22）
+
+- 交付：迁移 `c4d6e8f0a2b3`（`users`/`platform_users` 加 `mfa_last_used_step`；两侧刷新令牌加 `mfa_verified` 与 `mfa_change` 撤销原因；新增 `mfa_recovery_codes`（RLS）与 `platform_mfa_recovery_codes`，只存 HMAC 摘要）；`app/security/{encryption,totp}.py`（AES-256-GCM + realm/user AAD、HKDF 子密钥、TOTP、恢复码）；`app/auth/mfa.py`（`aud=campus-elf-mfa` 的挑战/绑定短时令牌）；`POST /auth/mfa/verify|enroll|activate|disable`；登录改为 `TokenPair | MfaChallenge | MfaEnrollmentRequired` 三态（密码正确但未过第二步时不签发任何令牌/Cookie）；强制策略仅平台运营账号（`MFA_REQUIRE_PLATFORM`，默认 false）；启用/关闭 MFA 轮换全部会话（`token_version+1` + 撤销所有刷新家族 `mfa_change` + 删除 Redis 会话标记 + 重新签发）；admin 端 TOTP 登录 + 强制绑定页 + 安全设置页（二维码本地生成）；campus 端仅 TOTP 登录步骤；审计 `auth.mfa.enrollment_started`/`activated`/`enrollment_failed`/`activation_failed`/`recovery_used`/`secret_invalid`/`disabled`/`disable_failed`。
+- 第一轮独立审查：**不通过**（0 Blocker + 1 Major + 4 Minor）。
+  - Major：`mfa_recovery_codes` 只有 RLS 策略登记，缺少真实的跨租户隔离用例（A 租户上下文能否读到/消费 B 租户恢复码）。
+  - Minor：`decode_mfa_token` 未拒绝"平台 realm 却带 tenant_id"的令牌（创建侧有守卫、解析侧没有，纵深不一致）；`verify_mfa` 注释与实际消费顺序描述不一致（易被误读为水印先于投递）；登录时挑战注册失败只写 warning（与校验侧 fail-closed 不一致，会把 Redis 故障推迟成用户侧更难解释的错误）；恢复码熵偏低（10×32 字母表 ≈ 50 bit）需登记处置。
+- 第一轮修复：新增 `test_mfa_recovery_codes_are_tenant_isolated`（A 上下文只见自己的摘要、跨租 select 为空、A 发起的 UPDATE 命中 0 行且 B 的 `used_at` 仍为 NULL）；`decode_mfa_token` 补 realm/tenant 组合守卫并加"手工伪造令牌被拒"单元测试；`verify_mfa` 注释改为明确"GETDEL 是投递前的唯一闸门，`challenge_live=False` 时水印/恢复码写入随事务回滚"；`register_mfa_challenge` 在 Redis 不可用时抛 `RedisUnavailableError`，两处登录调用点转 `MFA_UNAVAILABLE`/503，并补 fail-closed 回归（恢复后登录可继续、期间无刷新令牌落库）；恢复码熵登记 TD-135（已延后 M6，与 TD-129 再生成能力一并处理）。
+- 复测（第二轮复审前）：后端 **411 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（116 文件）无问题、`alembic check` 无漂移、head=`c4d6e8f0a2b3`；前端 typecheck/lint/prettier/build 全绿、api-client **32 单测**、Playwright **28 E2E**。
+- 第二轮复审：**通过**（0 Blocker / 0 Major）。确认 Major 已闭环、三项 Minor 修复正确，未发现新缺陷；硬性不变量成立（未完成第二步不发会话/Cookie、secret 与恢复码明文只在激活响应出现一次且 `Cache-Control: no-store`、二维码本地渲染、待激活密钥仅存 Redis 并 fail-closed、Redis 故障 503 不降级为密码单因素）。
+- 最终门禁：后端 **411 passed**、`ruff`/`mypy`（116 文件）/`alembic check` 全绿；前端 **32 单测 + 28 E2E**、lint/format/typecheck/build 全绿。
+- 远端 CI：待推送后回填。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

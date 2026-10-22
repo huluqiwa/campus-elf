@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 
 import anyio
 from sqlalchemy import text
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.writer import append_audit
@@ -30,6 +31,11 @@ from app.auth.lockout import (
     LockoutState,
     is_account_locked,
     register_login_failure,
+)
+from app.auth.mfa import (
+    MFA_INVALID_MESSAGE,
+    create_mfa_token,
+    decode_mfa_token,
 )
 from app.auth.passwords import (
     MAX_PASSWORD_BYTES,
@@ -53,6 +59,18 @@ from app.auth.tokens import (
 from app.config import Settings, get_settings
 from app.db.session import db_session
 from app.integrations.mail import build_mailer, render_password_reset_email
+from app.security.encryption import (
+    SecretDecryptError,
+    SecretEncryptionError,
+    decode_kek,
+    decrypt_secret,
+    encrypt_secret,
+    generate_recovery_codes,
+    hash_recovery_code,
+    mfa_aad,
+    recovery_code_subkey,
+)
+from app.security.totp import generate_totp_secret, totp_uri, verify_totp
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +99,7 @@ _SQL: dict[Realm, dict[str, str]] = {
         ),
         "select_refresh": (
             "select id, user_id as user_id, family_id, token_hash, expires_at, revoked_at, "
-            "revoked_reason, rotated_to_jti, device_label from refresh_tokens "
+            "revoked_reason, rotated_to_jti, device_label, mfa_verified from refresh_tokens "
             "where tenant_id = :tid and jti = :jti"
         ),
         "family_revoked": (
@@ -117,7 +135,7 @@ _SQL: dict[Realm, dict[str, str]] = {
         ),
         "select_login": (
             "select id, status, password_hash, token_version, must_change_password, "
-            "failed_login_attempts, failed_login_window_started_at, locked_until "
+            "mfa_enabled, failed_login_attempts, failed_login_window_started_at, locked_until "
             "from users where tenant_id = :tid and login_id = :login"
         ),
         "update_login_failure": (
@@ -187,6 +205,48 @@ _SQL: dict[Realm, dict[str, str]] = {
             "update password_reset_tokens set used_at = now() "  # nosec B105 - SQL 文本，非口令
             "where tenant_id = :tid and id = :id and used_at is null returning id"
         ),
+        "select_mfa_state": (
+            "select status, token_version, must_change_password, mfa_enabled, mfa_secret_enc, "
+            "mfa_last_used_step, failed_login_attempts, failed_login_window_started_at, "
+            "locked_until, login_id from users where tenant_id = :tid and id = :uid"
+        ),
+        "select_mfa_enabled": (
+            "select mfa_enabled from users where tenant_id = :tid and id = :uid"
+        ),
+        "enable_mfa": (
+            "update users set mfa_enabled = true, mfa_secret_enc = :enc, "
+            "mfa_last_used_step = :step, failed_login_attempts = 0, "
+            "failed_login_window_started_at = null, locked_until = null, "
+            "token_version = token_version + 1, updated_at = now() "
+            "where tenant_id = :tid and id = :uid returning token_version"
+        ),
+        "disable_mfa": (
+            "update users set mfa_enabled = false, mfa_secret_enc = null, "
+            "mfa_last_used_step = null, failed_login_attempts = 0, "
+            "failed_login_window_started_at = null, locked_until = null, "
+            "token_version = token_version + 1, updated_at = now() "
+            "where tenant_id = :tid and id = :uid returning token_version"
+        ),
+        "insert_recovery_code": (
+            "insert into mfa_recovery_codes (tenant_id, user_id, code_hash) "
+            "values (:tid, :uid, :hash)"
+        ),
+        "delete_recovery_codes": (
+            "delete from mfa_recovery_codes where tenant_id = :tid and user_id = :uid"
+        ),
+        "update_mfa_step": (
+            "update users set mfa_last_used_step = :step, updated_at = now() "
+            "where tenant_id = :tid and id = :uid "
+            "and (mfa_last_used_step is null or mfa_last_used_step < :step) returning id"
+        ),
+        "select_recovery_code": (
+            "select id from mfa_recovery_codes "
+            "where tenant_id = :tid and user_id = :uid and code_hash = :hash and used_at is null"
+        ),
+        "consume_recovery_code": (
+            "update mfa_recovery_codes set used_at = now() "
+            "where tenant_id = :tid and id = :id and used_at is null returning id"
+        ),
     },
     "platform": {
         "revoke_family": (
@@ -196,7 +256,7 @@ _SQL: dict[Realm, dict[str, str]] = {
         ),
         "select_refresh": (
             "select id, platform_user_id as user_id, family_id, token_hash, expires_at, "
-            "revoked_at, revoked_reason, rotated_to_jti, device_label "
+            "revoked_at, revoked_reason, rotated_to_jti, device_label, mfa_verified "
             "from platform_refresh_tokens where jti = :jti"
         ),
         "family_revoked": (
@@ -228,7 +288,7 @@ _SQL: dict[Realm, dict[str, str]] = {
         ),
         "select_login": (
             "select id, status, password_hash, token_version, must_change_password, "
-            "failed_login_attempts, failed_login_window_started_at, locked_until "
+            "mfa_enabled, failed_login_attempts, failed_login_window_started_at, locked_until "
             "from platform_users where account = :login"
         ),
         "update_login_failure": (
@@ -292,7 +352,47 @@ _SQL: dict[Realm, dict[str, str]] = {
             "from platform_password_reset_tokens where token_hash = :hash"
         ),
         "consume_reset_token": (
-            "update platform_password_reset_tokens set used_at = now() "  # nosec B105 - SQL 文本，非口令
+            "update platform_password_reset_tokens set used_at = now() "  # nosec B105 - SQL 文本
+            "where id = :id and used_at is null returning id"
+        ),
+        "select_mfa_state": (
+            "select status, token_version, must_change_password, mfa_enabled, mfa_secret_enc, "
+            "mfa_last_used_step, failed_login_attempts, failed_login_window_started_at, "
+            "locked_until, account as login_id from platform_users where id = :uid"
+        ),
+        "select_mfa_enabled": "select mfa_enabled from platform_users where id = :uid",
+        "enable_mfa": (
+            "update platform_users set mfa_enabled = true, mfa_secret_enc = :enc, "
+            "mfa_last_used_step = :step, failed_login_attempts = 0, "
+            "failed_login_window_started_at = null, locked_until = null, "
+            "token_version = token_version + 1, updated_at = now() "
+            "where id = :uid returning token_version"
+        ),
+        "disable_mfa": (
+            "update platform_users set mfa_enabled = false, mfa_secret_enc = null, "
+            "mfa_last_used_step = null, failed_login_attempts = 0, "
+            "failed_login_window_started_at = null, locked_until = null, "
+            "token_version = token_version + 1, updated_at = now() "
+            "where id = :uid returning token_version"
+        ),
+        "insert_recovery_code": (
+            "insert into platform_mfa_recovery_codes (platform_user_id, code_hash) "
+            "values (:uid, :hash)"
+        ),
+        "delete_recovery_codes": (
+            "delete from platform_mfa_recovery_codes where platform_user_id = :uid"
+        ),
+        "update_mfa_step": (
+            "update platform_users set mfa_last_used_step = :step, updated_at = now() "
+            "where id = :uid "
+            "and (mfa_last_used_step is null or mfa_last_used_step < :step) returning id"
+        ),
+        "select_recovery_code": (
+            "select id from platform_mfa_recovery_codes "
+            "where platform_user_id = :uid and code_hash = :hash and used_at is null"
+        ),
+        "consume_recovery_code": (
+            "update platform_mfa_recovery_codes set used_at = now() "
             "where id = :id and used_at is null returning id"
         ),
     },
@@ -306,16 +406,18 @@ def _refresh_insert_sql(realm: Realm) -> str:
         return (
             "insert into refresh_tokens "
             "(id, tenant_id, user_id, jti, family_id, token_hash, expires_at, "
-            "last_seen_at, device_label, ua_hash, ip_hash) "
+            "last_seen_at, device_label, ua_hash, ip_hash, mfa_verified) "
             "values (gen_random_uuid(), :tenant_id, :user_id, :jti, :family_id, "
-            ":token_hash, :expires_at, :last_seen_at, :device_label, :ua_hash, :ip_hash)"
+            ":token_hash, :expires_at, :last_seen_at, :device_label, :ua_hash, :ip_hash, "
+            ":mfa_verified)"
         )
     return (
         "insert into platform_refresh_tokens "
         "(id, platform_user_id, jti, family_id, token_hash, expires_at, "
-        "last_seen_at, device_label, ua_hash, ip_hash) "
+        "last_seen_at, device_label, ua_hash, ip_hash, mfa_verified) "
         "values (gen_random_uuid(), :user_id, :jti, :family_id, "
-        ":token_hash, :expires_at, :last_seen_at, :device_label, :ua_hash, :ip_hash)"
+        ":token_hash, :expires_at, :last_seen_at, :device_label, :ua_hash, :ip_hash, "
+        ":mfa_verified)"
     )
 
 
@@ -332,6 +434,62 @@ class TokenPair:
     session_id: UUID
     must_change_password: bool
     roles: frozenset[str] = frozenset()
+    # 本会话是否完成过 MFA（写入刷新行并体现在访问令牌 amr；改密重签时保留）
+    mfa_verified: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class MfaChallenge:
+    """密码正确、已绑定 MFA：返回短时挑战令牌（不签发会话、不设 Cookie）。"""
+
+    mfa_token: str
+    expires_in: int
+    realm: Realm
+
+
+@dataclass(frozen=True, slots=True)
+class MfaEnrollmentRequired:
+    """平台强制 MFA 且账号未绑定：返回受限绑定令牌（不签发会话、不设 Cookie）。"""
+
+    enroll_token: str
+    expires_in: int
+    realm: Realm
+
+
+LoginOutcome = TokenPair | MfaChallenge | MfaEnrollmentRequired
+
+
+@dataclass(frozen=True, slots=True)
+class MfaActor:
+    """MFA 绑定/激活的操作主体。
+
+    来源有两种：普通访问令牌（已登录用户）或受限 `mfa_enroll` 令牌
+    （平台强制绑定但尚未签发会话）。`token_version` 仅对后者有意义，
+    用于识别改密/停用后过期的绑定令牌。
+    """
+
+    user_id: UUID
+    realm: Realm
+    tenant_id: UUID | None
+    token_version: int | None = None
+    from_enroll_token: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class MfaEnrollment:
+    """一次绑定的待验证信息（secret/URI 只在响应中出现一次）。"""
+
+    secret: str
+    otpauth_uri: str
+    expires_in: int
+
+
+@dataclass(frozen=True, slots=True)
+class MfaActivation:
+    """激活结果：新会话 + 一次性恢复码明文。"""
+
+    pair: TokenPair
+    recovery_codes: list[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +565,18 @@ def _invalid_credentials() -> AuthError:
     return AuthError("INVALID_CREDENTIALS", INVALID_CREDENTIALS_MESSAGE, 401)
 
 
+def _mfa_invalid_challenge() -> AuthError:
+    """MFA 挑战/绑定令牌失效的统一错误（不泄露账号状态）。"""
+
+    return AuthError("MFA_LOGIN_EXPIRED", MFA_INVALID_MESSAGE, 401)
+
+
+def _mfa_unavailable() -> AuthError:
+    """MFA 依赖的 Redis 状态不可用：fail-closed，不签发会话也不改变账号状态。"""
+
+    return AuthError("MFA_UNAVAILABLE", "多因素认证暂不可用，请稍后重试", 503)
+
+
 def _build_refresh_token(realm: Realm, jti: UUID, tenant_id: UUID | None) -> str:
     """构造刷新令牌串（含定位信息，secret 为唯一凭证）。"""
 
@@ -453,6 +623,7 @@ async def _issue_tokens(
     family_id: UUID | None = None,
     device_label: str | None = None,
     roles: frozenset[str] = frozenset(),
+    mfa_verified: bool = False,
 ) -> TokenPair:
     """签发访问令牌并写入新的刷新令牌行（同一事务）。"""
 
@@ -467,6 +638,7 @@ async def _issue_tokens(
         family_id=family,
         token_version=token_version,
         must_change_password=must_change_password,
+        amr=("pwd", "totp") if mfa_verified else ("pwd",),
     )
     now = datetime.now(UTC)
     expires_at = now + timedelta(seconds=settings.refresh_token_ttl_seconds)
@@ -480,6 +652,7 @@ async def _issue_tokens(
         "device_label": device_label,
         "ua_hash": ua_hash,
         "ip_hash": ip_hash,
+        "mfa_verified": mfa_verified,
     }
     if realm == "tenant":
         params["tenant_id"] = tenant_id
@@ -494,6 +667,7 @@ async def _issue_tokens(
         session_id=family,
         must_change_password=must_change_password,
         roles=roles,
+        mfa_verified=mfa_verified,
     )
 
 
@@ -536,6 +710,17 @@ def _weak_password(message: str) -> AuthError:
     """统一的新密码不合规错误（422）。"""
 
     return AuthError("WEAK_PASSWORD", message, 422)
+
+
+async def is_mfa_enabled(*, realm: Realm, tenant_id: UUID | None, user_id: UUID) -> bool:
+    """读取账号当前是否已启用 MFA（`/auth/me` 展示用）。"""
+
+    async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+        value = await session.scalar(
+            text(_SQL[realm]["select_mfa_enabled"]),
+            {"uid": user_id, **_scope_params(realm, tenant_id)},
+        )
+    return bool(value)
 
 
 def _validate_new_password(new_password: str, *, login_id: str) -> None:
@@ -686,7 +871,7 @@ async def login_tenant(
     ip: str | None = None,
     user_agent: str | None = None,
     request_id: str | None = None,
-) -> TokenPair:
+) -> LoginOutcome:
     """校方 B 端 / C 端登录（学校编号 + 学号/工号 + 密码）。
 
     失败路径：先在事务内判定，**退出事务后**单独写失败审计再抛错（否则审计会随回滚丢失）。
@@ -728,7 +913,7 @@ async def login_tenant(
         raise _invalid_credentials()
 
     tenant_id: UUID = tenant_row["id"]
-    pair: TokenPair | None = None
+    outcome: LoginOutcome | None = None
     kicked: list[UUID] = []
     failure_reason = "invalid_password"
     failure_state: LockoutState | None = None
@@ -781,51 +966,76 @@ async def login_tenant(
             )
 
         if user_row is not None and password_ok and user_row["status"] == "active" and not locked:
-            if (
-                int(user_row["failed_login_attempts"])
-                or user_row["failed_login_window_started_at"] is not None
-                or user_row["locked_until"] is not None
-            ):
-                await _clear_login_failures(
-                    session, realm="tenant", tenant_id=tenant_id, user_id=user_row["id"]
+            if bool(user_row["mfa_enabled"]):
+                # 密码通过但还需 TOTP：不清失败计数、不占会话名额、不签发会话
+                mfa_token, challenge_jti = create_mfa_token(
+                    settings,
+                    purpose="mfa_challenge",
+                    user_id=user_row["id"],
+                    realm="tenant",
+                    tenant_id=tenant_id,
+                    token_version=int(user_row["token_version"]),
                 )
-            kicked = await session_store.enforce_limit(
-                session,
-                realm="tenant",
-                tenant_id=tenant_id,
-                user_id=user_row["id"],
-                limit=settings.max_sessions_per_user_tenant,
-                request_id=request_id,
-            )
-            pair = await _issue_tokens(
-                settings,
-                realm="tenant",
-                user_id=user_row["id"],
-                tenant_id=tenant_id,
-                token_version=int(user_row["token_version"]),
-                must_change_password=bool(user_row["must_change_password"]),
-                ip_hash=ip_hash,
-                ua_hash=ua_hash,
-                session=session,
-                device_label=device_label,
-                roles=roles,
-            )
-            await append_audit(
-                session,
-                action="auth.login.success",
-                resource_type="auth",
-                actor_realm="tenant",
-                actor_id=user_row["id"],
-                tenant_id=tenant_id,
-                metadata={
-                    "login_masked": login[:1] + "***",
-                    "ip_hash": ip_hash,
-                    "ua_hash": ua_hash,
-                },
-                request_id=request_id,
-            )
-            # 标记在事务内登记：撤销方串行化后不会再被"提交后补写"复活
-            await revocation.register_session(pair.session_id, realm="tenant")
+                try:
+                    await revocation.register_mfa_challenge(
+                        str(challenge_jti),
+                        realm="tenant",
+                        ttl_seconds=settings.mfa_challenge_ttl_seconds,
+                    )
+                except revocation.RedisUnavailableError as exc:
+                    raise _mfa_unavailable() from exc
+                outcome = MfaChallenge(
+                    mfa_token=mfa_token,
+                    expires_in=settings.mfa_challenge_ttl_seconds,
+                    realm="tenant",
+                )
+            else:
+                if (
+                    int(user_row["failed_login_attempts"])
+                    or user_row["failed_login_window_started_at"] is not None
+                    or user_row["locked_until"] is not None
+                ):
+                    await _clear_login_failures(
+                        session, realm="tenant", tenant_id=tenant_id, user_id=user_row["id"]
+                    )
+                kicked = await session_store.enforce_limit(
+                    session,
+                    realm="tenant",
+                    tenant_id=tenant_id,
+                    user_id=user_row["id"],
+                    limit=settings.max_sessions_per_user_tenant,
+                    request_id=request_id,
+                )
+                outcome = await _issue_tokens(
+                    settings,
+                    realm="tenant",
+                    user_id=user_row["id"],
+                    tenant_id=tenant_id,
+                    token_version=int(user_row["token_version"]),
+                    must_change_password=bool(user_row["must_change_password"]),
+                    ip_hash=ip_hash,
+                    ua_hash=ua_hash,
+                    session=session,
+                    device_label=device_label,
+                    roles=roles,
+                )
+                await append_audit(
+                    session,
+                    action="auth.login.success",
+                    resource_type="auth",
+                    actor_realm="tenant",
+                    actor_id=user_row["id"],
+                    tenant_id=tenant_id,
+                    metadata={
+                        "login_masked": login[:1] + "***",
+                        "ip_hash": ip_hash,
+                        "ua_hash": ua_hash,
+                        "mfa": False,
+                    },
+                    request_id=request_id,
+                )
+                # 标记在事务内登记：撤销方串行化后不会再被"提交后补写"复活
+                await revocation.register_session(outcome.session_id, realm="tenant")
         elif failure_reason == "invalid_password" and user_row is not None:
             failure_state = await _apply_login_failure(
                 session,
@@ -843,7 +1053,7 @@ async def login_tenant(
                 now=now,
             )
 
-    if pair is None:
+    if outcome is None:
         async with db_session(tenant_id=tenant_id) as audit_session:
             metadata: dict[str, object] = {
                 "login_masked": login[:1] + "***",
@@ -866,10 +1076,13 @@ async def login_tenant(
             )
         raise _invalid_credentials()
 
+    if isinstance(outcome, (MfaChallenge, MfaEnrollmentRequired)):
+        return outcome
+
     # 事务已提交（新标记已在事务内登记）：清理被踢设备的标记；失败只告警，
     # 这些 family 已在数据库撤销，刷新令牌无法再用。
     await revocation.delete_sessions(kicked, realm="tenant")
-    return pair
+    return outcome
 
 
 async def login_platform(
@@ -879,7 +1092,7 @@ async def login_platform(
     ip: str | None = None,
     user_agent: str | None = None,
     request_id: str | None = None,
-) -> TokenPair:
+) -> LoginOutcome:
     """平台账号登录。
 
     异常:
@@ -891,7 +1104,7 @@ async def login_platform(
     ip_hash = hash_client_fingerprint(ip)
     ua_hash = hash_client_fingerprint(user_agent)
     device_label = session_store.device_label_from_user_agent(user_agent)
-    pair: TokenPair | None = None
+    outcome: LoginOutcome | None = None
     kicked: list[UUID] = []
     failure_reason = "invalid_password"
     failure_state: LockoutState | None = None
@@ -933,45 +1146,90 @@ async def login_platform(
             roles = await _load_roles(session, realm="platform", tenant_id=None, user_id=row["id"])
 
         if row is not None and password_ok and row["status"] == "active" and not locked:
-            if (
-                int(row["failed_login_attempts"])
-                or row["failed_login_window_started_at"] is not None
-                or row["locked_until"] is not None
-            ):
-                await _clear_login_failures(
-                    session, realm="platform", tenant_id=None, user_id=row["id"]
+            mfa_required = bool(row["mfa_enabled"]) or settings.mfa_require_platform
+            if mfa_required:
+                # 密码通过但需 MFA/绑定：不签会话、不清失败计数、不占会话名额
+                if bool(row["mfa_enabled"]):
+                    mfa_token, challenge_jti = create_mfa_token(
+                        settings,
+                        purpose="mfa_challenge",
+                        user_id=row["id"],
+                        realm="platform",
+                        tenant_id=None,
+                        token_version=int(row["token_version"]),
+                    )
+                    try:
+                        await revocation.register_mfa_challenge(
+                            str(challenge_jti),
+                            realm="platform",
+                            ttl_seconds=settings.mfa_challenge_ttl_seconds,
+                        )
+                    except revocation.RedisUnavailableError as exc:
+                        raise _mfa_unavailable() from exc
+                    outcome = MfaChallenge(
+                        mfa_token=mfa_token,
+                        expires_in=settings.mfa_challenge_ttl_seconds,
+                        realm="platform",
+                    )
+                else:
+                    enroll_token, _ = create_mfa_token(
+                        settings,
+                        purpose="mfa_enroll",
+                        user_id=row["id"],
+                        realm="platform",
+                        tenant_id=None,
+                        token_version=int(row["token_version"]),
+                    )
+                    outcome = MfaEnrollmentRequired(
+                        enroll_token=enroll_token,
+                        expires_in=settings.mfa_enroll_token_ttl_seconds,
+                        realm="platform",
+                    )
+            else:
+                if (
+                    int(row["failed_login_attempts"])
+                    or row["failed_login_window_started_at"] is not None
+                    or row["locked_until"] is not None
+                ):
+                    await _clear_login_failures(
+                        session, realm="platform", tenant_id=None, user_id=row["id"]
+                    )
+                kicked = await session_store.enforce_limit(
+                    session,
+                    realm="platform",
+                    tenant_id=None,
+                    user_id=row["id"],
+                    limit=settings.max_sessions_per_user_platform,
+                    request_id=request_id,
                 )
-            kicked = await session_store.enforce_limit(
-                session,
-                realm="platform",
-                tenant_id=None,
-                user_id=row["id"],
-                limit=settings.max_sessions_per_user_platform,
-                request_id=request_id,
-            )
-            pair = await _issue_tokens(
-                settings,
-                realm="platform",
-                user_id=row["id"],
-                tenant_id=None,
-                token_version=int(row["token_version"]),
-                must_change_password=bool(row["must_change_password"]),
-                ip_hash=ip_hash,
-                ua_hash=ua_hash,
-                session=session,
-                device_label=device_label,
-                roles=roles,
-            )
-            await append_audit(
-                session,
-                action="auth.login.success",
-                resource_type="auth",
-                actor_realm="platform",
-                actor_id=row["id"],
-                metadata={"realm": "platform", "ip_hash": ip_hash, "ua_hash": ua_hash},
-                request_id=request_id,
-            )
-            await revocation.register_session(pair.session_id, realm="platform")
+                outcome = await _issue_tokens(
+                    settings,
+                    realm="platform",
+                    user_id=row["id"],
+                    tenant_id=None,
+                    token_version=int(row["token_version"]),
+                    must_change_password=bool(row["must_change_password"]),
+                    ip_hash=ip_hash,
+                    ua_hash=ua_hash,
+                    session=session,
+                    device_label=device_label,
+                    roles=roles,
+                )
+                await append_audit(
+                    session,
+                    action="auth.login.success",
+                    resource_type="auth",
+                    actor_realm="platform",
+                    actor_id=row["id"],
+                    metadata={
+                        "realm": "platform",
+                        "ip_hash": ip_hash,
+                        "ua_hash": ua_hash,
+                        "mfa": False,
+                    },
+                    request_id=request_id,
+                )
+                await revocation.register_session(outcome.session_id, realm="platform")
         elif failure_reason == "invalid_password" and row is not None:
             failure_state = await _apply_login_failure(
                 session,
@@ -987,7 +1245,7 @@ async def login_platform(
                 now=now,
             )
 
-    if pair is None:
+    if outcome is None:
         async with db_session(platform=True) as audit_session:
             metadata: dict[str, object] = {
                 "realm": "platform",
@@ -1010,7 +1268,1047 @@ async def login_platform(
             )
         raise _invalid_credentials()
 
+    if isinstance(outcome, (MfaChallenge, MfaEnrollmentRequired)):
+        return outcome
+
     await revocation.delete_sessions(kicked, realm="platform")
+    return outcome
+
+
+async def _consume_recovery_code(
+    session: AsyncSession,
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    user_id: UUID,
+    code: str,
+    subkey: bytes,
+) -> bool:
+    """匹配并消费一次性恢复码（条件更新保证并发下只成功一次）。"""
+
+    try:
+        digest = hash_recovery_code(code, subkey=subkey, realm=realm, user_id=user_id)
+    except ValueError:
+        # 格式不是恢复码（如 6 位 TOTP）：按不匹配处理
+        return False
+    params: dict[str, object] = {"uid": user_id, "hash": digest}
+    params.update(_scope_params(realm, tenant_id))
+    row = (await session.execute(text(_SQL[realm]["select_recovery_code"]), params)).first()
+    if row is None:
+        return False
+    consumed = (
+        await session.execute(
+            text(_SQL[realm]["consume_recovery_code"]),
+            {"id": row[0], **_scope_params(realm, tenant_id)},
+        )
+    ).first()
+    return consumed is not None
+
+
+async def verify_mfa(
+    *,
+    mfa_token: str,
+    code: str,
+    ip: str | None = None,
+    user_agent: str | None = None,
+    request_id: str | None = None,
+) -> TokenPair:
+    """完成登录第二步（TOTP 或恢复码），成功后签发 `mfa_verified=true` 的会话。
+
+    校验顺序：挑战令牌 → Redis 尝试次数 → 用户锁 → 重读账号状态 → 解密 secret
+    → TOTP（含重放水位）或恢复码。验证码错误计入 AUTH-05 锁定；MFA 解密失败
+    fail-closed（500），不签发会话。
+
+    异常:
+        AuthError: 挑战失效/已用（401）、验证码错误/锁定（401，与密码错误同文案）、
+            账号不可用（401）、MFA 密钥损坏（500）。
+    """
+
+    settings = get_settings()
+    try:
+        claims = decode_mfa_token(settings, mfa_token, expected_purpose="mfa_challenge")
+    except TokenError as exc:
+        raise _mfa_invalid_challenge() from exc
+
+    try:
+        attempt = await revocation.begin_mfa_challenge_attempt(
+            str(claims.jti),
+            realm=claims.realm,
+            ttl_seconds=settings.mfa_challenge_ttl_seconds,
+            max_attempts=settings.mfa_challenge_max_attempts,
+        )
+    except revocation.RedisUnavailableError as exc:
+        raise _mfa_unavailable() from exc
+    if attempt is None:
+        raise _mfa_invalid_challenge()
+
+    realm = claims.realm
+    tenant_id = claims.tenant_id
+    ip_hash = hash_client_fingerprint(ip)
+    ua_hash = hash_client_fingerprint(user_agent)
+    device_label = session_store.device_label_from_user_agent(user_agent)
+
+    pair: TokenPair | None = None
+    kicked: list[UUID] = []
+    failure_reason: str | None = None
+    failure_state: LockoutState | None = None
+    recovery_used = False
+    secret_invalid = False
+
+    async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+        await session_store.acquire_user_lock(session, realm=realm, user_id=claims.subject)
+        row = (
+            (
+                await session.execute(
+                    text(_SQL[realm]["select_mfa_state"]),
+                    {"uid": claims.subject, **_scope_params(realm, tenant_id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        now = datetime.now(UTC)
+        state: RowMapping | None = row
+        if state is None:
+            failure_reason = "unknown_account"
+        elif state["status"] != "active":
+            failure_reason = "account_unavailable"
+        elif int(state["token_version"]) != claims.token_version:
+            # 改密/停用/MFA 变更已轮换会话：旧挑战必须作废，否则可绕过新状态
+            failure_reason = "stale_challenge"
+        elif is_account_locked(cast(datetime | None, state["locked_until"]), now):
+            failure_reason = "locked"
+        elif not bool(state["mfa_enabled"]) or not state["mfa_secret_enc"]:
+            failure_reason = "mfa_disabled"
+
+        if state is not None and failure_reason is None:
+            try:
+                kek = decode_kek(settings.encryption_kek)
+                secret = decrypt_secret(
+                    str(state["mfa_secret_enc"]),
+                    kek=kek,
+                    aad=mfa_aad(realm, claims.subject),
+                )
+            except (SecretDecryptError, SecretEncryptionError):
+                # 密钥/数据损坏：fail-closed，审计后 500（不返回 secret）
+                logger.error("MFA secret 解密失败（realm=%s）", realm)
+                secret_invalid = True
+            else:
+                step = verify_totp(
+                    secret,
+                    code,
+                    interval=settings.mfa_totp_interval_seconds,
+                    window_steps=settings.mfa_totp_window_steps,
+                    last_used_step=cast(int | None, state["mfa_last_used_step"]),
+                )
+                if step is not None:
+                    updated = (
+                        await session.execute(
+                            text(_SQL[realm]["update_mfa_step"]),
+                            {
+                                "step": step,
+                                "uid": claims.subject,
+                                **_scope_params(realm, tenant_id),
+                            },
+                        )
+                    ).first()
+                    if updated is None:
+                        # 并发校验已消费该时间步：按重放拒绝
+                        step = None
+                if step is None:
+                    recovery_used = await _consume_recovery_code(
+                        session,
+                        realm=realm,
+                        tenant_id=tenant_id,
+                        user_id=claims.subject,
+                        code=code,
+                        subkey=recovery_code_subkey(kek),
+                    )
+                if step is None and not recovery_used:
+                    failure_reason = "invalid_mfa_code"
+                else:
+                    # 凭证通过。GETDEL 是"单次投递"闸门：放在签发会话之前。
+                    # 上面的水位推进/恢复码消费与本事务同生共死——若挑战已被并发消费
+                    # （challenge_live=False）则抛错回滚，不会留下烧掉的码或前进的水位。
+                    try:
+                        challenge_live = await revocation.consume_mfa_challenge(
+                            str(claims.jti), realm=realm
+                        )
+                    except revocation.RedisUnavailableError as exc:
+                        raise _mfa_unavailable() from exc
+                    if not challenge_live:
+                        # 挑战已不存在（并发/过期）：抛错回滚，不烧恢复码也不推进时间步水位
+                        raise _mfa_invalid_challenge()
+
+        if state is not None and failure_reason is None and not secret_invalid:
+            if (
+                int(state["failed_login_attempts"])
+                or state["failed_login_window_started_at"] is not None
+                or state["locked_until"] is not None
+            ):
+                await _clear_login_failures(
+                    session, realm=realm, tenant_id=tenant_id, user_id=claims.subject
+                )
+            kicked = await session_store.enforce_limit(
+                session,
+                realm=realm,
+                tenant_id=tenant_id,
+                user_id=claims.subject,
+                limit=(
+                    settings.max_sessions_per_user_tenant
+                    if realm == "tenant"
+                    else settings.max_sessions_per_user_platform
+                ),
+                request_id=request_id,
+            )
+            roles = await _load_roles(
+                session, realm=realm, tenant_id=tenant_id, user_id=claims.subject
+            )
+            pair = await _issue_tokens(
+                settings,
+                realm=realm,
+                user_id=claims.subject,
+                tenant_id=tenant_id,
+                token_version=int(state["token_version"]),
+                must_change_password=bool(state["must_change_password"]),
+                ip_hash=ip_hash,
+                ua_hash=ua_hash,
+                session=session,
+                device_label=device_label,
+                roles=roles,
+                mfa_verified=True,
+            )
+            await append_audit(
+                session,
+                action="auth.login.success",
+                resource_type="auth",
+                actor_realm=realm,
+                actor_id=claims.subject,
+                tenant_id=tenant_id,
+                metadata={
+                    "realm": realm,
+                    "mfa": True,
+                    "recovery_code_used": recovery_used,
+                    "ip_hash": ip_hash,
+                    "ua_hash": ua_hash,
+                },
+                request_id=request_id,
+            )
+            if recovery_used:
+                await append_audit(
+                    session,
+                    action="auth.mfa.recovery_used",
+                    resource_type="auth",
+                    actor_realm=realm,
+                    actor_id=claims.subject,
+                    tenant_id=tenant_id,
+                    metadata={"phase": "login", "ip_hash": ip_hash},
+                    request_id=request_id,
+                )
+            await revocation.register_session(pair.session_id, realm=realm)
+        elif state is not None and failure_reason == "invalid_mfa_code":
+            failure_state = await _apply_login_failure(
+                session,
+                realm=realm,
+                tenant_id=tenant_id,
+                user_id=claims.subject,
+                state=LockoutState(
+                    failed_attempts=int(state["failed_login_attempts"]),
+                    window_started_at=cast(
+                        datetime | None, state["failed_login_window_started_at"]
+                    ),
+                    locked_until=cast(datetime | None, state["locked_until"]),
+                ),
+                settings=settings,
+                now=now,
+            )
+
+    if secret_invalid:
+        await _audit_mfa_secret_invalid(
+            realm=realm, tenant_id=tenant_id, user_id=claims.subject, request_id=request_id
+        )
+        raise AuthError("MFA_UNAVAILABLE", "多因素认证暂不可用，请稍后重试或联系管理员", 500)
+
+    if failure_reason is not None:
+        await _audit_mfa_login_failure(
+            realm=realm,
+            tenant_id=tenant_id,
+            user_id=claims.subject,
+            reason=failure_reason,
+            state=failure_state,
+            request_id=request_id,
+            ip_hash=ip_hash,
+            ua_hash=ua_hash,
+        )
+        if failure_reason in {"invalid_mfa_code", "locked"}:
+            raise _invalid_credentials()
+        raise _mfa_invalid_challenge()
+
+    if pair is None:
+        raise RuntimeError("verify_mfa 未返回令牌")
+
+    await revocation.delete_sessions(kicked, realm=realm)
+    return pair
+
+
+async def _audit_mfa_login_failure(
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    user_id: UUID,
+    reason: str,
+    state: LockoutState | None,
+    request_id: str | None,
+    ip_hash: str | None,
+    ua_hash: str | None,
+) -> None:
+    """MFA 登录失败审计（独立事务，避免随验证事务回滚丢失）。"""
+
+    metadata: dict[str, object] = {
+        "realm": realm,
+        "mfa": True,
+        "reason": reason,
+        "ip_hash": ip_hash,
+        "ua_hash": ua_hash,
+    }
+    if state is not None:
+        metadata["failed_attempts"] = state.failed_attempts
+        metadata["lock_applied"] = state.locked_until is not None
+
+    if realm == "tenant" and tenant_id is not None:
+        if await _tenant_exists(tenant_id):
+            async with db_session(tenant_id=tenant_id) as session:
+                await append_audit(
+                    session,
+                    action="auth.login.failed",
+                    resource_type="auth",
+                    actor_realm="tenant",
+                    actor_id=user_id,
+                    tenant_id=tenant_id,
+                    result="failure",
+                    metadata=metadata,
+                    request_id=request_id,
+                )
+            return
+        metadata["attempted_tenant_id"] = str(tenant_id)
+
+    async with db_session(platform=True) as session:
+        await append_audit(
+            session,
+            action="auth.login.failed",
+            resource_type="auth",
+            actor_realm="platform" if realm == "platform" else "system",
+            actor_id=user_id if realm == "platform" else None,
+            result="failure",
+            metadata=metadata,
+            request_id=request_id,
+        )
+
+
+async def _audit_mfa_secret_invalid(
+    *,
+    realm: Realm,
+    tenant_id: UUID | None,
+    user_id: UUID,
+    request_id: str | None,
+) -> None:
+    """MFA 密文解密失败审计（不含密文/密钥；租户不存在时降级为平台事件）。"""
+
+    metadata: dict[str, object] = {"realm": realm, "reason": "decrypt_failed"}
+    if realm == "tenant" and tenant_id is not None:
+        if await _tenant_exists(tenant_id):
+            async with db_session(tenant_id=tenant_id) as session:
+                await append_audit(
+                    session,
+                    action="auth.mfa.secret_invalid",
+                    resource_type="auth",
+                    actor_realm="tenant",
+                    actor_id=user_id,
+                    tenant_id=tenant_id,
+                    result="failure",
+                    metadata=metadata,
+                    request_id=request_id,
+                )
+            return
+        metadata["attempted_tenant_id"] = str(tenant_id)
+
+    async with db_session(platform=True) as session:
+        await append_audit(
+            session,
+            action="auth.mfa.secret_invalid",
+            resource_type="auth",
+            actor_realm="platform" if realm == "platform" else "system",
+            actor_id=user_id if realm == "platform" else None,
+            result="failure",
+            metadata=metadata,
+            request_id=request_id,
+        )
+
+
+async def _append_realm_audit(
+    *,
+    action: str,
+    realm: Realm,
+    tenant_id: UUID | None,
+    user_id: UUID | None,
+    result: str,
+    metadata: dict[str, object],
+    request_id: str | None,
+) -> None:
+    """独立事务写认证审计；租户不存在时降级为平台事件（不因外键违约丢审计）。"""
+
+    if realm == "tenant" and tenant_id is not None:
+        if await _tenant_exists(tenant_id):
+            async with db_session(tenant_id=tenant_id) as session:
+                await append_audit(
+                    session,
+                    action=action,
+                    resource_type="auth",
+                    actor_realm="tenant",
+                    actor_id=user_id,
+                    tenant_id=tenant_id,
+                    result=result,
+                    metadata=metadata,
+                    request_id=request_id,
+                )
+            return
+        metadata = {**metadata, "attempted_tenant_id": str(tenant_id)}
+
+    async with db_session(platform=True) as session:
+        await append_audit(
+            session,
+            action=action,
+            resource_type="auth",
+            actor_realm="platform" if realm == "platform" else "system",
+            actor_id=user_id if realm == "platform" else None,
+            result=result,
+            metadata=metadata,
+            request_id=request_id,
+        )
+
+
+def _lockout_state(row: RowMapping) -> LockoutState:
+    """从账号状态行构造锁定状态（保持既有失败窗口）。"""
+
+    return LockoutState(
+        failed_attempts=int(row["failed_login_attempts"]),
+        window_started_at=cast(datetime | None, row["failed_login_window_started_at"]),
+        locked_until=cast(datetime | None, row["locked_until"]),
+    )
+
+
+async def enroll_mfa(
+    *,
+    actor: MfaActor,
+    current_password: str | None,
+    request_id: str | None = None,
+) -> MfaEnrollment:
+    """开始 TOTP 绑定：生成/轮换待激活 secret（10 分钟内有效）。
+
+    - 受限 `mfa_enroll` 令牌：密码已在登录时校验，不再要求 current_password；
+    - 普通访问令牌：必须重新验证当前密码（防止会话被借用后静默绑定 MFA）。
+
+    异常:
+        AuthError: 密码错误/锁定（401）、需要密码（400）、已启用（409）、
+            缓存不可用（503）、账号不可用（401）。
+    """
+
+    settings = get_settings()
+    realm = actor.realm
+    tenant_id = actor.tenant_id
+    failure_reason: str | None = None
+    failure_state: LockoutState | None = None
+    enrollment: MfaEnrollment | None = None
+
+    async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+        await session_store.acquire_user_lock(session, realm=realm, user_id=actor.user_id)
+        row = (
+            (
+                await session.execute(
+                    text(_SQL[realm]["select_mfa_state"]),
+                    {"uid": actor.user_id, **_scope_params(realm, tenant_id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        now = datetime.now(UTC)
+        if row is None or row["status"] != "active":
+            failure_reason = "account_unavailable"
+        elif actor.token_version is not None and int(row["token_version"]) != actor.token_version:
+            failure_reason = "stale_token"
+        elif is_account_locked(cast(datetime | None, row["locked_until"]), now):
+            failure_reason = "locked"
+        elif bool(row["mfa_enabled"]):
+            failure_reason = "already_enabled"
+        elif not actor.from_enroll_token:
+            if not current_password:
+                failure_reason = "password_required"
+            else:
+                credentials = (
+                    (
+                        await session.execute(
+                            text(_SQL[realm]["select_credentials"]),
+                            {"uid": actor.user_id, **_scope_params(realm, tenant_id)},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                password_ok = credentials is not None and await anyio.to_thread.run_sync(
+                    verify_password, current_password, str(credentials["password_hash"])
+                )
+                if not password_ok:
+                    failure_state = await _apply_login_failure(
+                        session,
+                        realm=realm,
+                        tenant_id=tenant_id,
+                        user_id=actor.user_id,
+                        state=_lockout_state(row),
+                        settings=settings,
+                        now=now,
+                    )
+                    failure_reason = "password_mismatch"
+
+        if failure_reason is None and row is not None:
+            secret = generate_totp_secret()
+            kek = decode_kek(settings.encryption_kek)
+            ciphertext = encrypt_secret(secret, kek=kek, aad=mfa_aad(realm, actor.user_id))
+            stored = await revocation.store_mfa_pending_secret(
+                ciphertext,
+                realm=realm,
+                user_id=actor.user_id,
+                ttl_seconds=settings.mfa_enroll_token_ttl_seconds,
+            )
+            if not stored:
+                failure_reason = "cache_unavailable"
+            else:
+                await append_audit(
+                    session,
+                    action="auth.mfa.enrollment_started",
+                    resource_type="auth",
+                    actor_realm=realm,
+                    actor_id=actor.user_id,
+                    tenant_id=tenant_id,
+                    metadata={"method": "totp"},
+                    request_id=request_id,
+                )
+                enrollment = MfaEnrollment(
+                    secret=secret,
+                    otpauth_uri=totp_uri(
+                        secret,
+                        issuer=settings.mfa_totp_issuer,
+                        account_name=str(row["login_id"]),
+                    ),
+                    expires_in=settings.mfa_enroll_token_ttl_seconds,
+                )
+
+    if failure_reason is not None:
+        if failure_reason == "password_mismatch":
+            await _append_realm_audit(
+                action="auth.mfa.enrollment_failed",
+                realm=realm,
+                tenant_id=tenant_id,
+                user_id=actor.user_id,
+                result="failure",
+                metadata={
+                    "reason": failure_reason,
+                    "failed_attempts": (
+                        failure_state.failed_attempts if failure_state is not None else None
+                    ),
+                    "lock_applied": (
+                        failure_state.locked_until is not None
+                        if failure_state is not None
+                        else False
+                    ),
+                },
+                request_id=request_id,
+            )
+            raise AuthError("INVALID_CREDENTIALS", "当前密码不正确", 401)
+        if failure_reason == "password_required":
+            raise AuthError("PASSWORD_REQUIRED", "需要验证当前密码", 400)
+        if failure_reason == "already_enabled":
+            raise AuthError("MFA_ALREADY_ENABLED", "多因素认证已启用", 409)
+        if failure_reason == "cache_unavailable":
+            raise _mfa_unavailable()
+        if failure_reason == "locked":
+            raise AuthError("INVALID_CREDENTIALS", "当前密码不正确", 401)
+        raise _mfa_invalid_challenge()
+
+    if enrollment is None:
+        raise RuntimeError("enroll_mfa 未返回绑定信息")
+    return enrollment
+
+
+async def activate_mfa(
+    *,
+    actor: MfaActor,
+    code: str,
+    ip: str | None = None,
+    user_agent: str | None = None,
+    request_id: str | None = None,
+) -> MfaActivation:
+    """校验待激活 secret 的 TOTP，启用 MFA、生成恢复码并轮换全部会话。
+
+    激活成功后 `token_version+1`、撤销该用户全部刷新令牌（`mfa_change`），
+    返回新令牌与一次性恢复码明文（仅此次响应可见）。
+
+    异常:
+        AuthError: 验证码错误/锁定（401）、绑定过期（400）、已启用（409）、
+            密文损坏（500，fail-closed）。
+    """
+
+    settings = get_settings()
+    realm = actor.realm
+    tenant_id = actor.tenant_id
+    ip_hash = hash_client_fingerprint(ip)
+    ua_hash = hash_client_fingerprint(user_agent)
+    device_label = session_store.device_label_from_user_agent(user_agent)
+
+    pair: TokenPair | None = None
+    recovery_codes: list[str] = []
+    old_families: list[UUID] = []
+    failure_reason: str | None = None
+    failure_state: LockoutState | None = None
+    secret_invalid = False
+
+    async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+        await session_store.acquire_user_lock(session, realm=realm, user_id=actor.user_id)
+        row = (
+            (
+                await session.execute(
+                    text(_SQL[realm]["select_mfa_state"]),
+                    {"uid": actor.user_id, **_scope_params(realm, tenant_id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        now = datetime.now(UTC)
+        if row is None or row["status"] != "active":
+            failure_reason = "account_unavailable"
+        elif actor.token_version is not None and int(row["token_version"]) != actor.token_version:
+            failure_reason = "stale_token"
+        elif is_account_locked(cast(datetime | None, row["locked_until"]), now):
+            failure_reason = "locked"
+        elif bool(row["mfa_enabled"]):
+            failure_reason = "already_enabled"
+
+        if failure_reason is None and row is not None:
+            try:
+                pending = await revocation.get_mfa_pending_secret(
+                    realm=realm, user_id=actor.user_id
+                )
+            except revocation.RedisUnavailableError as exc:
+                # Redis 故障不能报"绑定已过期"：用户会误重绑，且此时无法判定状态
+                raise _mfa_unavailable() from exc
+            if pending is None:
+                failure_reason = "enroll_expired"
+            else:
+                try:
+                    kek = decode_kek(settings.encryption_kek)
+                    secret = decrypt_secret(pending, kek=kek, aad=mfa_aad(realm, actor.user_id))
+                except (SecretDecryptError, SecretEncryptionError):
+                    logger.error("MFA 待激活 secret 解密失败（realm=%s）", realm)
+                    secret_invalid = True
+                else:
+                    step = verify_totp(
+                        secret,
+                        code,
+                        interval=settings.mfa_totp_interval_seconds,
+                        window_steps=settings.mfa_totp_window_steps,
+                    )
+                    if step is None:
+                        failure_state = await _apply_login_failure(
+                            session,
+                            realm=realm,
+                            tenant_id=tenant_id,
+                            user_id=actor.user_id,
+                            state=_lockout_state(row),
+                            settings=settings,
+                            now=now,
+                        )
+                        failure_reason = "invalid_mfa_code"
+                    else:
+                        subkey = recovery_code_subkey(kek)
+                        recovery_codes, hashes = generate_recovery_codes(
+                            settings.mfa_recovery_code_count,
+                            subkey=subkey,
+                            realm=realm,
+                            user_id=actor.user_id,
+                        )
+                        for digest in hashes:
+                            await session.execute(
+                                text(_SQL[realm]["insert_recovery_code"]),
+                                {
+                                    "uid": actor.user_id,
+                                    "hash": digest,
+                                    **_scope_params(realm, tenant_id),
+                                },
+                            )
+                        version = int(
+                            await session.scalar(
+                                text(_SQL[realm]["enable_mfa"]),
+                                {
+                                    "enc": encrypt_secret(
+                                        secret, kek=kek, aad=mfa_aad(realm, actor.user_id)
+                                    ),
+                                    "step": step,
+                                    "uid": actor.user_id,
+                                    **_scope_params(realm, tenant_id),
+                                },
+                            )
+                        )
+                        old_families = list(
+                            (
+                                await session.execute(
+                                    text(_SQL[realm]["active_families"]),
+                                    {"uid": actor.user_id, **_scope_params(realm, tenant_id)},
+                                )
+                            )
+                            .scalars()
+                            .all()
+                        )
+                        await session.execute(
+                            text(_SQL[realm]["revoke_user_tokens"]),
+                            {
+                                "uid": actor.user_id,
+                                "reason": "mfa_change",
+                                **_scope_params(realm, tenant_id),
+                            },
+                        )
+                        roles = await _load_roles(
+                            session, realm=realm, tenant_id=tenant_id, user_id=actor.user_id
+                        )
+                        pair = await _issue_tokens(
+                            settings,
+                            realm=realm,
+                            user_id=actor.user_id,
+                            tenant_id=tenant_id,
+                            token_version=version,
+                            must_change_password=bool(row["must_change_password"]),
+                            ip_hash=ip_hash,
+                            ua_hash=ua_hash,
+                            session=session,
+                            device_label=device_label,
+                            roles=roles,
+                            mfa_verified=True,
+                        )
+                        await append_audit(
+                            session,
+                            action="auth.mfa.activated",
+                            resource_type="auth",
+                            actor_realm=realm,
+                            actor_id=actor.user_id,
+                            tenant_id=tenant_id,
+                            metadata={
+                                "recovery_codes_issued": len(recovery_codes),
+                                "sessions_revoked": True,
+                                "ip_hash": ip_hash,
+                            },
+                            request_id=request_id,
+                        )
+                        await append_audit(
+                            session,
+                            action="auth.login.success",
+                            resource_type="auth",
+                            actor_realm=realm,
+                            actor_id=actor.user_id,
+                            tenant_id=tenant_id,
+                            metadata={
+                                "realm": realm,
+                                "mfa": True,
+                                "recovery_code_used": False,
+                                "ip_hash": ip_hash,
+                                "ua_hash": ua_hash,
+                            },
+                            request_id=request_id,
+                        )
+                        await revocation.register_session(pair.session_id, realm=realm)
+
+    if secret_invalid:
+        await _audit_mfa_secret_invalid(
+            realm=realm, tenant_id=tenant_id, user_id=actor.user_id, request_id=request_id
+        )
+        raise AuthError("MFA_UNAVAILABLE", "多因素认证暂不可用，请稍后重试或联系管理员", 500)
+
+    if failure_reason is not None:
+        await _append_realm_audit(
+            action="auth.mfa.activation_failed",
+            realm=realm,
+            tenant_id=tenant_id,
+            user_id=actor.user_id,
+            result="failure",
+            metadata={
+                "reason": failure_reason,
+                "failed_attempts": (
+                    failure_state.failed_attempts if failure_state is not None else None
+                ),
+                "lock_applied": (
+                    failure_state.locked_until is not None if failure_state is not None else False
+                ),
+            },
+            request_id=request_id,
+        )
+        if failure_reason in {"invalid_mfa_code", "locked"}:
+            raise _invalid_credentials()
+        if failure_reason == "already_enabled":
+            raise AuthError("MFA_ALREADY_ENABLED", "多因素认证已启用", 409)
+        if failure_reason == "enroll_expired":
+            raise AuthError("MFA_ENROLL_EXPIRED", "绑定已过期，请重新开始", 400)
+        raise _mfa_invalid_challenge()
+
+    if pair is None:
+        raise RuntimeError("activate_mfa 未返回令牌")
+
+    await revocation.delete_mfa_pending_secret(realm=realm, user_id=actor.user_id)
+    await revocation.delete_sessions(old_families, realm=realm)
+    return MfaActivation(pair=pair, recovery_codes=recovery_codes)
+
+
+async def disable_mfa(
+    *,
+    principal_user_id: UUID,
+    realm: Realm,
+    tenant_id: UUID | None,
+    current_password: str,
+    code: str,
+    ip: str | None = None,
+    user_agent: str | None = None,
+    request_id: str | None = None,
+) -> TokenPair:
+    """关闭 MFA：校验密码 + TOTP/恢复码，清 secret 与恢复码并轮换全部会话。
+
+    平台强制策略开启时禁止关闭（403），避免运营账号被降级。
+
+    异常:
+        AuthError: 密码/验证码错误或锁定（401）、未启用（409）、策略禁止（403）、
+            密文损坏（500，fail-closed）。
+    """
+
+    settings = get_settings()
+    if realm == "platform" and settings.mfa_require_platform:
+        raise AuthError("MFA_POLICY_REQUIRED", "当前要求必须启用多因素认证，不能关闭", 403)
+
+    ip_hash = hash_client_fingerprint(ip)
+    ua_hash = hash_client_fingerprint(user_agent)
+    device_label = session_store.device_label_from_user_agent(user_agent)
+
+    pair: TokenPair | None = None
+    old_families: list[UUID] = []
+    failure_reason: str | None = None
+    failure_state: LockoutState | None = None
+    recovery_used = False
+    secret_invalid = False
+
+    async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
+        await session_store.acquire_user_lock(session, realm=realm, user_id=principal_user_id)
+        credentials = (
+            (
+                await session.execute(
+                    text(_SQL[realm]["select_credentials"]),
+                    {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        row = (
+            (
+                await session.execute(
+                    text(_SQL[realm]["select_mfa_state"]),
+                    {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        now = datetime.now(UTC)
+        if credentials is None or row is None or row["status"] != "active":
+            failure_reason = "account_unavailable"
+        elif is_account_locked(cast(datetime | None, row["locked_until"]), now):
+            failure_reason = "locked"
+        else:
+            password_ok = await anyio.to_thread.run_sync(
+                verify_password, current_password, str(credentials["password_hash"])
+            )
+            if not password_ok:
+                failure_state = await _apply_login_failure(
+                    session,
+                    realm=realm,
+                    tenant_id=tenant_id,
+                    user_id=principal_user_id,
+                    state=_lockout_state(row),
+                    settings=settings,
+                    now=now,
+                )
+                failure_reason = "password_mismatch"
+            elif not bool(row["mfa_enabled"]) or not row["mfa_secret_enc"]:
+                failure_reason = "mfa_disabled"
+
+        if failure_reason is None and row is not None:
+            try:
+                kek = decode_kek(settings.encryption_kek)
+                secret = decrypt_secret(
+                    str(row["mfa_secret_enc"]),
+                    kek=kek,
+                    aad=mfa_aad(realm, principal_user_id),
+                )
+            except (SecretDecryptError, SecretEncryptionError):
+                logger.error("MFA secret 解密失败（realm=%s）", realm)
+                secret_invalid = True
+            else:
+                step = verify_totp(
+                    secret,
+                    code,
+                    interval=settings.mfa_totp_interval_seconds,
+                    window_steps=settings.mfa_totp_window_steps,
+                    last_used_step=cast(int | None, row["mfa_last_used_step"]),
+                )
+                if step is not None:
+                    updated = (
+                        await session.execute(
+                            text(_SQL[realm]["update_mfa_step"]),
+                            {
+                                "step": step,
+                                "uid": principal_user_id,
+                                **_scope_params(realm, tenant_id),
+                            },
+                        )
+                    ).first()
+                    if updated is None:
+                        step = None
+                if step is None:
+                    recovery_used = await _consume_recovery_code(
+                        session,
+                        realm=realm,
+                        tenant_id=tenant_id,
+                        user_id=principal_user_id,
+                        code=code,
+                        subkey=recovery_code_subkey(kek),
+                    )
+                if step is None and not recovery_used:
+                    failure_state = await _apply_login_failure(
+                        session,
+                        realm=realm,
+                        tenant_id=tenant_id,
+                        user_id=principal_user_id,
+                        state=_lockout_state(row),
+                        settings=settings,
+                        now=now,
+                    )
+                    failure_reason = "invalid_mfa_code"
+
+        if failure_reason is None and not secret_invalid and row is not None:
+            version = int(
+                await session.scalar(
+                    text(_SQL[realm]["disable_mfa"]),
+                    {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
+                )
+            )
+            await session.execute(
+                text(_SQL[realm]["delete_recovery_codes"]),
+                {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
+            )
+            old_families = list(
+                (
+                    await session.execute(
+                        text(_SQL[realm]["active_families"]),
+                        {"uid": principal_user_id, **_scope_params(realm, tenant_id)},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            await session.execute(
+                text(_SQL[realm]["revoke_user_tokens"]),
+                {
+                    "uid": principal_user_id,
+                    "reason": "mfa_change",
+                    **_scope_params(realm, tenant_id),
+                },
+            )
+            roles = await _load_roles(
+                session, realm=realm, tenant_id=tenant_id, user_id=principal_user_id
+            )
+            pair = await _issue_tokens(
+                settings,
+                realm=realm,
+                user_id=principal_user_id,
+                tenant_id=tenant_id,
+                token_version=version,
+                must_change_password=bool(row["must_change_password"]),
+                ip_hash=ip_hash,
+                ua_hash=ua_hash,
+                session=session,
+                device_label=device_label,
+                roles=roles,
+                mfa_verified=False,
+            )
+            await append_audit(
+                session,
+                action="auth.mfa.disabled",
+                resource_type="auth",
+                actor_realm=realm,
+                actor_id=principal_user_id,
+                tenant_id=tenant_id,
+                metadata={
+                    "sessions_revoked": True,
+                    "recovery_code_used": recovery_used,
+                    "ip_hash": ip_hash,
+                },
+                request_id=request_id,
+            )
+            if recovery_used:
+                await append_audit(
+                    session,
+                    action="auth.mfa.recovery_used",
+                    resource_type="auth",
+                    actor_realm=realm,
+                    actor_id=principal_user_id,
+                    tenant_id=tenant_id,
+                    metadata={"phase": "disable", "ip_hash": ip_hash},
+                    request_id=request_id,
+                )
+            await revocation.register_session(pair.session_id, realm=realm)
+
+    if secret_invalid:
+        await _audit_mfa_secret_invalid(
+            realm=realm,
+            tenant_id=tenant_id,
+            user_id=principal_user_id,
+            request_id=request_id,
+        )
+        raise AuthError("MFA_UNAVAILABLE", "多因素认证暂不可用，请稍后重试或联系管理员", 500)
+
+    if failure_reason is not None:
+        await _append_realm_audit(
+            action="auth.mfa.disable_failed",
+            realm=realm,
+            tenant_id=tenant_id,
+            user_id=principal_user_id,
+            result="failure",
+            metadata={
+                "reason": failure_reason,
+                "failed_attempts": (
+                    failure_state.failed_attempts if failure_state is not None else None
+                ),
+                "lock_applied": (
+                    failure_state.locked_until is not None if failure_state is not None else False
+                ),
+            },
+            request_id=request_id,
+        )
+        if failure_reason == "mfa_disabled":
+            raise AuthError("MFA_NOT_ENABLED", "多因素认证未启用", 409)
+        if failure_reason == "account_unavailable":
+            raise AuthError("ACCOUNT_UNAVAILABLE", "账号不可用，请联系管理员", 401)
+        raise AuthError("INVALID_CREDENTIALS", "当前密码或验证码不正确", 401)
+
+    if pair is None:
+        raise RuntimeError("disable_mfa 未返回令牌")
+
+    await revocation.delete_sessions(old_families, realm=realm)
     return pair
 
 
@@ -1113,7 +2411,11 @@ async def _record_refresh_failure(
         )
         return
 
-    if failure.reason == "reuse" and failure.family_id is not None and failure.user_id is not None:
+    if (
+        failure.reason in {"reuse", "mfa_required"}
+        and failure.family_id is not None
+        and failure.user_id is not None
+    ):
         # 先独立提交家族撤销（安全动作优先），审计失败不得连带回滚（审查 Minor 9）；
         # 取同一把用户锁，避免在途刷新插入的新行逃过撤销（第二轮审查 M3）。
         async with session_store.session_scope(realm=realm, tenant_id=tenant_id) as session:
@@ -1124,7 +2426,7 @@ async def _record_refresh_failure(
                 tenant_id=tenant_id,
                 user_id=failure.user_id,
                 family_id=failure.family_id,
-                reason="reuse_detected",
+                reason="reuse_detected" if failure.reason == "reuse" else "mfa_change",
             )
         # 撤销提交后删除会话标记，令该家族的访问令牌下一次请求立即 401
         await revocation.delete_session(failure.family_id, realm=realm)
@@ -1202,6 +2504,8 @@ def _refresh_error(reason: str) -> AuthError:
         return AuthError("REFRESH_TOKEN_EXPIRED", "登录已过期，请重新登录", 401)
     if reason == "account_unavailable":
         return AuthError("ACCOUNT_UNAVAILABLE", "账号不可用，请联系管理员", 401)
+    if reason == "mfa_required":
+        return AuthError("MFA_REQUIRED", "需要完成多因素认证，请重新登录", 401)
     if reason == "revoked":
         return AuthError("INVALID_REFRESH_TOKEN", "登录已失效，请重新登录", 401)
     return AuthError("INVALID_REFRESH_TOKEN", "刷新令牌无效，请重新登录", 401)
@@ -1312,6 +2616,10 @@ async def _rotate(
             "account_unavailable", family_id=row["family_id"], user_id=row["user_id"]
         )
 
+    # 强制 MFA 策略上线前的旧会话（或策略开启后仅密码登录的会话）不得继续续期
+    if realm == "platform" and settings.mfa_require_platform and not bool(row["mfa_verified"]):
+        raise _RefreshFailure("mfa_required", family_id=row["family_id"], user_id=row["user_id"])
+
     roles = await _load_roles(session, realm=realm, tenant_id=tenant_id, user_id=row["user_id"])
     # 无 UA 的客户端刷新时保留原设备标签，避免把可识别设备降级成"未知设备"
     effective_label = (
@@ -1359,6 +2667,7 @@ async def _rotate(
         "device_label": effective_label,
         "ua_hash": ua_hash,
         "ip_hash": ip_hash,
+        "mfa_verified": bool(row["mfa_verified"]),
     }
     if realm == "tenant":
         params["tenant_id"] = tenant_id
@@ -1372,6 +2681,7 @@ async def _rotate(
         family_id=row["family_id"],
         token_version=int(user_row["token_version"]),
         must_change_password=bool(user_row["must_change_password"]),
+        amr=("pwd", "totp") if bool(row["mfa_verified"]) else ("pwd",),
     )
     await append_audit(
         session,
@@ -1399,6 +2709,7 @@ async def _rotate(
         session_id=row["family_id"],
         must_change_password=bool(user_row["must_change_password"]),
         roles=roles,
+        mfa_verified=bool(row["mfa_verified"]),
     )
 
 
@@ -1624,11 +2935,15 @@ async def change_password(
     tenant_id: UUID | None,
     current_password: str,
     new_password: str,
+    mfa_verified: bool = False,
     ip: str | None = None,
     user_agent: str | None = None,
     request_id: str | None = None,
 ) -> TokenPair:
     """修改密码：校验旧密码 → 更新哈希 → 撤销全部家族 → 重新签发令牌。
+
+    `mfa_verified` 来自当前访问令牌的 `amr`：改密重签时原样保留，避免把已完成
+    MFA 的会话降级为仅密码会话（强制策略窗口内）。
 
     异常:
         AuthError: 旧密码错误（401）、新密码不合规（422）、账号不可用（401）。
@@ -1655,6 +2970,7 @@ async def change_password(
                 principal_user_id=principal_user_id,
                 current_password=current_password,
                 new_password=new_password,
+                mfa_verified=mfa_verified,
                 ip_hash=ip_hash,
                 ua_hash=ua_hash,
                 device_label=device_label,
@@ -1722,6 +3038,7 @@ async def _change_password_in_session(
     principal_user_id: UUID,
     current_password: str,
     new_password: str,
+    mfa_verified: bool,
     ip_hash: str | None,
     ua_hash: str | None,
     device_label: str | None,
@@ -1836,6 +3153,7 @@ async def _change_password_in_session(
         session=session,
         device_label=device_label,
         roles=roles,
+        mfa_verified=mfa_verified,
     )
     await append_audit(
         session,

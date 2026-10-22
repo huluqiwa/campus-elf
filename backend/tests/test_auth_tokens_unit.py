@@ -3,8 +3,10 @@
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import jwt as pyjwt
 import pytest
 
+from app.auth.mfa import create_mfa_token, decode_mfa_token
 from app.auth.tokens import (
     TokenError,
     create_access_token,
@@ -182,3 +184,67 @@ class TestRefreshToken:
         assert hash_client_fingerprint("") is None
         value = hash_client_fingerprint("1.2.3.4")
         assert value is not None and len(value) == 64 and "1.2.3.4" not in value
+
+
+class TestMfaToken:
+    """MFA 临时令牌：audience/purpose 隔离与 realm/tenant_id 组合约束。"""
+
+    def test_challenge_token_roundtrip(self) -> None:
+        """租户挑战令牌可解析，claim 完整且 purpose 命中期望。"""
+
+        settings = _settings()
+        tenant_id, user_id = uuid4(), uuid4()
+        token, jti = create_mfa_token(
+            settings,
+            purpose="mfa_challenge",
+            user_id=user_id,
+            realm="tenant",
+            tenant_id=tenant_id,
+            token_version=2,
+        )
+
+        claims = decode_mfa_token(settings, token, expected_purpose="mfa_challenge")
+
+        assert claims.subject == user_id
+        assert claims.tenant_id == tenant_id
+        assert claims.jti == jti
+        assert claims.purpose == "mfa_challenge"
+
+    def test_wrong_purpose_is_rejected(self) -> None:
+        """挑战令牌不能当绑定令牌用（purpose 必须匹配）。"""
+
+        settings = _settings()
+        token, _ = create_mfa_token(
+            settings,
+            purpose="mfa_challenge",
+            user_id=uuid4(),
+            realm="tenant",
+            tenant_id=uuid4(),
+            token_version=0,
+        )
+        with pytest.raises(TokenError):
+            decode_mfa_token(settings, token, expected_purpose="mfa_enroll")
+
+    def test_platform_token_with_tenant_id_is_rejected(self) -> None:
+        """伪造 realm=platform 却带 tenant_id 的令牌必须被拒（与签发约束对称）。"""
+
+        settings = _settings()
+        now = datetime.now(UTC)
+        forged = pyjwt.encode(
+            {
+                "sub": str(uuid4()),
+                "realm": "platform",
+                "tenant_id": str(uuid4()),
+                "purpose": "mfa_challenge",
+                "jti": str(uuid4()),
+                "token_version": 0,
+                "iss": settings.jwt_issuer,
+                "aud": settings.jwt_audience_mfa,
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(seconds=300)).timestamp()),
+            },
+            settings.jwt_secret.get_secret_value(),
+            algorithm=settings.jwt_algorithm,
+        )
+        with pytest.raises(TokenError):
+            decode_mfa_token(settings, forged, expected_purpose="mfa_challenge")
