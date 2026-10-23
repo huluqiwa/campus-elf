@@ -148,6 +148,8 @@ async def clean_test_data(engine: AsyncEngine) -> None:
             for table in TENANT_TABLES:
                 await conn.execute(text(f"TRUNCATE {table} CASCADE"))
             await conn.execute(text("TRUNCATE platform_user_roles CASCADE"))
+            # M1-E2：策略开关表引用 platform_users，必须排在它之前
+            await conn.execute(text("TRUNCATE system_settings CASCADE"))
             await conn.execute(text("TRUNCATE platform_users CASCADE"))
             await conn.execute(text("TRUNCATE tenants CASCADE"))
         finally:

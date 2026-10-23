@@ -62,6 +62,10 @@ TABLES_ALLOWED_WITHOUT_TENANT_ID = {
     # M1-E1：内置角色出厂默认的定义表（代码所有的全局元数据，与 permissions 同性质）
     "rbac_builtin_roles",
     "rbac_builtin_role_defaults",
+    # M1-E2：出厂默认**数据范围**定义表（同上口径）+ 平台侧策略开关表
+    # （键白名单在代码里，只有平台连接可写，靠数据库权限 + `platform.config.edit` 约束）
+    "rbac_builtin_role_scope_defaults",
+    "system_settings",
     "alembic_version",
 }
 

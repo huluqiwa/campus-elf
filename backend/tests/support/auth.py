@@ -113,6 +113,7 @@ async def seed_tenant_user(
     mfa_secret_enc: str | None = None,
     mfa_last_used_step: int | None = None,
     permissions: tuple[str, ...] = (),
+    scope_types: tuple[str, ...] = (),
 ) -> tuple[UUID, UUID]:
     """写入租户与用户（复用已有同 school_code 的租户），返回 (tenant_id, user_id)。
 
@@ -120,6 +121,8 @@ async def seed_tenant_user(
         permissions: 授予该用户的权限码；非空时创建一个**非系统**测试角色并绑定，
             走真实 `user_roles → role_permissions → permissions` 链路（与运行时鉴权同源）。
             内置角色（student/teacher/…）由租户开通流程产生，测试里不占用其角色码。
+        scope_types: 授给**用户本人**的数据范围（`school`/`self`）。默认空 = 没有任何范围行，
+            即 fail-closed 的最小配置；需要验证范围过滤时由用例显式声明。
     """
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -179,6 +182,14 @@ async def seed_tenant_user(
                     "values (:tenant_id, :user_id, :role_id)"
                 ),
                 {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
+            )
+        for scope_type in scope_types:
+            await session.execute(
+                text(
+                    "insert into data_scopes (tenant_id, user_id, scope_type, scope_id) "
+                    "values (:tenant_id, :user_id, :scope_type, null)"
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "scope_type": scope_type},
             )
         return UUID(str(tenant_id)), UUID(str(user_id))
 

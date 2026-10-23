@@ -18,10 +18,12 @@ from app.db.models.rbac import (
     PlatformUserRole,
     RbacBuiltinRole,
     RbacBuiltinRoleDefault,
+    RbacBuiltinRoleScopeDefault,
     Role,
     RolePermission,
     UserRole,
 )
+from app.db.models.settings import SystemSetting
 from app.db.models.tenant import PlatformUser, Tenant
 
 __all__ = [
@@ -38,10 +40,12 @@ __all__ = [
     "PlatformUserRole",
     "RbacBuiltinRole",
     "RbacBuiltinRoleDefault",
+    "RbacBuiltinRoleScopeDefault",
     "RefreshToken",
     "Role",
     "RolePermission",
     "SchoolReviewRecord",
+    "SystemSetting",
     "Tenant",
     "TenantRegistrationRequest",
     "User",

@@ -527,8 +527,24 @@ async def test_cleanup_refresh_tokens_counts_platform_rows(auth_env: None) -> No
 
 
 @pytest.mark.asyncio
-async def test_db_guard_rejects_platform_permission_for_tenant_role(auth_env: None) -> None:
-    """数据库守卫：租户角色引用 platform.* 权限直接被拒（B1 第二道防线）。"""
+@pytest.mark.parametrize(
+    ("bad_code", "school_code"),
+    [
+        # TD-149 收紧前后的分水岭：旧触发器只硬挡 module='platform'，
+        # `observability.*`/`eval.*` 同属平台运维域却留了空档——三条都要被拒才算收紧到位。
+        ("platform.tenant.view", "SCH-GUARD1"),
+        ("observability.trace.view", "SCH-GUARD2"),
+        ("eval.report.view", "SCH-GUARD3"),
+    ],
+)
+async def test_db_guard_rejects_platform_domain_permission_for_tenant_role(
+    auth_env: None, bad_code: str, school_code: str
+) -> None:
+    """数据库守卫：租户角色引用平台域（platform/observability/eval）权限直接被拒。
+
+    B1 第二道防线 + TD-149：白名单口径（只放行 `school`/`campus`）与代码侧
+    `catalog.code_realm()` 一致，所以新增平台域模块不需要再改触发器。
+    """
 
     from sqlalchemy.exc import DBAPIError
 
@@ -539,8 +555,9 @@ async def test_db_guard_rejects_platform_permission_for_tenant_role(auth_env: No
             tenant_id = await session.scalar(
                 text(
                     "insert into tenants (school_code, name, status, activated_at) "
-                    "values ('SCH-GUARD1', '矩阵守卫中学', 'active', now()) returning id"
-                )
+                    "values (:school_code, '矩阵守卫中学', 'active', now()) returning id"
+                ),
+                {"school_code": school_code},
             )
             role_id = await session.scalar(
                 text(
@@ -550,8 +567,9 @@ async def test_db_guard_rejects_platform_permission_for_tenant_role(auth_env: No
                 {"tid": tenant_id},
             )
             permission_id = await session.scalar(
-                text("select id from permissions where code = 'platform.tenant.view'")
+                text("select id from permissions where code = :code"), {"code": bad_code}
             )
+            assert permission_id is not None, f"权限目录缺少 {bad_code}"
         with pytest.raises(DBAPIError) as excinfo:
             async with factory() as session, session.begin():
                 await session.execute(
@@ -561,7 +579,44 @@ async def test_db_guard_rejects_platform_permission_for_tenant_role(auth_env: No
                     ),
                     {"tid": tenant_id, "rid": role_id, "pid": permission_id},
                 )
-        assert "cannot reference platform permissions" in str(excinfo.value)
+        assert "tenant roles can only reference tenant-domain permissions" in str(excinfo.value)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_db_guard_allows_tenant_domain_permission_for_tenant_role(auth_env: None) -> None:
+    """反向对照：`school`/`campus` 域的权限必须仍然授得进去（收紧不能把正常授权一起挡掉）。"""
+
+    engine = make_test_engine("admin")
+    try:
+        factory = make_session_factory(engine)
+        async with factory() as session, session.begin():
+            tenant_id = await session.scalar(
+                text(
+                    "insert into tenants (school_code, name, status, activated_at) "
+                    "values ('SCH-GUARD-OK', '矩阵放行中学', 'active', now()) returning id"
+                )
+            )
+            role_id = await session.scalar(
+                text(
+                    "insert into roles (tenant_id, code, name, is_system) "
+                    "values (:tid, 'guard_role', '守卫角色', false) returning id"
+                ),
+                {"tid": tenant_id},
+            )
+            for module_code in ("school.personnel.view", "campus.chat.use"):
+                permission_id = await session.scalar(
+                    text("select id from permissions where code = :code"), {"code": module_code}
+                )
+                assert permission_id is not None, f"权限目录缺少 {module_code}"
+                await session.execute(
+                    text(
+                        "insert into role_permissions (tenant_id, role_id, permission_id) "
+                        "values (:tid, :rid, :pid)"
+                    ),
+                    {"tid": tenant_id, "rid": role_id, "pid": permission_id},
+                )
     finally:
         await engine.dispose()
 
@@ -579,9 +634,10 @@ async def test_selfcheck_detects_tenant_role_with_out_of_realm_permission(
 ) -> None:
     """M1 复审 + 第四轮审查 M1：启动自检必须发现"租户角色持有租户域外的权限"（不能因 RLS 恒为 0）。
 
-    两个码分别代表两种越权形态：`platform.*` 由 DB 触发器硬挡（这里临时禁用来造数据），
-    `observability.*` **触发器不挡**（TD-149 才收紧）——若判据写死 `module = 'platform'`，
-    第二种形态会连启动自检都放行，所以这条用例是代码侧白名单的取证点。
+    两个码分别代表两种越权形态：M1-E2 收紧后**触发器两者都挡**（白名单只放行 `school`/`campus`），
+    所以这里必须临时停用触发器才能造出越界数据 —— 这同时也是"库里那道防线确实生效"的取证点。
+    若判据写死 `module = 'platform'`，第二种形态会连启动自检都放行，所以这条用例是代码侧白名单的
+    第二道取证点（应用层/自检/触发器三层同一口径）。
     """
 
     from app.db.selfcheck import DatabaseSelfCheckError, verify_runtime_database

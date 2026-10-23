@@ -325,6 +325,18 @@
 - 最终门禁：后端 **481 passed**、`ruff`/`mypy`（128 文件）/`bandit`×2 全绿、`alembic check` 无漂移、head=`e5f7a9c1b3d5`。本期不改前端，故无新增 Playwright 用例（该项在简报 §8 登记）。
 - 远端 CI（`6e916af`）：`backend` #39851973194 success、`security` #39851973099 success；`frontend`/`evals` 未触发（无对应路径改动）。
 
+### M1-E2 数据范围 + 职责分离 + 平台跨租只读：两轮审查（2026-10-23）
+
+- 交付：迁移 `f7a9b1c3d5e8`（新表 `rbac_builtin_role_scope_defaults`/`system_settings`；注册申请表增 `submitted_by_platform_user_id` + `self_exception_used` + 同表 CHECK；扩写 `seed_builtin_roles(uuid)` 为新租户写 `data_scopes`；`review_registration_request()` 承担 RBAC-03；`role_permissions_realm_guard` 收紧到 `TENANT_MODULES` 白名单）；`app/rbac/scopes.py` + `app/db/repository.py`（`school`/`self` 谓词、解析不到范围 = 空集 fail-closed、`ScopeBypass(reason=…)` 显式绕过、缺归属列构造期报错）与 `Principal` 每请求范围解析；`GET /api/v1/school/personnel`(+`/{id}`，`school.personnel.view`，响应固定 6 字段、不含 `login_id`，越权 404 + `data_scope.denied` 审计）；`POST /api/v1/platform/cross-tenant/personnel/read`（平台 realm + `platform.cross_tenant.read`、事务首条 `SET LOCAL TRANSACTION READ ONLY`、单租户、理由必填、审计失败即请求失败、脱敏返回）；`GET/PUT /api/v1/platform/settings`（`platform.config.view/edit`、改值必填理由、`platform.setting.update` 审计、未知键 404、每请求读库热生效）；自批三道锁（应用层 403/422 + 回滚后拒绝审计、数据库函数 `SELF_APPROVAL_*`、同表三条款 CHECK）与例外开关；裸 SQL 守卫清单 + SQL 条数基线（实测 6 / 上限 8）；业务场景 2 条（自批被拒→开例外→放行并留审计；跨租默认拒绝→授权+理由→只读返回并留审计）。
+- 第一轮独立审查：**不通过**（0 Blocker + 3 Major + 4 Minor）。
+  - Major M1：人员列表/详情响应带 `login_id`，违反口径 ⑥「学号/工号不外发」。
+  - Major M2：迁移把简报钉住的两条款 CHECK 改成三条款（多 `OR self_exception_used IS TRUE`）未经用户拍板，且"直写同人 + 标记为真"与合法例外在库层同形。
+  - Major M3：`app/settings/store.py` 模块 docstring 宣称"启动自检会点名未知键"，实现里没有——注释承诺了不存在的功能。
+  - Minor：停用/删除租户的可读性注释与实现不一致；详情越权在审计写入失败时把 404 变成 500；只读事务用例断言空转（只断异常类型）；`platform.cross_tenant.read` 的目录描述仍写"二次授权"，与 TD-153 延后口径不符。
+- 第一轮修复：响应删除 `login_id`、补 `last_login_at` 与 `_RESPONSE_KEYS`/`login_id not in text` 硬断言；三条款 CHECK 经用户确认（「接受三条款+补检测」）并登记 TD-156/TD-161；docstring 改为如实陈述并登记 TD-160；修正租户状态注释；越权审计改 best-effort（类型级日志、不改变 404）；只读用例改为断言 PG 报错含 `read-only transaction` 且探针无残留；目录描述改为"工单化延后 TD-153"；补跨租审计失败 fail-closed、绕过接口层直调审核函数的第二道锁、数据库守卫正反两面（平台域三码拒绝 + 租户域放行）等用例。
+- 第二轮复审（当日子智能体配额耗尽，改在主上下文执行，非独立上下文）：**通过**（0 Blocker / 0 Major）。复核 `principal`/`repository`/`seeds`/`onboarding`/审批/设置/API/迁移与全部 E2 用例：范围解析 fail-closed、三道锁互相独立、跨租通道只读先行且审计失败即失败、响应形状与 SQL 上限、权限码/白名单/矩阵口径一致，未发现新缺陷。附带记录：`rbac_builtin_role_scope_defaults` 未加指向角色定义表的外键（应用角色仅 `SELECT`，写入只来自 SECURITY DEFINER 的 `seed_builtin_roles`），判断为低价值不改，留 M2 配置界面复评。
+- 最终门禁：后端 **561 passed**（全量退出码 0）、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（149 文件）无问题、`bandit -r app -x tests` / `bandit -r alembic -s B608` 退出码 0、`alembic check` 无漂移、head=`f7a9b1c3d5e8`；本期不改前端（`/school/personnel` 无前端入口，TD-152），无新增 Playwright 用例。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

@@ -14,10 +14,8 @@
 import asyncio
 import json
 import os
-from typing import Any
 from uuid import uuid4
 
-import asyncpg
 import pytest
 
 from app.db.models.rbac import PERMISSION_CATALOG as LEGACY_PERMISSION_CATALOG
@@ -28,6 +26,10 @@ from tests.support.migrations import (
     create_database,
     downgrade,
     drop_database,
+    fetch,
+    function_defines,
+    scalar,
+    table_exists,
     temp_database_url,
     upgrade,
 )
@@ -43,36 +45,18 @@ _LEGACY_TENANT_MODULE_CODES: frozenset[str] = frozenset(
 _LEGACY_CODES: frozenset[str] = frozenset(code for code, _, _ in LEGACY_PERMISSION_CATALOG)
 
 
-async def _fetch(dsn: str, sql: str, *args: Any) -> list[asyncpg.Record]:
-    connection = await asyncpg.connect(dsn)
-    try:
-        rows: list[asyncpg.Record] = await connection.fetch(sql, *args)
-        return rows
-    finally:
-        await connection.close()
-
-
-async def _scalar(dsn: str, sql: str, *args: Any) -> Any:
-    connection = await asyncpg.connect(dsn)
-    try:
-        value: Any = await connection.fetchval(sql, *args)
-        return value
-    finally:
-        await connection.close()
-
-
 async def _permission_codes(dsn: str) -> set[str]:
-    rows = await _fetch(dsn, "select code from public.permissions")
+    rows = await fetch(dsn, "select code from public.permissions")
     return {row["code"] for row in rows}
 
 
 async def _tenant_role_codes(dsn: str, tenant_id: str) -> set[str]:
-    rows = await _fetch(dsn, "select code from public.roles where tenant_id = $1", tenant_id)
+    rows = await fetch(dsn, "select code from public.roles where tenant_id = $1", tenant_id)
     return {row["code"] for row in rows}
 
 
 async def _role_permission_codes(dsn: str, tenant_id: str, role_code: str) -> set[str]:
-    rows = await _fetch(
+    rows = await fetch(
         dsn,
         """
         select p.code
@@ -85,34 +69,6 @@ async def _role_permission_codes(dsn: str, tenant_id: str, role_code: str) -> se
         role_code,
     )
     return {row["code"] for row in rows}
-
-
-async def _function_defines(dsn: str, function_name: str) -> str:
-    value = await _scalar(
-        dsn,
-        """
-        select pg_get_functiondef(p.oid)
-        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-        where n.nspname = 'public' and p.proname = $1
-        """,
-        function_name,
-    )
-    if value is None:
-        raise AssertionError(f"函数不存在：{function_name}")
-    return str(value)
-
-
-async def _table_exists(dsn: str, table_name: str) -> bool:
-    value = await _scalar(
-        dsn,
-        """
-        select count(*) from pg_class c
-        join pg_namespace n on n.oid = c.relnamespace
-        where n.nspname = 'public' and c.relname = $1
-        """,
-        table_name,
-    )
-    return int(value) > 0
 
 
 async def _provision_tenant(dsn: str) -> str:
@@ -130,7 +86,7 @@ async def _provision_tenant(dsn: str) -> str:
         "admin_display_name": "往返测试管理员",
         "admin_password_hash": "$2b$12$roundtriptesthash",
     }
-    tenant_id = await _scalar(dsn, "select public.provision_tenant($1::jsonb)", json.dumps(payload))
+    tenant_id = await scalar(dsn, "select public.provision_tenant($1::jsonb)", json.dumps(payload))
     return str(tenant_id)
 
 
@@ -154,11 +110,11 @@ def test_e1_migration_round_trip_with_provisioned_tenant() -> None:
         assert not (
             asyncio.run(_permission_codes(dsn)) & set(legacy_codes_removed_by_m1e1())
         ), "与矩阵重复的旧码未删除"
-        assert asyncio.run(_table_exists(dsn, "rbac_builtin_roles"))
-        assert asyncio.run(_table_exists(dsn, "rbac_builtin_role_defaults"))
-        assert "seed_builtin_roles" in asyncio.run(_function_defines(dsn, "provision_tenant"))
+        assert asyncio.run(table_exists(dsn, "rbac_builtin_roles"))
+        assert asyncio.run(table_exists(dsn, "rbac_builtin_role_defaults"))
+        assert "seed_builtin_roles" in asyncio.run(function_defines(dsn, "provision_tenant"))
         assert "seed_builtin_roles" in asyncio.run(
-            _function_defines(dsn, "review_registration_request")
+            function_defines(dsn, "review_registration_request")
         )
 
         # ---------- 开通函数必须能种出内置角色与出厂默认 ----------
@@ -196,8 +152,8 @@ def test_e1_migration_round_trip_with_provisioned_tenant() -> None:
         # ---------- 降级回 E1 之前 ----------
         downgrade(config, D2_REVISION)
 
-        assert not asyncio.run(_table_exists(dsn, "rbac_builtin_roles"))
-        assert not asyncio.run(_table_exists(dsn, "rbac_builtin_role_defaults"))
+        assert not asyncio.run(table_exists(dsn, "rbac_builtin_roles"))
+        assert not asyncio.run(table_exists(dsn, "rbac_builtin_role_defaults"))
         assert asyncio.run(_permission_codes(dsn)) == set(_LEGACY_CODES)
         assert asyncio.run(_tenant_role_codes(dsn, tenant_id)) == {
             "school_super_admin",
@@ -209,13 +165,13 @@ def test_e1_migration_round_trip_with_provisioned_tenant() -> None:
         )
         assert asyncio.run(_role_permission_codes(dsn, tenant_id, "school_admin")) == set()
         assert asyncio.run(_role_permission_codes(dsn, tenant_id, "teacher_b_end")) == set()
-        assert "seed_builtin_roles" not in asyncio.run(_function_defines(dsn, "provision_tenant"))
+        assert "seed_builtin_roles" not in asyncio.run(function_defines(dsn, "provision_tenant"))
         assert "seed_builtin_roles" not in asyncio.run(
-            _function_defines(dsn, "review_registration_request")
+            function_defines(dsn, "review_registration_request")
         )
         # 旧目录里没有 platform.message.* / observability.* 等码：平台侧映射也必须已退回
         assert asyncio.run(
-            _scalar(dsn, "select count(*) from public.permissions where module = 'eval'")
+            scalar(dsn, "select count(*) from public.permissions where module = 'eval'")
         ) == 0
 
         # ---------- 再升级：往返后仍可重放 ----------

@@ -43,15 +43,16 @@ JWT (tenant_id, realm)
 
 - 平台用户与租户用户分 realm/audience；平台 token 不携带校方 tenant_id。
 - 租户 token 的 `tenant_id` 只由服务端签发；不接受 body/query/header 覆盖。
-- 角色/权限/数据范围每次请求从服务端加载或缓存（缓存需租户+用户维度，权限变更失效）。
+- 角色/权限/数据范围**每次请求从库读**（M1-E1/E2 落地口径：随 `Principal` 一次解析，见 `backend/app/auth/principal.py`），本期**不引入缓存**；将来加缓存必须同时覆盖"角色改映射/用户改角色/数据范围改"三条失效路径（TD-100 → M6）。
 
 ### 2.2 应用层
 
 - `TenantContext` 包含 tenant_id、user_id、roles、permissions、data_scope、feature_flags。
 - 服务方法必须显式接收 `TenantContext`；禁止无上下文直接构造仓储查询。
 - 仓储基类 `TenantScopedRepository` 自动注入 `tenant_id` 条件；复杂查询必须使用它。
-- 原生 SQL 必须参数化并显式 `tenant_id = :tenant_id`；代码审查重点检查。
-- 跨租平台查询只允许在 `platform` 专用仓储中，调用 `platform.cross_tenant.read` 权限 + 二次授权 + 审计。
+- **数据范围谓词在同一处注入（M1-E2）**：构造仓储必须传入范围判据（来自 `Principal`），`self` 范围按归属列过滤；解析不到范围 = 空集（fail-closed），缺归属列的表在**构造期**报错而不是放行整表。业务代码不再各自写范围 `where`（`docs/rbac-matrix.md` §2.1）。
+- 绕过范围必须显式 `ScopeBypass(reason=…)`；原生 SQL 必须参数化并显式 `tenant_id = :tenant_id`，且由守卫清单钉住（`backend/tests/test_bare_sql_scope_guard_unit.py`，条目上限 8，新增绕过点必须写理由）；代码审查重点检查。
+- 跨租平台查询只允许在 `platform` 专用仓储中，调用 `platform.cross_tenant.read` 权限 + 二次授权 + 审计。**M1-E2 现状**：通道为"码 + 只读事务 + 必填理由 + 强制审计"的最小形态（`backend/app/personnel/cross_tenant.py`），工单化二次授权仍延后（TD-153）。
 
 ### 2.3 PostgreSQL RLS
 
@@ -100,6 +101,7 @@ JWT (tenant_id, realm)
 - 默认拒绝；仅在平台运营/审计需要时开放。
 - 必须：二次授权（工单/审批）+ 明确数据范围 + 只读 + 最小必要 + 审计 + 时限。
 - 禁止批量导出全校敏感数据；导出需审批+水印/审计。
+- **M1-E2 交付形态（2026-10-23）**：只读、单租户、必填理由、强制审计已落地；**"时限"与"工单化二次授权"未落地**（TD-153 已延后：M6 或首个真实跨租需求），因此本期通道的可核查性是事后审计，不是事前审批 —— 这一点在验收与安全自查时必须按此口径陈述。
 - 不得关联跨租“同一自然人”。
 
 ---
@@ -149,6 +151,10 @@ JWT (tenant_id, realm)
 | 文档人群（跨人群） | 非授权部门/班级/学生不召回、不引用、回答无文档名泄漏 |
 | 文档人群（fail-closed） | 版本无 ACL 时构建/发布 409；人群解析为空时召回集为空 |
 | 平台跨租 | 默认拒绝；授权+审计后只读 |
+| 数据范围 `school` | 管理员只见本租全校，跨租一行不剩（`tests/integration/test_data_scope_enforcement.py`） |
+| 数据范围 `self` | C 端/教师列表只剩自己；详情越权 → 404 且写 `data_scope.denied`，真不存在 → 404 且不留 denial 审计 |
+| 数据范围缺失 | 角色/用户都没有范围行 → 空集（列表为空而不是全量） |
+| 范围出厂默认 | 新租户开通即写范围行；同步只补"还没有范围行"的角色，人工收窄保持、被清空则按出厂默认重补（`tests/integration/test_data_scope_backfill.py`） |
 | 消息通道 | 平台/租户隔离，禁止租户间 |
 | KB 检索 | 跨租文档/分块不可召回 |
 | 测试/生产 | 密钥/数据库不可互访 |

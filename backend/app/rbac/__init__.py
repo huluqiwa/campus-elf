@@ -8,16 +8,17 @@
    两个超管在矩阵里被*定义*成「范围内全量」，所以按「只补不撤」对齐；其余内置角色的默认
    只在「角色还没有任何映射」时授一次（新建租户由 `seed_builtin_roles()` 授）。
 
-出厂默认另外写进两张**代码所有**的定义表：
+出厂默认另外写进三张**代码所有**的定义表：
 
 - `rbac_builtin_roles(realm, code, name)`：内置角色清单；
-- `rbac_builtin_role_defaults(realm, role_code, permission_code)`：内置角色的出厂默认映射。
+- `rbac_builtin_role_defaults(realm, role_code, permission_code)`：内置角色的出厂默认映射；
+- `rbac_builtin_role_scope_defaults(realm, role_code, scope_type)`：出厂默认**数据范围**（M1-E2 口径 ⑨）。
 
-为什么要这两张表：`provision_tenant()` 是 SQL 函数，开通新租户时要建角色并给默认权限。
-把码清单抄进 SQL 会出现"迁移里一份、Python 里一份"的两份真相（新增一个权限码却忘了改函数，
-新租户就少一条权限，而且没人会报错）。现在函数只读定义表，同步每次按 `seeds.py` **整表重写**
-定义表（这两张表是代码的副本，不是运营配置，所以允许全量覆盖）：新租户的默认权限因此
-自动跟上目录，存量租户按上面第 2 条的补授口径生效。
+为什么要这三张表：`provision_tenant()` 是 SQL 函数，开通新租户时要建角色、给默认权限、
+给默认数据范围。把清单抄进 SQL 会出现"迁移里一份、Python 里一份"的两份真相（新增一个权限码
+或改一次范围默认却忘了改函数，新租户就静默少一项配置，而且没人会报错）。现在函数只读定义表，
+同步每次按 `seeds.py` **整表重写**定义表（这几张表是代码的副本，不是运营配置，所以允许全量覆盖）：
+新租户的默认配置因此自动跟上代码，存量租户按上面第 2 条的补授口径生效。
 
 同步是幂等的：跑两次结果相同。
 
@@ -40,6 +41,7 @@ from app.rbac.catalog import (
     codes_with_module,
     legacy_codes_removed_by_m1e1,
 )
+from app.rbac.scopes import KNOWN_SCOPE_TYPES, SUPPORTED_SCOPE_TYPES
 from app.rbac.seeds import (
     FULL_SCOPE_ROLES,
     PLATFORM_BUILTIN_ROLES,
@@ -59,8 +61,8 @@ BUILTIN_ROLE_CODES: tuple[str, ...] = tuple(
 # 同步写完后再查一次，防止目录/种子改动引入越权映射。
 # 模块集合从 `catalog.TENANT_MODULES` 绑定传入，不在 SQL 里抄第二份字面量：白名单若调整，
 # 这里与启动自检（`app/db/selfcheck.py`）必须同步变化，否则防线静默漂移。
-# 注意 DB 触发器 `role_permissions_realm_guard` 目前仍只挡 `module='platform'`（收紧为同一
-# 白名单见 TD-149 → M1-E2）；在那之前这道检查是 `observability`/`eval` 的唯一防线。
+# DB 触发器 `role_permissions_realm_guard` 在 M1-E2 收紧成同一份白名单（TD-149），
+# 两侧都以 `catalog.TENANT_MODULES` 为口径：触发器挡直写，这里挡同步链路。
 TENANT_PLATFORM_LEAK_CHECK_SQL: str = """
     select r.code, p.code
     from public.roles r
@@ -68,6 +70,28 @@ TENANT_PLATFORM_LEAK_CHECK_SQL: str = """
     join public.permissions p on p.id = rp.permission_id
     where p.module <> all(cast(:tenant_modules as text[]))
 """
+
+# 范围补齐的收尾校验（M1-E2 口径 ⑨ + TD-138）：范围解析是 fail-closed 的——
+# 「租户内一条 `data_scopes` 都没有」意味着这个租户**所有人都看不到任何数据**，
+# 与"升级后管理员名单空了"是同一类事故，必须在同步当场炸出来，而不是等业务发现。
+# 这里只查"完全没有任何范围行"，不查"出厂默认逐条是否都在"：
+# 后者会把运营合法的收窄（例如刻意撤掉某角色的全校范围）误判成故障。
+TENANT_WITHOUT_ANY_SCOPE_SQL: str = """
+    select t.id::text
+    from public.tenants t
+    where not exists (
+        select 1 from public.data_scopes s where s.tenant_id = t.id
+    )
+    order by 1
+"""
+
+# 出厂默认**范围**是否可同步的判据（口径 ⑨ 的表在 M1-E2 迁移里才建）。
+# 为什么查库而不是查版本号：已应用的 E1 迁移执行的也是**当前这份**同步代码，
+# 那条链上任何一次重放（全新库 `upgrade head`）都发生在 E2 建表之前——
+# 按版本猜会写出不存在的表，按库探测则自然成立："表在 ⇒ 一定写；表不在 ⇒ 本次没有范围可同步"。
+SCOPE_DEFAULTS_TABLE_EXISTS_SQL: str = (
+    "select to_regclass('public.rbac_builtin_role_scope_defaults') is not null"
+)
 
 # 口径 ⑧ 的前置闸门（简报 §5.1-①）：9 个旧码**只允许**在"删掉也不丢能力"的角色上被引用。
 # 全量型角色（`seeds.FULL_SCOPE_ROLES`，即两个超管）满足条件——它们的出厂默认按模块全量补，
@@ -114,7 +138,7 @@ def _full_scope_codes(realm: Realm) -> tuple[str, ...]:
 
 
 def _self_check_seeds() -> None:
-    """种子自洽校验（不依赖数据库）：幽灵码、租户角色越权、超管范围漂移。
+    """种子自洽校验（不依赖数据库）：幽灵码、租户角色越权、超管范围漂移、默认数据范围。
 
     异常:
         RuntimeError：上述任一不一致。
@@ -131,6 +155,19 @@ def _self_check_seeds() -> None:
         leaked = sorted(code for code in role.permissions if code_realm(code) != "tenant")
         if role.realm == "tenant" and leaked:
             raise RuntimeError(f"租户角色 {role.code} 引用了租户域（school/campus）外的权限：{leaked}")
+        bad_scopes = sorted(role.scopes - KNOWN_SCOPE_TYPES)
+        if bad_scopes:
+            raise RuntimeError(f"{role.realm}/{role.code} 声明了非法数据范围：{bad_scopes}")
+        # 平台 realm 没有租户内数据范围（`data_scopes` 是租户级表），写进来就是脏数据
+        if role.realm == "platform" and role.scopes:
+            raise RuntimeError(f"平台角色 {role.code} 不应声明数据范围：{sorted(role.scopes)}")
+        # 租户内置角色必须至少有一个**本期可实现**的范围，否则出厂即"看不到任何数据"：
+        # 只有 class/course 的默认在 M2 之前等价于空集（口径 ⑨ fail-closed），属于哑配置。
+        if role.realm == "tenant" and not role.scopes & SUPPORTED_SCOPE_TYPES:
+            raise RuntimeError(
+                f"租户内置角色 {role.code} 没有本期可实现的数据范围"
+                f"（{sorted(SUPPORTED_SCOPE_TYPES)} 之一）：出厂即看不到任何数据"
+            )
 
     super_admin = next(role for role in TENANT_BUILTIN_ROLES if role.code == "school_super_admin")
     if super_admin.permissions != codes_with_module("school") | codes_with_module("campus"):
@@ -191,13 +228,20 @@ def _upsert_permission_statements() -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
-def _rewrite_definition_statements() -> list[tuple[str, dict[str, Any]]]:
-    """整表重写两张定义表（代码的副本，允许覆盖）。"""
+def _rewrite_definition_statements(*, include_scope_defaults: bool) -> list[tuple[str, dict[str, Any]]]:
+    """整表重写定义表（代码的副本，允许覆盖）。
 
-    statements: list[tuple[str, dict[str, Any]]] = [
-        ("delete from public.rbac_builtin_role_defaults", {}),
-        ("delete from public.rbac_builtin_roles", {}),
-    ]
+    `include_scope_defaults=False` 时完全不碰 `rbac_builtin_role_scope_defaults`：
+    这张表由 M1-E2 迁移创建，而 M1-E1 迁移里那句 `sync_rbac_definitions_sync(op.get_bind())`
+    调用的是**当前**这份代码——全链路重放（新库 `upgrade head`）时它在建表之前执行。
+    判据由调用点从数据库探测得出（`scope_defaults_table_exists`），不靠迁移版本号猜：
+    表在 ⇒ 一定写；表不在 ⇒ 本次没有范围可同步（E2 迁移随后会带着表再同步一次）。
+    """
+
+    statements: list[tuple[str, dict[str, Any]]] = [("delete from public.rbac_builtin_role_defaults", {})]
+    if include_scope_defaults:
+        statements.append(("delete from public.rbac_builtin_role_scope_defaults", {}))
+    statements.append(("delete from public.rbac_builtin_roles", {}))
     for role in (*TENANT_BUILTIN_ROLES, *PLATFORM_BUILTIN_ROLES):
         statements.append(
             (
@@ -222,11 +266,24 @@ def _rewrite_definition_statements() -> list[tuple[str, dict[str, Any]]]:
                     },
                 )
             )
+        # 默认数据范围只有租户 realm 有（`realm = 'tenant'` 是表上的 CHECK）
+        if not include_scope_defaults:
+            continue
+        for scope_type in sorted(role.scopes):
+            statements.append(
+                (
+                    """
+                    insert into public.rbac_builtin_role_scope_defaults (realm, role_code, scope_type)
+                    values (:realm, :role_code, :scope_type)
+                    """,
+                    {"realm": role.realm, "role_code": role.code, "scope_type": scope_type},
+                )
+            )
     return statements
 
 
-def _backfill_role_statements() -> list[tuple[str, dict[str, Any]]]:
-    """按定义表补齐存量租户/平台侧的内置角色与其出厂默认。
+def _backfill_role_statements(*, include_scope_defaults: bool) -> list[tuple[str, dict[str, Any]]]:
+    """按定义表补齐存量租户/平台侧的内置角色、出厂默认映射与默认数据范围。
 
     默认映射分两种口径（原因见 `seeds.py:FULL_SCOPE_ROLES`）：
 
@@ -234,6 +291,9 @@ def _backfill_role_statements() -> list[tuple[str, dict[str, Any]]]:
       新增权限码会自动落到它们身上；
     - **其余内置角色**：只在「角色还没有任何映射」时授一次出厂默认。映射入库后属于运营配置，
       人工撤销的权限绝不能被同步悄悄加回来。
+
+    `include_scope_defaults` 的口径与 `_rewrite_definition_statements` 一致（表不存在时
+    不生成任何碰 `rbac_builtin_role_scope_defaults` 的语句）。
     """
 
     tenant_full_codes = list(_full_scope_codes("tenant"))
@@ -245,7 +305,7 @@ def _backfill_role_statements() -> list[tuple[str, dict[str, Any]]]:
         role.code for role in PLATFORM_BUILTIN_ROLES if role.code not in platform_full_codes
     )
 
-    return [
+    statements = [
         # 租户内置角色：每个租户都要有
         (
             """
@@ -342,10 +402,34 @@ def _backfill_role_statements() -> list[tuple[str, dict[str, Any]]]:
             {"codes": platform_other_codes},
         ),
     ]
+    if include_scope_defaults:
+        # 数据范围（M1-E2 口径 ⑨ + TD-138）：内置角色一条范围行都没有时补出厂默认。
+        # 与权限映射同一口径——范围入库后属于运营配置，人工撤掉的不能被同步悄悄加回来，
+        # 所以判据是"这个角色还没有任何范围行"，而不是"缺哪条补哪条"。
+        statements.append(
+            (
+                """
+                insert into public.data_scopes (id, tenant_id, role_id, scope_type, scope_id)
+                select gen_random_uuid(), r.tenant_id, r.id, d.scope_type, null
+                from public.roles r
+                join public.rbac_builtin_role_scope_defaults d
+                  on d.realm = 'tenant' and d.role_code = r.code
+                where r.is_system
+                  and not exists (
+                      select 1 from public.data_scopes s where s.role_id = r.id
+                  )
+                """,
+                {},
+            )
+        )
+    return statements
 
 
-def build_sync_statements() -> list[tuple[str, dict[str, Any]]]:
-    """完整的幂等同步语句（顺序：清旧码 → 补目录 → 重写定义表 → 补缺角色与映射）。
+def build_sync_statements(*, include_scope_defaults: bool = True) -> list[tuple[str, dict[str, Any]]]:
+    """完整的幂等同步语句（顺序：清旧码 → 补目录 → 重写定义表 → 补缺角色/映射/范围）。
+
+    `include_scope_defaults`：是否同步出厂默认**数据范围**（口径与判据见
+    `_rewrite_definition_statements`；由调用方按库内表是否存在决定）。
 
     异常:
         RuntimeError：种子与目录不自洽（`_self_check_seeds`）。
@@ -355,8 +439,8 @@ def build_sync_statements() -> list[tuple[str, dict[str, Any]]]:
     return [
         *_delete_legacy_permission_statements(),
         *_upsert_permission_statements(),
-        *_rewrite_definition_statements(),
-        *_backfill_role_statements(),
+        *_rewrite_definition_statements(include_scope_defaults=include_scope_defaults),
+        *_backfill_role_statements(include_scope_defaults=include_scope_defaults),
     ]
 
 
@@ -406,6 +490,39 @@ def _leaked_tenant_platform_grants(rows: Sequence[Any]) -> list[str]:
     return [f"{row[0]} -> {row[1]}" for row in rows]
 
 
+def assert_every_tenant_has_scope(tenant_ids: Sequence[str]) -> None:
+    """同步后仍有"整租户没有任何数据范围行"时 fail-fast（口径 ⑨ 是 fail-closed 的）。
+
+    范围解析不到 = 空集 = 该租户所有人看不到数据。这种情况只在配置链路坏掉时出现
+    （定义表为空、补写语句被删、迁移没跑全），所以宁可让迁移/同步失败，
+    也不要静默交付一个"接口全 200、列表全空"的租户。
+
+    异常:
+        RuntimeError：存在没有范围行的租户。
+    """
+
+    if tenant_ids:
+        raise RuntimeError(
+            "同步后以下租户没有任何 data_scopes 行，数据范围 fail-closed 会让全员看不到数据："
+            + ", ".join(tenant_ids)
+        )
+
+
+def _tenant_without_scope_ids(rows: Sequence[Any]) -> list[str]:
+    return [str(row[0]) for row in rows]
+
+
+def scope_defaults_table_exists(session: Any) -> bool:
+    """出厂默认范围表 `rbac_builtin_role_scope_defaults` 是否已建。
+
+    参数接受同步 `Connection` 或 `Session`（两者都有 `execute`）；异步侧由
+    `AsyncSession.run_sync` 传入 `Session`，因此两边共用同一句 SQL、没有第二份真相。
+    判据为什么查库而不是查版本号，见 `SCOPE_DEFAULTS_TABLE_EXISTS_SQL` 的注释。
+    """
+
+    return bool(session.execute(text(SCOPE_DEFAULTS_TABLE_EXISTS_SQL)).scalar_one())
+
+
 def sync_rbac_definitions_sync(bind: Connection) -> int:
     """同步版本（Alembic 迁移用）：与异步版执行同一份语句、同一套守卫。
 
@@ -414,14 +531,16 @@ def sync_rbac_definitions_sync(bind: Connection) -> int:
 
     异常:
         RuntimeError：存在同名非系统角色、旧码仍被非全量型角色引用，
-            或同步后租户角色仍引用 `school`/`campus` 域外的码。
+            同步后租户角色仍引用 `school`/`campus` 域外的权限，
+            或某租户同步后仍没有任何数据范围行。
     """
 
     rows = bind.execute(text(CONFLICTING_ROLE_CHECK_SQL), {"codes": list(BUILTIN_ROLE_CODES)})
     assert_no_conflicting_roles([dict(row) for row in rows.mappings()])
     assert_no_legacy_grants(_legacy_grant_rows_sync(bind))
 
-    statements = build_sync_statements()
+    include_scope = scope_defaults_table_exists(bind)
+    statements = build_sync_statements(include_scope_defaults=include_scope)
     for sql, params in statements:
         bind.execute(text(sql), params)
 
@@ -431,6 +550,12 @@ def sync_rbac_definitions_sync(bind: Connection) -> int:
     leaks = _leaked_tenant_platform_grants(leaked)
     if leaks:
         raise RuntimeError("同步后租户角色仍引用平台域权限：" + ", ".join(leaks))
+    # 范围表还没建的迁移（E1 及更早）不检查范围覆盖：那时还没有"出厂范围"这个概念，
+    # 检查只会把整条 upgrade 链卡死。E2 迁移建表后自己会做一次强校验。
+    if include_scope:
+        assert_every_tenant_has_scope(
+            _tenant_without_scope_ids(bind.execute(text(TENANT_WITHOUT_ANY_SCOPE_SQL)).all())
+        )
     return len(statements)
 
 
@@ -457,14 +582,15 @@ def _legacy_grant_rows_sync(bind: Connection) -> list[dict[str, Any]]:
 
 
 async def sync_rbac_definitions(session: AsyncSession) -> int:
-    """执行幂等同步（权限目录 upsert + 旧码删除 + 内置角色与出厂默认补齐）。
+    """执行幂等同步（权限目录 upsert + 旧码删除 + 内置角色、出厂默认映射与默认范围补齐）。
 
     返回值：
         实际执行的语句数（供调用方日志与测试断言"确实跑过一次"）。
 
     异常:
-        RuntimeError：种子与目录不自洽、存在同名的运营自建角色、旧码仍被非全量型角色引用，
-            或同步后租户角色仍引用 `school`/`campus` 域外的码（守卫，不静默放行）。
+        RuntimeError：种子与目录不自洽（含非法/缺失的默认数据范围）、存在同名的运营自建角色、
+            旧码仍被非全量型角色引用、同步后租户角色仍引用 `school`/`campus` 域外的权限，
+            或某租户同步后仍没有任何数据范围行（守卫，不静默放行）。
     """
 
     rows = (
@@ -474,7 +600,8 @@ async def sync_rbac_definitions(session: AsyncSession) -> int:
     legacy_rows = await session.execute(text(LEGACY_GRANT_GUARD_SQL), _legacy_grant_guard_params())
     assert_no_legacy_grants([dict(row) for row in legacy_rows.mappings()])
 
-    statements = build_sync_statements()
+    include_scope = await session.run_sync(scope_defaults_table_exists)
+    statements = build_sync_statements(include_scope_defaults=include_scope)
     for sql, params in statements:
         await session.execute(text(sql), params)
 
@@ -484,6 +611,9 @@ async def sync_rbac_definitions(session: AsyncSession) -> int:
     leaks = _leaked_tenant_platform_grants(leaked_rows)
     if leaks:
         raise RuntimeError("同步后租户角色仍引用平台域权限：" + ", ".join(leaks))
+    if include_scope:
+        scope_rows = (await session.execute(text(TENANT_WITHOUT_ANY_SCOPE_SQL))).all()
+        assert_every_tenant_has_scope(_tenant_without_scope_ids(scope_rows))
     return len(statements)
 
 
@@ -492,14 +622,18 @@ __all__ = [
     "CONFLICTING_ROLE_CHECK_SQL",
     "LEGACY_GRANT_GUARD_SQL",
     "PLATFORM_BUILTIN_ROLES",
+    "SCOPE_DEFAULTS_TABLE_EXISTS_SQL",
     "TENANT_BUILTIN_ROLES",
     "TENANT_PLATFORM_LEAK_CHECK_SQL",
+    "TENANT_WITHOUT_ANY_SCOPE_SQL",
     "BuiltinRole",
+    "assert_every_tenant_has_scope",
     "assert_no_conflicting_roles",
     "assert_no_legacy_grants",
     "build_sync_statements",
     "conflicting_roles",
     "legacy_grant_conflicts",
+    "scope_defaults_table_exists",
     "sync_rbac_definitions",
     "sync_rbac_definitions_sync",
 ]

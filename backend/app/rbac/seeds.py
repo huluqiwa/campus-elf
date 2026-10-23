@@ -20,12 +20,17 @@ Realm = Literal["platform", "tenant"]
 
 @dataclass(frozen=True, slots=True)
 class BuiltinRole:
-    """内置（系统）角色：码、显示名、所属 realm、出厂默认权限集。"""
+    """内置（系统）角色：码、显示名、所属 realm、出厂默认权限集与默认数据范围。
+
+    `scopes` 是 M1-E2 的出厂默认数据范围（矩阵 §2）：与权限映射同样是**运营可改**的配置，
+    同步只补缺、不覆盖；平台角色恒为空（`data_scopes` 是租户级表，平台 realm 没有范围概念）。
+    """
 
     code: str
     name: str
     realm: Realm
     permissions: frozenset[str]
+    scopes: frozenset[str] = frozenset()
 
 
 # 矩阵 §4 列名顺序：平台超管 | 平台运营 | 平台审计
@@ -80,6 +85,8 @@ TENANT_BUILTIN_ROLES: tuple[BuiltinRole, ...] = (
         name="校方超管",
         realm="tenant",
         permissions=TENANT_SUPER_ADMIN_PERMISSIONS,
+        # 口径 ⑨：超管/管理员=全校；其余内置角色=本人
+        scopes=frozenset({"school"}),
     ),
     BuiltinRole(
         code="school_admin",
@@ -98,6 +105,7 @@ TENANT_BUILTIN_ROLES: tuple[BuiltinRole, ...] = (
                 "school.message.read",
             }
         ),
+        scopes=frozenset({"school"}),
     ),
     BuiltinRole(
         code="teacher_b_end",
@@ -106,6 +114,8 @@ TENANT_BUILTIN_ROLES: tuple[BuiltinRole, ...] = (
         # 口径 ③（改后）：持后台账号即可上传知识库（§4 KB 上传行教师 B 端 √）。
         # 请假审批（§6-2）与 KB 查看/构建/测试/分块（△）需超管显式授予。
         permissions=frozenset({"school.kb.upload"}),
+        # B 端教师默认只看本人相关数据；班级/任课范围随 M2 组织模型授予（TD-151）
+        scopes=frozenset({"self"}),
     ),
     BuiltinRole(
         code="student",
@@ -113,6 +123,7 @@ TENANT_BUILTIN_ROLES: tuple[BuiltinRole, ...] = (
         realm="tenant",
         # §3.3 全部 campus 码：对话、反馈、清会话、消息、请假、自助删除、导航
         permissions=codes_with_module("campus"),
+        scopes=frozenset({"self"}),
     ),
     BuiltinRole(
         code="teacher",
@@ -121,6 +132,7 @@ TENANT_BUILTIN_ROLES: tuple[BuiltinRole, ...] = (
         # §4「C 端请假」教师 C 端列为 —：不默认给请假提交/撤回；其余同学生
         permissions=codes_with_module("campus")
         - frozenset({"campus.leave.create", "campus.leave.withdraw"}),
+        scopes=frozenset({"self"}),
     ),
 )
 

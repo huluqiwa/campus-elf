@@ -5,6 +5,8 @@
 临时库名一律以主测试库名为前缀，避免误操作非测试库。
 """
 
+from typing import Any
+
 import asyncpg
 from alembic import command
 from alembic.config import Config
@@ -83,3 +85,97 @@ def downgrade(config: Config, revision: str) -> None:
     """执行 `alembic downgrade`。"""
 
     command.downgrade(config, revision)
+
+
+async def scalar(dsn: str, sql: str, *args: Any) -> Any:
+    """临时库上取一个标量（迁移往返断言用；每次单独连接，避免跨连接看到旧状态）。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        return await connection.fetchval(sql, *args)
+    finally:
+        await connection.close()
+
+
+async def fetch(dsn: str, sql: str, *args: Any) -> list[asyncpg.Record]:
+    """临时库上取多行。"""
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        rows: list[asyncpg.Record] = await connection.fetch(sql, *args)
+        return rows
+    finally:
+        await connection.close()
+
+
+async def table_exists(dsn: str, table_name: str) -> bool:
+    """`public` 下该表是否存在。"""
+
+    value = await scalar(
+        dsn,
+        """
+        select count(*) from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relname = $1
+        """,
+        table_name,
+    )
+    return int(value) > 0
+
+
+async def column_exists(dsn: str, table_name: str, column_name: str) -> bool:
+    """`public.<table>` 上该列是否存在。"""
+
+    value = await scalar(
+        dsn,
+        """
+        select count(*) from pg_attribute a
+        join pg_class c on c.oid = a.attrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relname = $1
+          and a.attname = $2 and a.attnum > 0 and not a.attisdropped
+        """,
+        table_name,
+        column_name,
+    )
+    return int(value) > 0
+
+
+async def constraint_exists(dsn: str, constraint_name: str) -> bool:
+    """该约束是否存在（不区分类型：CHECK / FK / UNIQUE 都查）。"""
+
+    value = await scalar(
+        dsn, "select count(*) from pg_constraint con where con.conname = $1", constraint_name
+    )
+    return int(value) > 0
+
+
+async def function_defines(dsn: str, function_name: str) -> str:
+    """函数体原文（`pg_get_functiondef`），用于断言迁移确实换掉了函数。
+
+    异常:
+        AssertionError：该 `public` 函数不存在。
+    """
+
+    value = await scalar(
+        dsn,
+        """
+        select pg_get_functiondef(p.oid)
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname = $1
+        """,
+        function_name,
+    )
+    if value is None:
+        raise AssertionError(f"函数不存在：{function_name}")
+    return str(value)
+
+
+async def role_can_select(dsn: str, role_name: str, table_name: str) -> bool:
+    """某个数据库角色对该表是否有 SELECT 权限（授权面也是迁移要钉住的口径）。"""
+
+    value = await scalar(
+        dsn, "select has_table_privilege($1, 'public.' || $2, 'SELECT')", role_name, table_name
+    )
+    return bool(value)
+

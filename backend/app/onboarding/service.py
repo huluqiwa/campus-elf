@@ -12,11 +12,12 @@
 - 生产禁止 `DEV_SKIP_SCHOOL_REVIEW`（配置校验已强制）。
 """
 
+import logging
 import re
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 from uuid import UUID, uuid4
 
 import anyio
@@ -24,6 +25,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.approval.sod import ApprovalSeparationError, evaluate_self_approval
 from app.audit.redact import mask_email, truncate_text
 from app.audit.writer import append_audit
 from app.auth.passwords import generate_initial_password, hash_password
@@ -32,6 +34,7 @@ from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationReque
 from app.db.models.tenant import Tenant
 from app.db.session import db_session
 from app.integrations.mail import build_mailer, render_tenant_approved_email
+from app.settings.store import self_exception_enabled
 from app.storage.objects import ObjectStore, build_object_store
 
 SYSTEM_REVIEWER_ID = UUID("00000000-0000-0000-0000-0000000000aa")
@@ -302,7 +305,114 @@ _REVIEW_ERRORS: dict[str, tuple[int, str]] = {
     "REASON_REQUIRED": (422, "拒绝必须填写理由"),
     "INVALID_RESULT": (500, "审核结果非法"),
     "INVALID_PAYLOAD": (500, "开通参数不完整"),
+    # 数据库函数里的第二道判定：正常路径由接口层先挡住（拿到干净的 403/422），
+    # 这里兜的是"应用层读到的例外开关与函数读到的不是同一时刻"（运营并发改开关）。
+    "SELF_APPROVAL_FORBIDDEN": (403, "提交人不能审批自己提交的事项"),
+    "SELF_APPROVAL_REASON_REQUIRED": (422, "使用自批例外必须填写理由"),
 }
+
+
+class _SelfApprovalDenied(Exception):
+    """分权判定不通过（内部信号：先让本事务整体回滚，再由调用方补写拒绝审计）。"""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        http_status: int,
+        registration_id: UUID,
+        reviewer_id: UUID,
+        request_id: str | None,
+    ) -> None:
+        """记录错误码、面向用户的说明与建议 HTTP 状态码，以及审计所需的上下文。"""
+
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.http_status = http_status
+        self.registration_id = registration_id
+        self.reviewer_id = reviewer_id
+        self.request_id = request_id
+
+
+async def _guard_self_approval(
+    session: AsyncSession,
+    *,
+    registration: TenantRegistrationRequest,
+    reviewer_id: UUID,
+    reason: str | None,
+    request_id: str | None,
+) -> None:
+    """RBAC-03 第一道判定（口径 ③：应用层 + 数据库约束，不加触发器）。
+
+    开关**每请求从库读**（口径 ⑧）：运营在平台接口改完，下一次审批即用新值，
+    不重启、不踢在线会话。用掉例外时在同一个事务里写 `approval.self_exception.used`
+    （例外必须留下"谁批的、为什么批"的证据，否则开关等于没有审计）。
+
+    异常:
+        _SelfApprovalDenied：同人审批且例外未开启（403）或缺理由（422）。
+    """
+
+    try:
+        outcome = evaluate_self_approval(
+            submitter_id=registration.submitted_by_platform_user_id,
+            reviewer_id=reviewer_id,
+            exception_enabled=await self_exception_enabled(session),
+            reason=reason,
+        )
+    except ApprovalSeparationError as exc:
+        raise _SelfApprovalDenied(
+            code=exc.code,
+            message=exc.message,
+            http_status=exc.http_status,
+            registration_id=registration.id,
+            reviewer_id=reviewer_id,
+            request_id=request_id,
+        ) from exc
+    if outcome.used_exception:
+        await append_audit(
+            session,
+            action="approval.self_exception.used",
+            resource_type="tenant_registration_request",
+            resource_id=str(registration.id),
+            actor_realm="platform",
+            actor_id=reviewer_id,
+            result="success",
+            metadata={"reason": truncate_text((reason or "").strip(), MAX_REASON)},
+            request_id=request_id,
+        )
+
+
+async def _deny_self_approval(denied: _SelfApprovalDenied) -> NoReturn:
+    """拒绝审计落在**已回滚的事务之外**：这一笔什么都没改，但"谁试过自批"必须留痕。
+
+    审计写失败**不改变拒绝结果**（与 `data_scope.denied`、`auth.permission.denied` 同一口径）：
+    拒绝已经生效，把基础设施故障透给审核人只会得到 500 + 一次重试，而简报承诺的是干净的
+    403/422；故障本身进日志（只记异常类型，不带 traceback 里的 SQL 参数）。
+    """
+
+    try:
+        async with db_session(platform=True) as session:
+            await append_audit(
+                session,
+                action="approval.self_approval.denied",
+                resource_type="tenant_registration_request",
+                resource_id=str(denied.registration_id),
+                actor_realm="platform",
+                actor_id=denied.reviewer_id,
+                result="denied",
+                metadata={"code": denied.code},
+                request_id=denied.request_id,
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "自批拒绝审计写入失败：%s.%s",
+            type(exc).__module__,
+            type(exc).__name__,
+            extra={"registration_id": str(denied.registration_id)},
+        )
+    raise OnboardingError(denied.code, denied.message, denied.http_status) from denied
 
 
 async def _call_review(
@@ -434,6 +544,13 @@ async def approve_request(
                 raise OnboardingError("REQUEST_NOT_FOUND", "注册申请不存在", 404)
             if registration.status != "pending":
                 raise OnboardingError("ALREADY_REVIEWED", "该申请已被审核", 409)
+            await _guard_self_approval(
+                session,
+                registration=registration,
+                reviewer_id=reviewer_id,
+                reason=reason,
+                request_id=request_id,
+            )
 
             contact_email = registration.email
             school_name = registration.school_name
@@ -474,6 +591,8 @@ async def approve_request(
                 await mailer.send(to=contact_email, subject=subject, body=body)
             except Exception as exc:  # 统一映射为可重试业务错误
                 raise _EmailDeliveryFailed from exc
+    except _SelfApprovalDenied as denied:
+        await _deny_self_approval(denied)
     except _EmailDeliveryFailed as exc:
         # 事务已回滚：租户不存在，失败审计不能带 tenant_id（否则违反外键）
         await _write_email_failure_audit(
@@ -508,7 +627,8 @@ async def reject_request(
     """审核拒绝（理由必填）。
 
     异常:
-        OnboardingError: 理由为空（422）、申请不存在（404）或已被审核（409）。
+        OnboardingError: 理由为空（422）、申请不存在（404）、已被审核（409）、
+            提交人自批（403/422，见 RBAC-03）。
     """
 
     clean_reason = reason.strip()
@@ -521,27 +641,37 @@ async def reject_request(
     object_store = store or build_object_store(settings)
     review_record_id = uuid4()
 
-    async with db_session(platform=True) as session:
-        registration = await session.get(TenantRegistrationRequest, request_id_uuid)
-        if registration is None:
-            raise OnboardingError("REQUEST_NOT_FOUND", "注册申请不存在", 404)
-        if registration.status != "pending":
-            raise OnboardingError("ALREADY_REVIEWED", "该申请已被审核", 409)
+    try:
+        async with db_session(platform=True) as session:
+            registration = await session.get(TenantRegistrationRequest, request_id_uuid)
+            if registration is None:
+                raise OnboardingError("REQUEST_NOT_FOUND", "注册申请不存在", 404)
+            if registration.status != "pending":
+                raise OnboardingError("ALREADY_REVIEWED", "该申请已被审核", 409)
+            await _guard_self_approval(
+                session,
+                registration=registration,
+                reviewer_id=reviewer_id,
+                reason=clean_reason,
+                request_id=request_id,
+            )
 
-        snapshot_key = await _snapshot_key(object_store, registration, review_record_id)
-        await _call_review(
-            session,
-            request_id_uuid=request_id_uuid,
-            result="rejected",
-            reason=clean_reason,
-            reviewer_id=reviewer_id,
-            http_request_id=request_id,
-            review_record_id=review_record_id,
-            snapshot_key=snapshot_key,
-            admin_id=None,
-            password_hash=None,
-            school_code=None,
-        )
+            snapshot_key = await _snapshot_key(object_store, registration, review_record_id)
+            await _call_review(
+                session,
+                request_id_uuid=request_id_uuid,
+                result="rejected",
+                reason=clean_reason,
+                reviewer_id=reviewer_id,
+                http_request_id=request_id,
+                review_record_id=review_record_id,
+                snapshot_key=snapshot_key,
+                admin_id=None,
+                password_hash=None,
+                school_code=None,
+            )
+    except _SelfApprovalDenied as denied:
+        await _deny_self_approval(denied)
 
 
 async def list_registration_requests(

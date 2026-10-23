@@ -16,7 +16,9 @@ from app.api.auth import router as auth_router
 from app.api.body_limit import BodySizeLimitMiddleware
 from app.api.campus_chat import router as campus_chat_router
 from app.api.health import router as health_router
+from app.api.platform_rbac import router as platform_rbac_router
 from app.api.platform_tenants import router as platform_tenants_router
+from app.api.school_personnel import router as school_personnel_router
 from app.config import get_settings
 from app.core.logging import configure_logging
 from app.db.selfcheck import verify_runtime_database
@@ -87,6 +89,8 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
     application.include_router(auth_router, prefix=settings.api_prefix)
     application.include_router(campus_chat_router, prefix=settings.api_prefix)
     application.include_router(platform_tenants_router, prefix=settings.api_prefix)
+    application.include_router(school_personnel_router, prefix=settings.api_prefix)
+    application.include_router(platform_rbac_router, prefix=settings.api_prefix)
     return application
 
 

@@ -52,7 +52,7 @@ _DEFINITIONS: tuple[tuple[str, str], ...] = (
     ("platform.audit.export", "导出平台侧审计"),
     ("platform.message.view", "查看平台消息"),
     ("platform.message.send", "发送平台消息"),
-    ("platform.cross_tenant.read", "跨租只读（需二次授权并强制审计）"),
+    ("platform.cross_tenant.read", "跨租只读（只读事务+必填理由+强制审计；工单化二次授权延后 TD-153）"),
     # §3.2 校方
     ("school.dashboard.view", "查看校方基础看板"),
     ("school.feedback.view", "查看反馈列表与详情"),

@@ -25,6 +25,7 @@ from app.auth import revocation
 from app.auth.tokens import Realm, TokenError, decode_access_token
 from app.config import get_settings
 from app.db.session import db_session
+from app.rbac.scopes import DataScopeContext, scope_context_from_rows
 from app.tenant import context as tenant_context
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,19 @@ _GATE_ALLOWED_SUFFIXES = (
     "/auth/logout",
     "/auth/me",
 )
+
+# 每请求解析当前主体数据范围的 SQL（RBAC-02；判据本身在 `app/rbac/scopes.py`）。
+# 为什么在租户连接里查：`data_scopes` 是租户级表，RLS 已经挡掉跨租，所以不额外拼 tenant 条件；
+# 角色范围与用户范围**取并集**（矩阵 §2：用户级授权是"额外给"，不是"收窄"）。
+DATA_SCOPE_SELECT_SQL: str = """
+    select distinct s.scope_type, s.scope_id::text
+    from data_scopes s
+    where s.user_id = :uid
+       or exists (
+           select 1 from user_roles ur
+           where ur.user_id = :uid and ur.role_id = s.role_id
+       )
+"""
 
 
 def _is_gate_allowed(path: str) -> bool:
@@ -58,6 +72,9 @@ class Principal:
     must_change_password: bool
     roles: frozenset[str]
     permissions: frozenset[str]
+    # 数据范围类型（RBAC-02，M1-E2 口径 ⑨⑩）：角色 + 用户两条绑定取并集；
+    # 平台主体恒为空集（平台不按"学校/本人"划数据，跨租可见性由 `platform.*` 权限单独决定）。
+    scope_types: frozenset[str] = frozenset()
     # 当前会话是否完成过 MFA（来自访问令牌 amr；改密重签时原样保留）
     mfa_verified: bool = False
 
@@ -65,6 +82,28 @@ class Principal:
         """是否具备某权限码。"""
 
         return code in self.permissions
+
+    @property
+    def scope_context(self) -> DataScopeContext:
+        """当前主体的数据范围判据（传给仓储做服务端过滤）。
+
+        解析不到任何范围行 → 空集 → 看不到数据（fail-closed，不回退成全校）。
+        """
+
+        return DataScopeContext(
+            subject_user_id=self.user_id, scope_types=self.scope_types
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _Identity:
+    """一次数据库读取的结果（状态、令牌版本、角色、权限码、数据范围）。"""
+
+    active: bool
+    token_version: int
+    roles: frozenset[str]
+    permissions: frozenset[str]
+    scope_types: frozenset[str] = frozenset()
 
 
 async def _must_change_password(
@@ -101,10 +140,8 @@ def _parse_bearer(authorization: str | None) -> str:
     return token
 
 
-async def _tenant_identity(
-    session: AsyncSession, user_id: UUID
-) -> tuple[bool, int, frozenset[str], frozenset[str]]:
-    """在租户连接内读取用户状态、token_version、角色与权限码。"""
+async def _tenant_identity(session: AsyncSession, user_id: UUID) -> _Identity:
+    """在租户连接内读取用户状态、token_version、角色、权限码与数据范围。"""
 
     row = (
         await session.execute(
@@ -139,18 +176,29 @@ async def _tenant_identity(
             {"uid": user_id},
         )
     ).scalars().all()
-    return (
-        row["status"] == "active",
-        int(row["token_version"]),
-        frozenset(str(code) for code in role_rows),
-        frozenset(str(code) for code in permission_rows),
+    scope_rows = (await session.execute(text(DATA_SCOPE_SELECT_SQL), {"uid": user_id})).all()
+    # 未知的 scope_type 在这里会抛 ValueError：脏数据宁可让请求 500，也不能退化成「不过滤」放行整表
+    scope = scope_context_from_rows(
+        subject_user_id=user_id,
+        rows=[
+            (str(scope_row[0]), None if scope_row[1] is None else str(scope_row[1]))
+            for scope_row in scope_rows
+        ],
+    )
+    return _Identity(
+        active=row["status"] == "active",
+        token_version=int(row["token_version"]),
+        roles=frozenset(str(code) for code in role_rows),
+        permissions=frozenset(str(code) for code in permission_rows),
+        scope_types=scope.scope_types,
     )
 
 
-async def _platform_identity(
-    session: AsyncSession, user_id: UUID
-) -> tuple[bool, int, frozenset[str], frozenset[str]]:
-    """在平台连接内读取平台账号状态、token_version、角色与权限码。"""
+async def _platform_identity(session: AsyncSession, user_id: UUID) -> _Identity:
+    """在平台连接内读取平台账号状态、token_version、角色与权限码。
+
+    平台主体没有 `data_scopes`（矩阵 §5-11：范围是租户侧概念），`scope_types` 恒为空集。
+    """
 
     row = (
         await session.execute(
@@ -182,11 +230,11 @@ async def _platform_identity(
             {"uid": user_id},
         )
     ).scalars().all()
-    return (
-        row["status"] == "active",
-        int(row["token_version"]),
-        frozenset(str(code) for code in role_rows),
-        frozenset(str(code) for code in permission_rows),
+    return _Identity(
+        active=row["status"] == "active",
+        token_version=int(row["token_version"]),
+        roles=frozenset(str(code) for code in role_rows),
+        permissions=frozenset(str(code) for code in permission_rows),
     )
 
 
@@ -218,22 +266,18 @@ async def get_current_principal(
         if claims.tenant_id is None:
             raise _unauthorized("令牌无效")
         async with db_session(tenant_id=claims.tenant_id) as session:
-            active, token_version, roles, permissions = await _tenant_identity(
-                session, claims.subject
-            )
+            identity = await _tenant_identity(session, claims.subject)
             must_change_password = await _must_change_password(session, claims.subject, tenant=True)
     else:
         async with db_session(platform=True) as session:
-            active, token_version, roles, permissions = await _platform_identity(
-                session, claims.subject
-            )
+            identity = await _platform_identity(session, claims.subject)
             must_change_password = await _must_change_password(
                 session, claims.subject, tenant=False
             )
 
-    if not active:
+    if not identity.active:
         raise _unauthorized("账号不可用，请联系管理员")
-    if token_version != claims.token_version:
+    if identity.token_version != claims.token_version:
         raise _unauthorized("登录已失效，请重新登录")
 
     tenant_context.bind_context(
@@ -241,8 +285,8 @@ async def get_current_principal(
             realm=claims.realm,
             user_id=claims.subject,
             tenant_id=claims.tenant_id,
-            roles=roles,
-            permissions=permissions,
+            roles=identity.roles,
+            permissions=identity.permissions,
             request_id=getattr(request.state, "request_id", None),
         )
     )
@@ -262,8 +306,9 @@ async def get_current_principal(
         jti=claims.jti,
         session_id=claims.session_id,
         expires_at=claims.expires_at,
-        roles=roles,
-        permissions=permissions,
+        roles=identity.roles,
+        permissions=identity.permissions,
+        scope_types=identity.scope_types,
         mfa_verified=claims.mfa_verified,
     )
 

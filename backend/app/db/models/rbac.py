@@ -228,6 +228,31 @@ class RbacBuiltinRoleDefault(Base):
     permission_code: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class RbacBuiltinRoleScopeDefault(Base):
+    """内置角色的出厂默认数据范围（M1-E2，口径 ⑨）。
+
+    与 `rbac_builtin_role_defaults` 同性质：**代码所有**的定义表，不是运营配置。
+    为什么要有它：`seed_builtin_roles(uuid)` 是数据库函数，新租户开通时要写 `data_scopes`；
+    把范围清单抄进函数体就会出现"Python 一份、SQL 一份"，改默认时静默漏改。
+
+    `realm` 只允许 `tenant`：`data_scopes` 是租户级表（绑角色/用户 + tenant_id），
+    平台角色没有租户内数据范围的概念，写进来就是脏数据。
+    """
+
+    __tablename__ = "rbac_builtin_role_scope_defaults"
+    __table_args__ = (
+        PrimaryKeyConstraint("realm", "role_code", "scope_type"),
+        CheckConstraint("realm = 'tenant'", name="realm_only_tenant"),
+        CheckConstraint(
+            "scope_type IN ('school', 'class', 'course', 'self')", name="scope_type_valid"
+        ),
+    )
+
+    realm: Mapped[str] = mapped_column(String(16), nullable=False)
+    role_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
 # 供种子数据与校验使用的最小权限目录（M1-A 只落目录，实际授权在 M1-E 细化）
 PERMISSION_CATALOG: tuple[tuple[str, str, str], ...] = (
     ("platform.tenant.view", "platform", "view"),

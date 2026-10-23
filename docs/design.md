@@ -763,7 +763,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 
 1. JWT 只从 token 取 `tenant_id`；平台/租户分 realm/audience。
 2. 中间件设置 `TenantContext`；请求级 contextvar。
-3. 仓储层基类强制 `tenant_id` 过滤；禁止裸 SQL 跨租。
+3. 仓储层基类强制 `tenant_id` 过滤，并在此**统一注入数据范围谓词**（M1-E2：`app/db/repository.py:TenantScopedRepository.scoped()` — 范围判据随 `Principal` 一次解析出来，业务代码不再各自手写 `where`；需要绕过的模块必须显式传 `ScopeBypass(reason=…)`，裸 SQL 由守卫清单钉住，见 `docs/rbac-matrix.md` §2.1）；禁止裸 SQL 跨租。
 4. PostgreSQL RLS：`SET LOCAL app.tenant_id`；策略 `tenant_id = current_setting('app.tenant_id')::uuid`；平台角色例外需显式 grant。
 5. Qdrant：每租户独立 collection + payload 校验 + 文档人群 token 过滤（`min_should: 1`，无 token 的版本禁止发布，fail-closed）。
 6. MinIO：`tenant/{tenant_id}/...` 前缀；签名 URL 短时有效。
@@ -773,6 +773,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 ### 8.2 跨租访问
 
 - 默认拒绝；平台跨租访问需二次授权（工单/审批）+ 审计；只读、最小必要。
+- **M1-E2 已交付最小通道（2026-10-23）**：`app/personnel/cross_tenant.py` — 只有持有 `platform.cross_tenant.read` 的**平台 realm 主体**可调用；会话第一条语句即 `SET LOCAL TRANSACTION READ ONLY`，写入在数据库层被拒；一次只允许一个 `tenant_id`（批量跨租会把"看了多少学校"稀释成一条审计）；`reason` 必填（缺失/超长 → 422），每次成功读取写一条 `platform.cross_tenant.read` 审计（理由 + 行数）；结果按请求指定的单个租户过滤、敏感字段脱敏；**审计写入失败则请求失败**（不可审计的跨租访问宁可 5xx，不能静默发生）。**二次授权（工单/审批链）本期不做**，通道只做"码 + 只读 + 必填理由 + 强制审计"，工单化挂在 TD-153（已延后：M6 或首个真实跨租需求，以先到者为准；届时在同一 action 上追加工单号，不另开一条通道）。租户侧不存在跨租通道：`data_scopes` 是租户级表，越权一律 404（§8.1-3、矩阵 §2.1）。
 - 不得关联“同一自然人”事实。
 - 测试矩阵见 `docs/tenant-isolation.md`。
 
@@ -792,6 +793,14 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
   - 每个接口都必须声明权限：`require_permission(码, realm=…)`（realm 必传，权限目录是全局的，码本身不构成跨 realm 边界）；免鉴权路由进显式白名单并写理由，由 `tests/test_route_permission_manifest_unit.py` 钉住（忘挂鉴权、幽灵码、白名单过期或越类都会让 CI 红）。
   - **热更新语义**：`Principal` 每请求从库读角色与权限，映射改动下一次请求即生效，**不作废在线会话**（不递增 `token_version`；会话轮换只用于改密、MFA 变更、踢设备这类账号级安全事件）。代价是每请求数条小 join，基线由 `tests/integration/test_rbac_sql_baseline.py` 钉住（TD-100 目标 M6）。
   - **热更新的边界**：本条只说"权限判据每请求从库读"。踢下线/设备撤销走 Redis 会话标记，Redis 故障时对 `is_active` fail-open（`app/auth/revocation.py:165`），被踢设备最长仍可用 15 分钟（TD-111 → M6）；需要立即断开某账号时按账号级安全事件做会话轮换，不要指望收回权限能断会话。
+- **数据范围落地口径（M1-E2，2026-10-23）**：
+  - 范围判据随 `Principal` 每请求从库读出（`data_scopes`：角色行 ∪ 用户行），与权限同一热更新口径；**解析不到范围 = 空集（fail-closed）**，绝不回退成"看全校"。本期只交付 `school`/`self`；`class`/`course` 依赖 M2 组织模型（TD-151）。
+  - 过滤写在**仓储基类**（§8.1-3），不在各接口重复实现；例外必须显式 `ScopeBypass(reason=…)`，裸 SQL 由守卫清单钉住（`tests/test_bare_sql_scope_guard_unit.py`）。
+  - 越权形状：列表静默过滤到范围内，**显式 id 越权 → 404**（与"不存在"同形，不暴露存在性）并写安全审计 `data_scope.denied`。
+  - 出厂默认（超管/管理员 = `school`，其余租户角色 = `self`）声明在 `app/rbac/seeds.py:BuiltinRole.scopes`，落库到 `rbac_builtin_role_scope_defaults`；同步**只补"还没有任何范围行"的角色**，与权限映射同一"只补缺、不覆盖人工改动"口径；补完仍出现"整租户没有任何 `data_scopes` 行"时由 `sync_rbac_definitions()` 收尾的 `assert_every_tenant_has_scope()` fail-fast（TD-138）——宁可让迁移/同步失败，也不静默交付一个"接口全 200、列表全空"的租户。
+  - 成本：带范围解析后一次带鉴权请求实测 6 条 SQL，上界仍钉 8 条（`tests/integration/test_rbac_sql_baseline.py`，TD-100 → M6 再评估缓存）。
+  - 首个真实调用点：`GET /api/v1/school/personnel`(+`/{id}`，`school.personnel.view`)，响应形状按口径 ⑥ 固定为 `id/user_type/display_name/status/last_login_at/email_masked`——**不外发 `login_id`（学号/工号）**、明文邮箱、密码哈希与 MFA 字段；跨租通道复用同一形状。
+- **审批分权落地口径（M1-E2，2026-10-23）**：提交人不能自批 = **三道锁，不依赖数据库触发器**（用户口径：加触发器会把"改例外开关"变成"改数据库代码"，收益不超过 CHECK + 函数两道）。① 应用层 `app/onboarding/service.py:_guard_self_approval()` 在**状态机校验之后（409 已排除）、凭证快照复制之前**判定，正常路径拿到干净的 403/422，且不留下孤儿快照对象；拒绝审计 `approval.self_approval.denied` 在**本事务回滚之后**另开平台会话写入（"谁试过自批"不随回滚丢失）。② 数据库函数 `review_registration_request()` 内再判一次并返回 `SELF_APPROVAL_FORBIDDEN`/`SELF_APPROVAL_REASON_REQUIRED`，兜的是"接口层与函数读到的例外开关不是同一时刻"（运营并发改开关）。③ 同表 CHECK `no_self_approval_without_exception`（`提交人为空 OR 审核人≠提交人 OR self_exception_used IS TRUE`）兜绕过应用代码的手工 SQL，用反证测试钉住（无例外标记 → `IntegrityError`；带标记同一条写入必须成功，否则约束是空挡）。第三条款由例外功能逼出（2026-10-23 用户确认：两条款版会让例外不可用），代价是"直写同人 + 标记为真"数据库分不出真假，检测改走反查审计（有例外标记却没有 `approval.self_exception.used` → TD-161）。例外开关落 `system_settings`（`approval.self_exception_enabled`，默认关闭、每请求读库、改完不重启不踢会话），由 `PUT /api/v1/platform/settings/{key}` 修改（`platform.config.edit` + **必填理由** + `platform.setting.update` 审计）；打开后仍需理由，真正用掉例外写 `approval.self_exception.used` 审计。
 - 审批分权：提交人不能自批；超管例外默认关闭；SaaS 审核员不得审核自己提交学校。
 
 ---
