@@ -134,7 +134,7 @@
 | TD-104 | M1-C | 登录失败锁定/验证码未实现 | 已采纳 | M1-D | 属 AUTH-05；失败已写审计，M1-D 加计数与锁定 |
 | TD-105 | M1-C | `certifi 2026.10.18` 命中 GHSA-6q48-6c7w-9gw2 | 已完成 | M1-C | backend/evals 锁文件均升级到 `certifi 2026.10.19`；临时忽略已删除；本地 pip-audit 复验通过 |
 | TD-107 | M1-C | bcrypt 72 字节输入上限与 spec"最大 128 字符"冲突 | 已完成 | M1-D1 | 用户确认保留 bcrypt cost 12，spec/design 明确"10~128 字符且 ≤72 UTF-8 字节"；登录/改密/重置入口均按字节拦截（改密/重置 422，登录统一凭证错误），不再 500；argon2/预哈希不进入当前计划 |
-| TD-110 | M1-C-UI | E2E 用接口 mock，未跑真实后端全栈链路 | 已采纳 | M1 验收 | M1 验收阶段用专用 compose 栈（后端 + 测试库 + 前端 preview）跑全栈 E2E，覆盖登录→改密→业务接口的真实链路 |
+| TD-110 | M1-C-UI | E2E 用接口 mock，未跑真实后端全栈链路 | 已完成 | M1 验收 | ✅ M1 验收已收口（2026-10-24）：专用 compose 栈 `deploy/docker-compose.e2e.yml` + `scripts/e2e-stack.sh` + `backend/scripts/e2e_seed.py`，`frontend/e2e-fullstack/` 12 例真实链路全绿（登录→改密→业务接口），见 `docs/m1-acceptance.md` §2 |
 | TD-109 | M1-C | 启动自检的矩阵校验逐租户串行开会话（租户数百级时拖慢启动） | 已延后 | M1 尾/M6 | 当前量级无影响；租户规模上量后改为单次聚合（平台侧只读聚合视图或 SECURITY DEFINER 统计函数）或分批+告警 |
 | TD-108 | M1-C | 多标签/重试类并发刷新会触发 reuse_detected 并强制全家族登出 | 已延后 | M1-D/M4 | 语义上符合"重用即泄漏"的安全取舍；前端需保证同一时刻只用一个刷新令牌（TD-103）；若实际体验受影响，评估短宽限期或幂等重放窗口 |
 | TD-106 | M1-C | bandit B608 无法在无网络环境复跑 | 已完成 | M1-C | 认证模块拼接 SQL 全部改为按 realm 的字面量语句表（无 f-string、无 nosec）；本地 bandit 复跑 0 issue；另发现本机代理会劫持 127.0.0.1 流量，测试与工具链统一 `NO_PROXY=127.0.0.1,localhost,::1` |
@@ -175,7 +175,7 @@
 | TD-144 | M1-E1 | 教师上传后"人群限本人/任课班级、扩全校需管理员确认"未落地 | 已采纳 | M2/M3 | 口径 ⑤ 本期只放开"持后台账号即可上传"；范围收敛依赖 M2 班级/任课关系与 M3 KB ACL，届时在构建入口做人群默认值 + 扩权审批 |
 | TD-145 | M1-E1 | 权限映射变更即时生效、无双人确认（改错即全租户生效） | 已延后 | M6 | 与 TD-140 同源（R7）；本期风险由"只有迁移/SQL 能改映射、且必须发版"限制，M2 开放前台配置后必须先引入确认机制再放开 |
 | TD-146 | M1-E1 | 全量型角色「只补不撤」：人工从 `school_super_admin`/`platform_super_admin` 收回的权限，会在下一次同步/发版被自动补回 | 已延后 | M2 | 矩阵把这两个角色*定义*成「范围内全量」（§1.2 + §4 定稿脚注 2026-10-23 + §5-11），若不补则新增权限码永远进不了超管视野；其余内置角色一律「未配置过才授默认」，人工改动不被覆盖（`tests/integration/test_rbac_sync.py` 锁住）。M2 配置界面若需长期压制某码，改为在库里维护"超管例外表"而非改变口径 |
-| TD-147 | M1-E1 | 迁移 `downgrade` 把内置角色映射重置为「E1 之前的出厂状态」，不是「回滚前的真实状态」：E1 期间对系统角色的人工增授（及 C 端角色上的 `user_roles` 绑定）在回滚后丢失 | 已延后 | M1 尾/部署 | 逐租户快照恢复需要额外表与清理任务，本期回滚只承诺"结构可来回"（`test_migration_rbac_rollback.py` 覆盖 head↔downgrade↔head 重放）。生产回滚 SOP 必须先 `copy role_permissions/user_roles` 备份；M1 验收前把该约束写入 `docs/handoff.md` 部署注意 |
+| TD-147 | M1-E1 | 迁移 `downgrade` 把内置角色映射重置为「E1 之前的出厂状态」，不是「回滚前的真实状态」：E1 期间对系统角色的人工增授（及 C 端角色上的 `user_roles` 绑定）在回滚后丢失 | 已延后 | M1 尾/部署 | 逐租户快照恢复需要额外表与清理任务，本期回滚只承诺"结构可来回"（`test_migration_rbac_rollback.py` 覆盖 head↔downgrade↔head 重放）。生产回滚 SOP 必须先 `copy role_permissions/user_roles` 备份；M1 验收前把该约束写入 `docs/handoff.md` 部署注意（✅ 已写入 docs/handoff.md §5.1，2026-10-24） |
 | TD-148 | M1-E1 | 路由清单依赖 FastAPI 内部结构（`_IncludedRouter`/`original_router`/`include_context.prefix`、`dependant.call` 上的标记），框架升级可能静默漏读路由 | 已采纳 | M6 依赖升级评审 | 已用 `test_manifest_sees_the_whole_app` 设下限（读到路由数 <20 或缺关键路径即红）把"静默失效"变成"测试失败"；升级 FastAPI/Starlette 时按该用例与白名单过期检查（`test_whitelist_has_no_stale_entries`）一并复核 |
 | TD-149 | M1-E1 | DB 触发器 `role_permissions_realm_guard` 仍只按 `module = 'platform'` 拒绝入租户角色：`observability.*`/`eval.*` 可被手工 INSERT 进租户角色，而代码口径把它们算作平台运维域 | 已完成 | M1-E2 | 迁移 `f7a9b1c3d5e8` 与 E2 范围/职责分离迁移合并替换该函数：守卫改为 `module NOT IN ('school','campus')` 白名单（取值由 `catalog.TENANT_MODULES` 生成，与代码侧 `code_realm()`/启动自检同一份真相，不在 SQL 里抄字面量），`observability`/`eval` 不再能写入租户角色；正反两面由 `tests/integration/test_auth_login.py::test_db_guard_rejects_platform_domain_permission_for_tenant_role` 三码拒绝 + 放行钉住，downgrade 按名恢复 `b7d1e3f5a9c2` 原文 |
 | TD-150 | M1-E1 | 出厂默认补授用「角色映射为空」当作「未配置过」的启发式：把内置角色的最后一条人工撤销掉，下一次同步会把默认值补回来 | 已延后 | M2 | 改成 `roles.defaults_applied`（或 `role_defaults_granted` 标记表）才能区分"清空"与"未初始化"，代价是一列 + 迁移 + 语义变更（撤销最后一条从此不失效）。当前口径已知代价，行为由 `test_sync_reapplies_factory_defaults_when_builtin_role_is_emptied` 钉住；M2 前台配置界面（TD-137）上线前必须先落地标记，否则"撤销一条=白撤"会被用户当成 bug |
@@ -195,6 +195,10 @@
 | TD-167 | M1-F | 查询接口每次请求对 audit_logs 全量 count(*)，表只增不减 | 已采纳 | M6 | 量级上来后改物化计数或近似值；当前 <10k 行无感知 |
 | TD-168 | M1-F | `CREATE TRIGGER` 无幂等保护（部分失败后重跑 upgrade 报已存在） | 已延后 | M2 | 迁移重跑场景罕见；需时改 DO 块判 pg_trigger |
 | TD-169 | M1-F | `append_audit` 返回的 ORM 实例 `prev_hash/hash/hash_version` 是 flush 前过期值 | 已采纳 | M2 | 调用方需 refresh 或 RETURNING；M2 接审计查询页时一并处理 |
+| TD-170 | M1 验收 | 全栈 E2E（`e2e-fullstack/`）未纳入远端 CI，当前仅验收期本机执行 | 已采纳 | M6 | frontend workflow 起 backend 容器需要镜像构建与依赖栈供给方案；随 M6 部署硬化一并决策，验收期以 `docs/m1-acceptance.md` §6 复现命令为准 |
+| TD-171 | M1 验收 | 后端 Dockerfile（`deploy/backend/Dockerfile`）首版仅服务 E2E 验收：基础镜像未锁 digest、无镜像审计/资源口径/信号处理等生产硬化 | 已采纳 | M6 | 首次真实容器化演练已验证 uv+python3.13-slim 路径可跑通；M6 部署硬化时按生产清单补齐并接 `docs/deployment.md` |
+| TD-172 | M1 验收 | backend 的 `scripts/` 目录不在 ruff/mypy 门禁范围（scope 为 `app tests`），`e2e_seed.py` 仅验收期单独检查 | 已采纳 | M2 | M2 第一个功能点开工时把 `scripts` 纳入 backend ruff/mypy scope 与 `scripts/ci.sh`（evals 已有 `src tests scripts` 先例），避免范围蔓延到本次验收提交 |
+| TD-173 | M1-F 复审 | 审计写入在整段外层事务期间持有全局 advisory lock（单链串行化）：吞吐上限与外层事务时长耦合，高频写场景可能成为热点 | 已采纳 | M6 | 与 TD-163（外部锚点）同批评估：量级上来后分段链/锁内最小化；M1 量级（登录/权限拒绝频度）实测无感知 |
 | TD-162 | M1-F | 持 AUDIT_HASH_KEY 者可伪造入链行（hash_version=1 且哈希一致），链校验无法区分 | 已采纳 | M6 | 外部锚点（anchor_ref 预留字段 + 定期 WORM 导出哈希到外部存储）可收口；当前审计密钥仅平台运维持有，泄露面极小 |
 | TD-163 | M1-F | 哈希未覆盖 ip/user_agent/metadata_json/before_json_redacted/after_json_redacted，超级用户改这些字段不可检测 | 已采纳 | M6 | 与外部锚点一并考虑（扩字段会破坏现有链）；当前仅覆盖核心业务字段（与简报字段表一致） |
 | TD-161 | M1-E2 | 例外标记可被伪造直写：CHECK 有 `self_exception_used IS TRUE` 这一条款后，"绕过审核函数直写同人 + 标记为真"在数据库层与合法例外同形，无法区分 | 已采纳 | M2 | 检测改走反查而非再加一道约束（用户 2026-10-23 确认三条款 CHECK）：真例外一定带 `approval.self_exception.used` 审计，故 M2 审计巡检加一条反查——`school_review_records` 里 `self_exception_used IS TRUE` 却在同 `request_id` 找不到对应审计的行即告警。落点与 TD-153（跨租工单化）同一批安全巡检 |

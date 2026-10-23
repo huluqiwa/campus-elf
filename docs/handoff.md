@@ -20,15 +20,15 @@
 | M1 | M1-D2 MFA（AUTH-04） | ✅ 完成（两轮审查通过、第二轮 0B/0M、后端 411 passed、前端 32 单测 + 28 E2E、远端 CI backend/frontend/security 全绿；简报 `docs/design-briefs/M1-D2-mfa.md`） |
 | M1 | M1-E1 鉴权内核：权限矩阵 59 码落库 + 8 内置角色出厂默认 + 接口声明权限（RBAC-01 部分） | ✅ 完成（第五轮复审通过 0B/0M/3 Minor；后端 481 passed、ruff/mypy/alembic check/bandit/pip-audit 本地全绿、head=`e5f7a9c1b3d5`；远端 CI backend #39851973194 / security #39851973099 success；逐轮记录见 `docs/review-log.md`，简报 `docs/design-briefs/M1-E1-rbac-core.md`） |
 | M1 | M1-E2 RBAC 数据范围与服务端过滤、审批职责分离、平台跨租只读（RBAC-02/03，含 TD-149 触发器收紧） | ✅ 完成（两轮审查：第一轮 0B/3M/4M 全部修复、第二轮主上下文 0B/0M（当日独立审查子智能体配额耗尽）；后端 561 passed、ruff/mypy 149 文件/alembic check/bandit×2 本地全绿、head=`f7a9b1c3d5e8`；远端 CI backend #39950816551 / security #39950816785 success；逐轮记录见 `docs/review-log.md`，简报 `docs/design-briefs/M1-E2-data-scope.md`） |
-| M1 | M1-F 审计哈希链（AUD-01，含 TD-068/091 收口） | ✅ 完成（待复审确认） |
-| M1 | M1 验收报告 | ⏳ 未开始（需含 TD-110 真实后端全栈 E2E） |
+| M1 | M1-F 审计哈希链（AUD-01，含 TD-068/091 收口） | ✅ 完成（第三轮复审通过 0B/0M，review-log 2026-10-24） |
+| M1 | M1 验收报告（含 TD-110 全栈 E2E） | ✅ 完成（`docs/m1-acceptance.md`；12 例全栈 E2E 全绿 + 28 mock 回归 + 后端 572 passed；边界 TD 台账 171 条全处置） |
 | M2/M3/M4 | 组织与人员 / 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 ORG-05、KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M1 验收报告（含 TD-110 真实后端全栈 E2E）→ M2 → M3 → M4。
+- **建议的下一步顺序**：M2（组织与人员 ORG-01~05）→ M3 → M4。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
-- 数据库迁移 head：`f7a9b1c3d5e8`（M1-E2 数据范围/职责分离/设置表）；`alembic check` 应无漂移。
+- 数据库迁移 head：`a8c3e9f1b5d7`（M1-F 审计哈希链触发器/密钥 GUC）；`alembic check` 应无漂移（2026-10-24 实测无漂移）。
 
 ---
 
@@ -47,7 +47,7 @@ cd backend
 uv sync --frozen
 uv run ruff check app tests
 uv run mypy --no-incremental app tests
-REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 561 passed）
+REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 578 passed）
 uv run alembic -x db_url="$TEST_DATABASE_URL" check   # 迁移漂移检查
 
 # 3) 前端
@@ -162,6 +162,11 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 - 生产环境：`DEV_SKIP_SCHOOL_REVIEW`、`DEV_SKIP_FILE_SCAN`、`DEV_SKELETON_LOOP_ENABLED` 必须关闭（配置校验已强制）；`AUTH_COOKIE_SECURE=true`、`AUTH_REFRESH_TOKEN_IN_BODY=false`。
 - 知识库门禁：审批通过前不得解析/切块/嵌入/索引；未审批调用构建必须 409 + 审计。
 - AI：只读工具；不展示原始 chain-of-thought / 系统提示词 / 工具参数 / 内部地址 / PII / 密钥；不伪造思考内容。
+
+### 5.1 部署注意（M1-E1 RBAC 回滚约束，TD-147）
+
+- 迁移 `downgrade` 只保证**结构**可来回（`test_migration_rbac_rollback.py` 覆盖 head↔downgrade↔head 重放）；`role_permissions`/`user_roles` 的**数据**会被重置为「E1 之前的出厂状态」，不是「回滚前的真实状态」。
+- 生产回滚 SOP：执行 `alembic downgrade` 前，必须先备份 `role_permissions`、`user_roles` 两表（含 E1 期间对系统角色的人工增授、C 端角色上的 `user_roles` 绑定），回滚后逐租户恢复；否则人工授权会静默丢失。
 
 ---
 

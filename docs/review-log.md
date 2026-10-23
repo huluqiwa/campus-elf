@@ -346,6 +346,26 @@
 - 第二轮修复：锁后重分配 sequence（锁序=sequence 序）；死代码修复（first_chained IS NULL 时也检测 v0 行）；自检测试改 monkeypatch（第三轮复审确认落地）；篡改检测改为脚本级 subprocess 测试（退出码 1 + 未入链行输出）；README/review-log 更新；MA-5 各项登记 TD。
 - 最终门禁：后端 574 passed、ruff/mypy/bandit 全绿。
 
+### M1 验收 + TD-110 全栈 E2E（验收审查，2026-10-24）
+
+- 设计简报：docs/design-briefs/M1-acceptance.md
+- commit/diff：staged diff（19 文件，+1309：全栈 E2E 基础设施 + 12 用例 + 验收报告与文档回写）
+- 审查人/agent：独立审查子 agent（与实现者独立上下文）
+- Findings：Blocker 0；Major 1（简报 §2 两处实现偏差未在 §9 登记：seed 口令写死为测试域常量、迁移/seed 在宿主机执行）；Minor 9（TD 计数过期 169→171、CI 触发预测不实、e2e_seed 死代码、scripts 不在门禁范围、Dockerfile 冗余步骤、.dockerignore 缺 .env*、compose 缺 QDRANT_URL、越权断言 [401,403] 可收紧为 403、review-log 待补）。
+- 修复：Major 与 Minor 全部落实（越权断言经核实 `require_permission` 的 realm 判定恒为 403 后收紧；TD-172 登记 scripts 门禁范围；TD-173 另见 M1-F 条目）。
+- 复测：全栈 E2E 12/12 passed（29.4s）；mock E2E 28 passed；后端 578 passed；ruff/mypy/alembic check 全绿。
+- 结论：**可提交**（0 Blocker / 0 Major）。
+
+### M1-F 审计哈希链：第三轮复审确认（随 M1 验收，2026-10-24）
+
+- commit/diff：`070e9c7`（M1-F 生产代码）+ 本次修复（`session.py` 注释、审计集成测试两处、新增单测、回滚回归、TD-173）
+- 审查人/agent：独立审查子 agent（同验收审查不同焦点）
+- Findings：Blocker 0；Major 1（`verify_chain()` 篡改检测两分支零测试，简报 §5 TDD 承诺未兑现）；Minor 6（fixture 死代码、docstring 失实、advisory lock 未登记 TD、set_config 异常 repr 边界、「集成 9 条」应为 8 条、无 M1-F downgrade 用例）。
+- 修复：新增 `tests/test_audit_chain_verify_unit.py` 5 例覆盖 `verify_chain` 全部分支（篡改/断链/链头/密钥错误）；`test_m1f_downgrade_with_audit_rows_then_upgrade` 验证 downgrade 保留审计行、再 upgrade 后新行 prev_hash 接上原链尾；Minor 全部落实；e2e 库行篡改用例经复审确认**不要求补**（subprocess 接线已被未入链行用例覆盖，会话级禁用触发器的恢复风险与收益不对等）。
+- 复测：受影响用例 23 passed；全量 **578 passed**（505s）；ruff/mypy 153 文件全绿。
+- 口径更正：M1-F 集成测试正确计数为 **8 条**（此前 commit message 与本记录的「9 条」系首条用例拆两项误计）。
+- 结论：**M1-F 复审通过，移除「待复审确认」标注**。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

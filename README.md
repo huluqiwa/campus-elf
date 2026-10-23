@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-**当前阶段：M1 租户与身份进行中。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
+**当前阶段：M1 租户与身份已验收（`docs/m1-acceptance.md`），下一步 M2 组织与人员。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
 
 已完成：
 
@@ -19,12 +19,13 @@
 - **M1-E1 鉴权内核（RBAC-01 部分）**：权限矩阵 v1.2 的 59 个权限码（platform 12 / school 34 / campus 9 / observability 2 / eval 2）与 8 个内置角色出厂默认落库，删除 9 个无引用旧码；`app/rbac` 提供权限目录、realm 单一口径（`TENANT_MODULES`/`code_realm()`）、幂等同步（只补不撤、不覆盖运营改动）与路由清单守卫；迁移 `e5f7a9c1b3d5` 建代码持有的定义表与 `seed_builtin_roles(uuid)`（SECURITY DEFINER、EXECUTE 已收回），两条开通路径同源，并补齐 C 端 `student`/`teacher`；`require_permission(code, realm=)` 先判 realm 再判权限，接入 `campus.chat.use`、`platform.tenant.view`、`platform.tenant.review`，拒绝写 `auth.permission.denied`（只带 path+reason）；权限增删下一次请求即生效且不作废在线会话。矩阵 §3/§4 由测试解析并逐列比对，改一格 √/△ 即有用例变红。数据范围服务端过滤与审批职责分离见下一条 M1-E2。
 
 - **M1-E2 数据范围与职责分离（RBAC-02/03）**：`school`/`self` 数据范围出厂默认落库（`rbac_builtin_role_scope_defaults`），`Principal` 每请求解析、仓储基类统一注入谓词，解析不到范围 = 空集（fail-closed），显式 id 越权 → 404 + `data_scope.denied` 审计；新增 `GET /api/v1/school/personnel`(+详情)（`school.personnel.view`，响应不含 `login_id`）；提交人不能自批的三道锁（应用层 403/422、数据库函数、同表三条款 CHECK）+ `system_settings` 例外开关（`platform.config.edit`、必填理由、审计、热生效）；平台跨租只读最小通道（只读事务 + 单租户 + 必填理由 + 审计失败即拒绝，工单化延后 TD-153）；`role_permissions_realm_guard` 收紧到 `TENANT_MODULES`；迁移 `f7a9b1c3d5e8`。
+- **M1-F 审计哈希链（AUD-01）**：审计仅追加升级为跨表单链（触发器计算 `prev_hash`/`hash`，密钥经 GUC 注入不入日志）、哈希链查询接口与 `backend/scripts/verify_audit_chain.py` 校验脚本、应用启动自检；TD-068/091 收口。
+- **M1 验收报告（含 TD-110 收口）**：`docs/m1-acceptance.md`。专用 compose 栈（`deploy/backend/Dockerfile` + `deploy/docker-compose.e2e.yml` + `scripts/e2e-stack.sh`）跑真实后端全栈 E2E：`frontend/e2e-fullstack/` **12 例全绿**（三端真实登录、首登强制改密、MailHog 真实邮件重置、平台 tenants/audit 业务接口、数据范围、越权 403、会话设备被踢 401）；边界技术债台账 171 条全部有处置（169 既有 + 本次新增 TD-170/171），TD-147 部署注意已写入 handoff §5.1。
 
-当前门禁：后端 **574 passed**（M1-E2 不改前端，前端沿用 M1-D2 的 **32 单测 + 28 E2E**）、`ruff`/`mypy`（149 文件）/`alembic check`/`bandit` 本地全绿、远端 security CI（含 gitleaks/pip-audit/bandit）success、迁移 head `a8c3e9f1b5d7`；M1-D1、M1-D2、M1-E1、M1-E2 均已通过复审与远端 CI（backend / security；M1-E2 为 `d7a7663`）。
+当前门禁（M1 验收时点，2026-10-24）：后端 **578 passed**、前端 **32 单测 + 28 mock E2E + 12 全栈 E2E（TD-110）**、`ruff`/`mypy`/`alembic check`/`bandit` 本地全绿、迁移 head `a8c3e9f1b5d7`（无漂移）；M1-D1、M1-D2、M1-E1、M1-E2 均已通过复审与远端 CI（backend / security）。
 
 进行中/待做：
 
-- **M1-F** 审计哈希链；随后出 **M1 验收报告**（含真实后端全栈 E2E，TD-110）。
 - **M2/M3/M4** 未开始；其中 SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。
 
 ## 技术栈（已锁定）
