@@ -66,15 +66,9 @@ async def audit_env(migrated_database: None) -> AsyncIterator[AsyncEngine]:
     finally:
         await admin_engine.dispose()
 
-    # 每个用例用独立引擎，在事务内设置密钥 GUC
+    # 密钥 GUC 由各用例在自身事务内注入（is_local=true，事务结束自动失效）；
+    # 这里只提供引擎，不做 session 级 set_config（会残留在池中连接上，误导后续用例）。
     engine = make_test_engine("admin")
-    factory = make_session_factory(engine)
-    async with factory() as session, session.begin():
-        await session.execute(
-            text("select set_config('app.audit_hash_key', :key, false)"),
-            {"key": TEST_AUDIT_KEY},
-        )
-
     yield engine
 
     await engine.dispose()
@@ -120,13 +114,15 @@ async def test_trigger_computes_hash_and_links(audit_env: AsyncEngine) -> None:
 
 @pytest.mark.asyncio
 async def test_hash_is_hmac_not_plain_sha(audit_env: AsyncEngine) -> None:
-    """重算 HMAC 与存储一致；不同密钥/纯 SHA256 不一致。"""
+    """不同密钥产生不同哈希（证明密钥参与计算，非纯 SHA256）。
+
+    Python 侧重算与存储的一致性由 test_verify_script_passes
+    （触发器算 → 脚本按同一字段列表重算）覆盖。
+    """
 
     row = await _insert_audit(audit_env, "test.hmac")
     assert len(row["hash"]) == 64
 
-    # 用不同密钥重算应不同（证明是 HMAC 而非纯哈希——纯哈希无密钥参与）
-    # 此处通过触发器的行为间接验证：密钥错误时插入会因触发器读错 GUC 而产生不同哈希
     factory = make_session_factory(audit_env)
     async with factory() as session, session.begin():
         await session.execute(

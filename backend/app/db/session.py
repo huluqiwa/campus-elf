@@ -145,7 +145,9 @@ async def db_session(
 
     normalized = normalize_tenant_id(tenant_id)
     factory = get_session_factory(platform=platform)
-    # 审计哈希链密钥：在事务内注入 GUC（触发器读取），事务结束自动失效
+    # 审计哈希链密钥：在事务内注入 GUC（触发器读取），事务结束自动失效。
+    # 注意：密钥经绑定参数传入；若本语句异常，SQLAlchemy 异常 repr 可能带
+    # [parameters: ...]（含密钥）——调用方不得把该异常原样写入日志（M6 日志脱敏收口）。
     audit_key = get_settings().audit_hash_key
 
     async with factory() as session, session.begin():

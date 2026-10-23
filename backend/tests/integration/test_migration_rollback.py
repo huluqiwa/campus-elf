@@ -13,6 +13,7 @@ import asyncpg
 import pytest
 from alembic import command
 from alembic.config import Config
+from asyncpg import Record
 from sqlalchemy.engine import make_url
 
 from tests.support.db import BACKEND_ROOT
@@ -24,6 +25,8 @@ M1A_REVISION = "779f731db342"
 M1C2_PREVIOUS_REVISION = "c8e2f4a6b1d3"
 D1_PREVIOUS_REVISION = "d4e6f8a0b2c1"
 D1_REVISION = "b2d4f6a8c0e1"
+M1F_PREVIOUS_REVISION = "f7a9b1c3d5e8"
+M1F_TEST_KEY = "m1f-rollback-audit-key-0123456789abcdef"
 
 
 def _alembic_config(url: str) -> Config:
@@ -604,6 +607,101 @@ async def _m1c2_backfill_mismatches(dsn: str) -> int:
         return int(tenant) + int(platform)
     finally:
         await connection.close()
+
+
+def test_m1f_downgrade_with_audit_rows_then_upgrade() -> None:
+    """M1-F 复审 Minor-6：已有审计行时 downgrade 只摘触发器（数据保留），再 upgrade 后链继续。"""
+
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL 未设置；先运行 scripts/test-stack.sh up 并导出 TEST_*")
+    assert_test_database_dsn(admin_url)
+
+    dsn, database = _admin_dsn(admin_url)
+    temp_database = f"{database}_m1frollback"
+    temp_dsn = dsn.rsplit("/", 1)[0] + f"/{temp_database}"
+    temp_url = admin_url.rsplit("/", 1)[0] + f"/{temp_database}"
+
+    async def seed_two_chained_rows() -> list[Record]:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            rows: list[Record] = []
+            for action in ("test.m1f.rollback.1", "test.m1f.rollback.2"):
+                async with connection.transaction():
+                    await connection.execute(
+                        "select set_config('app.audit_hash_key', $1, true)", M1F_TEST_KEY
+                    )
+                    rows.append(
+                        dict(
+                            await connection.fetchrow(
+                                "insert into audit_logs "
+                                "(event_id, actor_realm, action, resource_type, result, created_at) "
+                                "values (gen_random_uuid(), 'system', $1, 'test', 'success', now()) "
+                                "returning sequence, prev_hash, hash, hash_version",
+                                action,
+                            )
+                        )
+                    )
+            return rows
+        finally:
+            await connection.close()
+
+    async def rollback_state() -> tuple[bool, int]:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            trigger_gone = (
+                await connection.fetchval(
+                    "select count(*) from pg_trigger "
+                    "where tgname = 'audit_logs_hash_chain' and not tgisinternal"
+                )
+            ) == 0
+            chained_rows = await connection.fetchval(
+                "select count(*) from audit_logs where hash is not null"
+            )
+            return trigger_gone, chained_rows
+        finally:
+            await connection.close()
+
+    async def insert_after_reupgrade() -> Record:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            async with connection.transaction():
+                await connection.execute(
+                    "select set_config('app.audit_hash_key', $1, true)", M1F_TEST_KEY
+                )
+                return dict(
+                    await connection.fetchrow(
+                        "insert into audit_logs "
+                        "(event_id, actor_realm, action, resource_type, result, created_at) "
+                        "values (gen_random_uuid(), 'system', 'test.m1f.rollback.3', 'test', "
+                        "'success', now()) returning sequence, prev_hash, hash, hash_version"
+                    )
+                )
+        finally:
+            await connection.close()
+
+    asyncio.run(_create_database(dsn, temp_database))
+    try:
+        config = _alembic_config(temp_url)
+        command.upgrade(config, "head")
+        seeded = asyncio.run(seed_two_chained_rows())
+        assert [row["hash_version"] for row in seeded] == [1, 1]
+        assert seeded[1]["prev_hash"] == seeded[0]["hash"]
+
+        command.downgrade(config, M1F_PREVIOUS_REVISION)
+        trigger_gone, chained_rows = asyncio.run(rollback_state())
+        assert trigger_gone, "downgrade 后哈希链触发器应被移除"
+        assert chained_rows == 2, "downgrade 不得删除已有审计行（仅追加数据保留）"
+
+        command.upgrade(config, "head")
+        trigger_gone_after, _ = asyncio.run(rollback_state())
+        assert not trigger_gone_after, "重新 upgrade 后触发器应恢复"
+        fresh = asyncio.run(insert_after_reupgrade())
+        assert fresh["hash_version"] == 1
+        # 链在保留行之后继续：新行 prev_hash = 上一条已入链行的 hash
+        assert fresh["prev_hash"] == seeded[-1]["hash"]
+    finally:
+        asyncio.run(_drop_database(dsn, temp_database))
 
 
 def test_m1c2_downgrade_with_session_reasons_then_upgrade() -> None:
