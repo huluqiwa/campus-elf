@@ -103,8 +103,7 @@ function decodeMailBody(message: Record<string, unknown>): string {
   const parts = raw.split(/\r?\n\r?\n/);
   const header = parts[0] ?? "";
   const body = parts.slice(1).join("\r\n\r\n");
-  const encoding =
-    /content-transfer-encoding:\s*(\S+)/i.exec(header)?.[1]?.toLowerCase() ?? "7bit";
+  const encoding = /content-transfer-encoding:\s*(\S+)/i.exec(header)?.[1]?.toLowerCase() ?? "7bit";
   if (encoding === "base64") {
     try {
       return Buffer.from(body.replace(/\s+/g, ""), "base64").toString("utf-8");
