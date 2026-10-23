@@ -336,6 +336,7 @@
 - 第一轮修复：响应删除 `login_id`、补 `last_login_at` 与 `_RESPONSE_KEYS`/`login_id not in text` 硬断言；三条款 CHECK 经用户确认（「接受三条款+补检测」）并登记 TD-156/TD-161；docstring 改为如实陈述并登记 TD-160；修正租户状态注释；越权审计改 best-effort（类型级日志、不改变 404）；只读用例改为断言 PG 报错含 `read-only transaction` 且探针无残留；目录描述改为"工单化延后 TD-153"；补跨租审计失败 fail-closed、绕过接口层直调审核函数的第二道锁、数据库守卫正反两面（平台域三码拒绝 + 租户域放行）等用例。
 - 第二轮复审（当日子智能体配额耗尽，改在主上下文执行，非独立上下文）：**通过**（0 Blocker / 0 Major）。复核 `principal`/`repository`/`seeds`/`onboarding`/审批/设置/API/迁移与全部 E2 用例：范围解析 fail-closed、三道锁互相独立、跨租通道只读先行且审计失败即失败、响应形状与 SQL 上限、权限码/白名单/矩阵口径一致，未发现新缺陷。附带记录：`rbac_builtin_role_scope_defaults` 未加指向角色定义表的外键（应用角色仅 `SELECT`，写入只来自 SECURITY DEFINER 的 `seed_builtin_roles`），判断为低价值不改，留 M2 配置界面复评。
 - 最终门禁：后端 **561 passed**（全量退出码 0）、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（149 文件）无问题、`bandit -r app -x tests` / `bandit -r alembic -s B608` 退出码 0、`alembic check` 无漂移、head=`f7a9b1c3d5e8`；本期不改前端（`/school/personnel` 无前端入口，TD-152），无新增 Playwright 用例。
+- 远端 CI（`d7a7663`）：`backend` #39950816551 success、`security` #39950816785 success；`frontend`/`evals` 未触发（无对应路径改动）。
 
 ## 高风险功能复审记录
 

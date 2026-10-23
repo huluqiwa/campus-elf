@@ -174,3 +174,26 @@
 - 审查时重点验证：范围解析是否 fail-closed；仓储是否存在未声明上下文的构造点；裸 SQL 守卫是否真能复现一次越权；CHECK 是否被测试真实触发（不是只测应用层）；触发器收紧后 `observability.*`/`eval.*` 是否两面取证；跨租通道是否确实 READ ONLY 且只命中一个租户；例外开启是否带理由+审计；SQL 条数是否 ≤8；矩阵/design 是否同步；TD 是否有处置。
 - 允许的偏差：接口命名与分页参数细节、审计 action 字符串（需与矩阵 §5 一致）、`system_settings` 列顺序。
 - 不允许的偏差：改成 DB 触发器实现自批拦截、把范围过滤下推到 RLS、把 `class`/`course` 半做进来、跨租通道放宽写权限。
+
+## 9. 交付结果与实现期偏差（2026-10-23 回填）
+
+### 9.1 实现结果
+
+- 数据层：迁移 `f7a9b1c3d5e8` 建 `rbac_builtin_role_scope_defaults`（出厂范围默认）与 `system_settings`（平台策略开关）；扩写 `seed_builtin_roles(uuid)` 为新租户写 `data_scopes`；`review_registration_request()` 承担 RBAC-03（复制提交人 + 例外判定）；`role_permissions_realm_guard` 收紧到 `catalog.TENANT_MODULES` 白名单。
+- 服务层：`Principal` 每请求解析范围（角色行 ∪ 用户行，解析不到 = 空集）；`TenantScopedRepository` 统一注入 `tenant_id` + 范围谓词，`ScopeBypass(reason=…)` 是唯一绕过口，缺归属列在构造期报错；越权详情 404 + `data_scope.denied` 审计（best-effort）。
+- 接口层：`GET /api/v1/school/personnel`(+`/{id}`，`school.personnel.view`，响应固定 6 字段)；`POST /api/v1/platform/cross-tenant/personnel/read`（只读事务 + 单租户 + 理由 + 审计 fail-closed）；`GET/PUT /api/v1/platform/settings`（`platform.config.view/edit`，改值必填理由 + 审计）。
+- 职责分离：应用层 `_guard_self_approval()`、数据库函数 `SELF_APPROVAL_*`、同表三条款 CHECK 三道锁；例外开关 `approval.self_exception_enabled` 每请求读库热生效，例外使用与拒绝各写审计。
+- 测试：E2 新增单元/集成/业务场景用例；全量 561 passed；裸 SQL 守卫清单与 SQL 条数基线（实测 6 / 上限 8）。
+
+### 9.2 实现期偏差与取舍（均已登记 TD）
+
+- CHECK 由简报初稿的两条款改为三条款（`OR self_exception_used IS TRUE`）：2026-10-23 用户确认「接受三条款+补检测」；伪造直写的检测走反查审计（TD-161）。
+- 自批拒绝审计在事务回滚之后另开平台会话写入，避免"拒绝记录随回滚丢失"。
+- 同一"越权"两处审计口径刻意不同：租户侧 best-effort（审计故障仍 404）、跨租 fail-closed（审计失败即请求失败）（TD-158）。
+- `rbac_builtin_role_scope_defaults` 不加指向角色定义表的外键：应用角色仅 `SELECT`、写入只来自 SECURITY DEFINER 的 `seed_builtin_roles`，低价值不改，留 M2 配置界面复评。
+- 人员列表 P95 未压测（TD-159）；前端人员页延后 M2（TD-152）。
+
+### 9.3 门禁与审查
+
+- 门禁：后端 **561 passed**、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（149 文件）无问题、`alembic check` 无漂移且 head=`f7a9b1c3d5e8`、`bandit -r app -x tests` / `bandit -r alembic -s B608` 退出码 0。
+- 审查轮次（详见 `docs/review-log.md` M1-E2 小节）：第一轮独立审查 0 Blocker + 3 Major + 4 Minor（响应泄漏 `login_id`、三条款 CHECK 未拍板、docstring 虚承诺等），全部修复；第二轮因当日独立审查子智能体配额耗尽改在主上下文执行（非独立上下文），结论 0 Blocker / 0 Major。
