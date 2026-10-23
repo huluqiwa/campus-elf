@@ -12,6 +12,8 @@ vendor/
 !.env.example
 !.env.*.example
 deploy/.env.test
+# M1 验收（TD-110）全栈 E2E 种子账号文件（含测试口令，不入库）
+deploy/.e2e-accounts.json
 *.pem
 *.key
 *.p12

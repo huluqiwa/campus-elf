@@ -12,6 +12,7 @@
     "format": "prettier --write .",
     "test:unit": "pnpm -r --if-present test:unit",
     "test:e2e": "pnpm build && playwright test",
+    "test:e2e:fullstack": "pnpm build && playwright test --config playwright.fullstack.config.ts",
     "audit": "pnpm audit --audit-level high",
     "dev:admin": "pnpm --filter admin dev",
     "dev:campus": "pnpm --filter campus dev"
