@@ -1,7 +1,8 @@
-"""审计事件写入（M1-A 表结构；M1-F 补哈希链）。
+"""审计事件写入（M1-A 表结构；M1-F 哈希链由数据库触发器计算）。
 
-M1-A 决策：`prev_hash/hash` 可空、`hash_version=0` 表示"未入链"。因此这里只写事件本身，
-不伪造哈希。M1-F 实现链计算与校验后会替换本写入器（TD-068）。
+M1-F 起：`prev_hash` / `hash` / `hash_version` 由 `audit_logs_compute_hash()` 触发器
+在 INSERT 前自动填充（应用层不再硬编码 None/0）。
+密钥由 `db_session()` 在事务内注入 GUC `app.audit_hash_key`，触发器读取。
 """
 
 from datetime import UTC, datetime
@@ -26,7 +27,7 @@ async def append_audit(
     metadata: dict[str, Any] | None = None,
     request_id: str | None = None,
 ) -> AuditLog:
-    """写入一条审计事件（仅追加；不计算哈希链）。
+    """写入一条审计事件（仅追加；哈希链由数据库触发器计算）。
 
     参数:
         session: 已处于事务中的会话（平台路径需已设置 `app.platform_context`）。
@@ -58,9 +59,7 @@ async def append_audit(
         result=result,
         request_id=request_id,
         metadata_json=metadata,
-        prev_hash=None,
-        hash=None,
-        hash_version=0,
+        # prev_hash / hash / hash_version 由数据库触发器在 INSERT 前自动填充（M1-F）
         created_at=datetime.now(UTC),
     )
     session.add(event)

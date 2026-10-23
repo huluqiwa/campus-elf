@@ -69,6 +69,10 @@ async def env(
 ) -> AsyncIterator[None]:
     """清空业务数据、种两个平台审核账号，并把应用指向测试栈（含 MailHog 与本地对象存储）。"""
 
+    import contextlib
+
+    with contextlib.suppress(RuntimeError):
+        await dispose_engine()  # Windows 下旧引擎清理可能因事件循环关闭而报错，忽略后重建
     admin_engine = make_test_engine("admin")
     try:
         await clean_test_data(admin_engine)

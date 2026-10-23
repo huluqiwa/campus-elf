@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     # 是否在响应体回显刷新令牌：仅开发/测试需要（自动化测试与非浏览器客户端）；
     # staging/production 必须 false——否则 XSS 可读走长期凭证，抵消 HttpOnly 的意义（审查 MA3）
     auth_refresh_token_in_body: bool = True
+    # 审计哈希链密钥（M1-F）：≥32 字节随机值，与 JWT_SECRET/ENCRYPTION_KEK 相互独立。
+    # 缺失时（dev/test）审计仍写入但标 hash_version=0 不入链（fail-open，链校验可检测此类行）
+    audit_hash_key: SecretStr | None = None
 
     # ---------- 密码策略 / 失败锁定 / 邮件重置（M1-D1） ----------
     # 同一账号在窗口内连续失败达到上限即锁定（AUTH-05）
@@ -235,6 +238,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"{self.app_env} 环境必须关闭 AUTH_REFRESH_TOKEN_IN_BODY"
                 "（刷新令牌只走 HttpOnly Cookie，避免 XSS 读取）"
+            )
+        audit_key = (
+            self.audit_hash_key.get_secret_value() if self.audit_hash_key else ""
+        )
+        if len(audit_key) < 32 or any(
+            marker in audit_key.lower()
+            for marker in ("change-me", "changeme", "placeholder", "example", "your-secret")
+        ):
+            raise ValueError(
+                f"{self.app_env} 环境 AUDIT_HASH_KEY 必须是 ≥32 字节的随机密钥"
+                "（生成：openssl rand -hex 32）"
             )
         if self.auth_cookie_samesite == "none":
             raise ValueError(f"{self.app_env} 环境禁止 AUTH_COOKIE_SAMESITE=none（跨站请求风险）")

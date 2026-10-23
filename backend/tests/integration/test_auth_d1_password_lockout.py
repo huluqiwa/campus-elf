@@ -49,6 +49,10 @@ def migrated_database() -> Iterator[None]:
 async def auth_env(migrated_database: None, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     """指向测试库/Redis，并清空业务数据。"""
 
+    import contextlib
+
+    with contextlib.suppress(RuntimeError):
+        await dispose_engine()  # Windows 事件循环防御
     admin_engine = make_test_engine("admin")
     try:
         await clean_test_data(admin_engine)

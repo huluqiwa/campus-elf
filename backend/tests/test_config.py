@@ -34,9 +34,13 @@ def test_production_rejects_skeleton_loop_switch() -> None:
         )
 
 
-def test_development_allows_optional_dependencies_and_switch() -> None:
+def test_development_allows_optional_dependencies_and_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """开发环境允许缺省依赖地址与开启空壳 Loop。"""
 
+    # 全量跑时前序集成测试可能已设置 DATABASE_URL（防御性 delenv，确保默认值测试不受影响）
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     settings = Settings(
         _env_file=None,
         app_env="development",
@@ -79,6 +83,7 @@ def _production_settings(**overrides: object) -> Settings:
         "qdrant_url": "http://127.0.0.1:6333",
         "auth_cookie_secure": True,
         "auth_refresh_token_in_body": False,
+        "audit_hash_key": "production-audit-key-0123456789abcdef",
         "password_reset_url_base": "https://admin.example.com/reset-password",
         "smtp_host": "smtp.example.com",
         "smtp_port": 587,
@@ -181,6 +186,7 @@ def _staging_settings(**overrides: object) -> Settings:
         "jwt_secret": "9f" * 32,
         "auth_cookie_secure": True,
         "auth_refresh_token_in_body": False,
+        "audit_hash_key": "production-audit-key-0123456789abcdef",
         "password_reset_url_base": "https://admin.example.com/reset-password",
         "smtp_host": "smtp.example.com",
         "smtp_from": "no-reply@example.com",
@@ -302,3 +308,20 @@ def test_mfa_defaults() -> None:
     assert settings.mfa_challenge_max_attempts == 5
     assert settings.mfa_recovery_code_count == 10
     assert "encryption_kek=SecretStr('**********')" in repr(settings)
+
+
+def test_staging_rejects_weak_audit_hash_key() -> None:
+    """staging/production 的审计哈希密钥必须 ≥32 字节且非占位值。"""
+
+    for bad in ("", "short", "change-me", "my-example-key", "your-secret-here"):
+        with pytest.raises(ValidationError, match="AUDIT_HASH_KEY"):
+            _staging_settings(audit_hash_key=bad)
+
+
+def test_production_audit_hash_key_defaults_are_valid() -> None:
+    """合法审计密钥可通过生产校验。"""
+
+    settings = _production_settings()
+
+    assert settings.audit_hash_key is not None
+    assert settings.audit_hash_key.get_secret_value() == "production-audit-key-0123456789abcdef"

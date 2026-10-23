@@ -20,11 +20,11 @@
 | M1 | M1-D2 MFA（AUTH-04） | ✅ 完成（两轮审查通过、第二轮 0B/0M、后端 411 passed、前端 32 单测 + 28 E2E、远端 CI backend/frontend/security 全绿；简报 `docs/design-briefs/M1-D2-mfa.md`） |
 | M1 | M1-E1 鉴权内核：权限矩阵 59 码落库 + 8 内置角色出厂默认 + 接口声明权限（RBAC-01 部分） | ✅ 完成（第五轮复审通过 0B/0M/3 Minor；后端 481 passed、ruff/mypy/alembic check/bandit/pip-audit 本地全绿、head=`e5f7a9c1b3d5`；远端 CI backend #39851973194 / security #39851973099 success；逐轮记录见 `docs/review-log.md`，简报 `docs/design-briefs/M1-E1-rbac-core.md`） |
 | M1 | M1-E2 RBAC 数据范围与服务端过滤、审批职责分离、平台跨租只读（RBAC-02/03，含 TD-149 触发器收紧） | ✅ 完成（两轮审查：第一轮 0B/3M/4M 全部修复、第二轮主上下文 0B/0M（当日独立审查子智能体配额耗尽）；后端 561 passed、ruff/mypy 149 文件/alembic check/bandit×2 本地全绿、head=`f7a9b1c3d5e8`；远端 CI backend #39950816551 / security #39950816785 success；逐轮记录见 `docs/review-log.md`，简报 `docs/design-briefs/M1-E2-data-scope.md`） |
-| M1 | M1-F 审计落库与哈希链（AUD-01） | ⏳ 未开始 |
+| M1 | M1-F 审计哈希链（AUD-01，含 TD-068/091 收口） | ✅ 完成（待复审确认） |
 | M1 | M1 验收报告 | ⏳ 未开始（需含 TD-110 真实后端全栈 E2E） |
 | M2/M3/M4 | 组织与人员 / 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 ORG-05、KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M1-F（审计哈希链）→ M1 验收报告（含 TD-110 真实后端全栈 E2E）→ M2 → M3 → M4。
+- **建议的下一步顺序**：M1 验收报告（含 TD-110 真实后端全栈 E2E）→ M2 → M3 → M4。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
@@ -177,7 +177,7 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 1) 通读 AGENTS.md（规则源头：纪律/红线/测试门禁/审查门禁/Git 与汇报规范）；
 2) 通读 docs/handoff.md（交接手册：当前状态表、环境怎么起、工作流门禁、文档地图、已知环境坑）；
 3) 读 docs/milestone.md（M1 剩余范围）、docs/tech-debt.md（未处置技术债）、docs/review-log.md（最近审查结论）；
-4) 读 docs/design-briefs/ 下与下一步相关的简报（下一步 M1-F 审计哈希链，简报尚未创建；已完成的 M1-E2 简报只作参考），以及 docs/spec.md §3.14、docs/design.md 审计章节、docs/milestone.md M1 范围。
+4) 读 docs/design-briefs/ 下与下一步相关的简报，以及 docs/spec.md、docs/design.md 对应章节。
 
 然后向我汇报：当前处在哪个功能点、下一步该做什么、你打算按什么顺序做、需要我确认哪些决策。
 在我说"开始"之前，不要创建或修改任何生产代码。

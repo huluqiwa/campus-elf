@@ -20,7 +20,7 @@
 
 - **M1-E2 数据范围与职责分离（RBAC-02/03）**：`school`/`self` 数据范围出厂默认落库（`rbac_builtin_role_scope_defaults`），`Principal` 每请求解析、仓储基类统一注入谓词，解析不到范围 = 空集（fail-closed），显式 id 越权 → 404 + `data_scope.denied` 审计；新增 `GET /api/v1/school/personnel`(+详情)（`school.personnel.view`，响应不含 `login_id`）；提交人不能自批的三道锁（应用层 403/422、数据库函数、同表三条款 CHECK）+ `system_settings` 例外开关（`platform.config.edit`、必填理由、审计、热生效）；平台跨租只读最小通道（只读事务 + 单租户 + 必填理由 + 审计失败即拒绝，工单化延后 TD-153）；`role_permissions_realm_guard` 收紧到 `TENANT_MODULES`；迁移 `f7a9b1c3d5e8`。
 
-当前门禁：后端 **561 passed**（M1-E2 不改前端，前端沿用 M1-D2 的 **32 单测 + 28 E2E**）、`ruff`/`mypy`（149 文件）/`alembic check`/`bandit` 本地全绿、远端 security CI（含 gitleaks/pip-audit/bandit）success、迁移 head `f7a9b1c3d5e8`；M1-D1、M1-D2、M1-E1、M1-E2 均已通过复审与远端 CI（backend / security；M1-E2 为 `d7a7663`）。
+当前门禁：后端 **574 passed**（M1-E2 不改前端，前端沿用 M1-D2 的 **32 单测 + 28 E2E**）、`ruff`/`mypy`（149 文件）/`alembic check`/`bandit` 本地全绿、远端 security CI（含 gitleaks/pip-audit/bandit）success、迁移 head `a8c3e9f1b5d7`；M1-D1、M1-D2、M1-E1、M1-E2 均已通过复审与远端 CI（backend / security；M1-E2 为 `d7a7663`）。
 
 进行中/待做：
 

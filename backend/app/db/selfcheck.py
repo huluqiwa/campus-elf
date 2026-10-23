@@ -33,6 +33,36 @@ REQUIRED_RLS_TABLES: tuple[str, ...] = (
 )
 
 
+async def _check_audit_hash_chain_trigger(session: AsyncSession) -> None:
+    """审计哈希链触发器必须存在且 owner 可绕过 FORCE RLS（M1-F / TD-091）。"""
+
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT r.rolname, r.rolsuper, r.rolbypassrls
+                FROM pg_trigger t
+                JOIN pg_proc p ON p.oid = t.tgfoid
+                JOIN pg_roles r ON r.oid = p.proowner
+                WHERE t.tgname = 'audit_logs_hash_chain'
+                  AND t.tgrelid = 'audit_logs'::regclass
+                LIMIT 1
+                """
+            )
+        )
+    ).mappings().one_or_none()
+
+    if row is None:
+        raise DatabaseSelfCheckError(
+            "audit_logs_hash_chain 触发器不存在（迁移未执行或被删除），审计写入不会入链"
+        )
+    if not (row["rolsuper"] or row["rolbypassrls"]):
+        raise DatabaseSelfCheckError(
+            f"审计哈希触发器 owner {row['rolname']} 不具备超级用户/BYPASSRLS，"
+            "INSERT 会因 RLS 拒绝读 prev_hash 而失败"
+        )
+
+
 class DatabaseSelfCheckError(RuntimeError):
     """数据库安全基线不满足（拒绝启动）。"""
 
@@ -252,3 +282,4 @@ async def verify_runtime_database() -> None:
 
     async with db_session(platform=True) as platform_session:
         await _check_role(platform_session, "平台")
+        await _check_audit_hash_chain_trigger(platform_session)

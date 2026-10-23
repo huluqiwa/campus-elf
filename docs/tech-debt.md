@@ -96,7 +96,7 @@
 | TD-065 | M1-A | 平台跨租访问缺专门通道 | 已取代 | — | 与 TD-072 重复，已合并到 TD-072 跟踪 |
 | TD-066 | M1-A | 开发/生产尚未提供应用登录角色与三连接分离 | 已采纳 | M1-B | 已实现：迁移创建组角色 `campus_elf_tenant`/`campus_elf_platform`，应用侧支持 `DATABASE_URL`/`PLATFORM_DATABASE_URL`/`MIGRATION_DATABASE_URL`，测试栈自动创建登录角色并导出 `TEST_APP_DATABASE_URL`/`TEST_PLATFORM_DATABASE_URL`；dev/prod 仍需部署脚本建登录角色并配置三连接 |
 | TD-067 | M1-A | refresh token 过期清理任务未实现 | 已完成 | M1-C | Arq 每日 03:30 清理过期/久已撤销行（保留期 30 天，`cleanup_refresh_tokens`），租户表按租户上下文逐租户删除；集成测试覆盖保留期边界 |
-| TD-068 | M1-A | 审计哈希链校验脚本/只读接口未实现 | 已采纳 | M1-F | 表与仅追加约束已就绪；M1-F 实现链校验脚本 + 平台审计只读接口 |
+| TD-068 | M1-A | 审计哈希链校验脚本/只读接口未实现 | 已完成 | M1-F | `scripts/verify_audit_chain.py`（逐行验 prev_hash + HMAC + 未入链行检测）+ `GET /platform/audit-logs`（platform.audit.view + cursor 分页）；集成测试覆盖合法链/错误密钥/未入链行 |
 | TD-069 | M1-A | `updated_at` 仅 ORM 侧 `onupdate`，非 ORM 更新不刷新 | 已延后 | M2 | 需要时补数据库触发器或统一走 ORM 更新 |
 | TD-070 | M1-A | `list_all` 用 limit/offset 分页（design §5.1 约定 cursor） | 已采纳 | M2 | 稳定排序已补（created_at, id）；列表接口落地时改 cursor 分页 |
 | TD-071 | M1-A | 尚无「零 skip」CI 断言（仅覆盖缺变量场景） | 已采纳 | M1 尾 | 可在 CI 解析 pytest 的 -rs 输出，断言白名单外 skipped=0 |
@@ -119,7 +119,7 @@
 | TD-088 | M1-B | SMTP 在事务内发送：最长持锁 10s；若邮件已发而提交失败，校方会收到无效密码邮件 | 已采纳 | M5 | 反向窗口不产生账号（回滚），重试生成新密码覆盖旧邮件，安全影响可接受但体验不佳；M5 换 outbox（提交后投递 + 状态回写）彻底消除 |
 | TD-089 | M1-B | 平台列表返回完整联系邮箱 | 已采纳 | M1-C | 正式平台权限/审计落地后按最小必要展示（掩码 + 详情查看需权限与审计） |
 | TD-090 | M1-B | 拒绝令牌审计可被无鉴权请求刷写（append-only 表膨胀） | 已采纳 | M6 | 由网关限流（TD-076）+ 失败审计采样/有界安全日志收口；当前每次失败一条 |
-| TD-091 | M1-B | 平台角色仍可 INSERT audit_logs（M1-A 授权），可伪造审计事件 | 已采纳 | M1-F | 审计哈希链（TD-068）落地后伪造会在链校验中暴露；启动自检目前不覆盖"审计写入是否只经函数"，M1-F 一并收口 |
+| TD-091 | M1-B | 平台角色仍可 INSERT audit_logs（M1-A 授权），可伪造审计事件 | 已完成 | M1-F | 哈希链触发器 + 校验脚本 + 启动自检（触发器存在且 owner 可绕过 FORCE RLS）三层落地。残留：持密钥伪造的入链行无法被链校验区分（TD-162）；未哈希字段（ip/ua/metadata）篡改不可检测（TD-163，M6 外部锚点收口） |
 | TD-093 | M1-B | 平台仅有 `tenants` 列级 `UPDATE(status,status_reason)`，状态变更无审计 | 已采纳 | M1-C/M6 | 改为经 SECURITY DEFINER 状态变更函数（内部写审计）或撤销该列级授权 |
 | TD-094 | M1-B | 公开注册用同一平台连接 INSERT 申请单，平台凭据可绕过接口直接插入伪造申请 | 已完成 | M1-C | `submit_tenant_registration()` SECURITY DEFINER 负责去重/落库/审计；平台 INSERT 权限已撤销。残余：平台凭据仍可直接 EXECUTE 该函数（绕过公开接口的对象上传与体积校验），随 TD-092 在 M1-E 一并按"平台审核/注册参数最小化"收口 |
 | TD-095 | M1-B | 降级到 c688 会恢复 `provision_tenant` 的平台 EXECUTE（无审计开通路径） | 已延后 | 运维手册 | 这是 c688 的历史状态；降级操作手册需标注风险，且生产默认只前滚不回滚（M6 部署手册收口） |
@@ -189,6 +189,14 @@
 | TD-157 | M1-E2 | `tenant_registration_requests.submitted_by_platform_user_id` 本期**没有真实写入方**：注册申请表仍由 C 端自助提交（无平台代提交人），三道锁的用例靠测试直插该列 seed | 已采纳 | M2 | 口径 ⑦ 的落点是"平台审核学校注册"，但"平台代提交/运营录入"入口随 M2 运营后台才有；届时写入方必须与 `review_registration_request()` 的复制语句同测验（否则提交人恒空、第一道锁空转）。`tests/integration/test_approval_separation.py:_seed_request` 的注释记录了这个后置依赖 |
 | TD-158 | M1-E2 | 同一"越权"两类审计口径不一致：租户侧 `data_scope.denied` 是 best-effort（审计故障仍返回 404），平台跨租 `platform.cross_tenant.read` 是 fail-closed（审计写不进就请求失败）；且详情越权要多发一次"无范围探针"查询才能区分"不存在"与"存在但越权" | 已延后 | M2 或首个真实安全告警需求 | 取舍是刻意的：404 形状不能因审计故障变成 5xx（那会把基础设施故障泄给终端用户），而跨租读取本身属高危、不可审计即拒绝。探针成本已含在 SQL 基线余量里（上限 8，实测 6）。M2 接安全告警/看板时统一评估：是否改为"范围外 id 直接记 denial（不探针）+ 告警聚合" |
 | TD-159 | M1-E2 | 简报 §5 承诺的"`/school/personnel` 1k 行分页 P95"本期未压测：只有 SQL 条数基线（`test_rbac_sql_baseline.py`，实测 6 / 上限 8）能证明成本有界，没有延迟分布数据 | 已采纳 | M6 | 随 NFR-01 的 k6 场景一并加入该接口（milestone §M6 压测清单）；本期不伪造延迟数字 |
+| TD-164 | M1-F | 校验脚本 `--hash-key` 走 argv，进程列表/shell 历史可见 | 已采纳 | M6 | 改读环境变量 `AUDIT_HASH_KEY`；当前仅运维手动执行，风险低 |
+| TD-165 | M1-F | 校验脚本不校验连接角色是否 BYPASSRLS（应用角色跑时 RLS 静默截断 → 假通过） | 已采纳 | M6 | 脚本启动时检查 `current_user` 并拒绝非超级用户/BYPASSRLS 连接 |
+| TD-166 | M1-F | 查询接口 `total` 含游标条件（翻页后语义变为"剩余条数"） | 已延后 | M2 | 与审计查询页 UI 一并调整；当前首页 total 正确 |
+| TD-167 | M1-F | 查询接口每次请求对 audit_logs 全量 count(*)，表只增不减 | 已采纳 | M6 | 量级上来后改物化计数或近似值；当前 <10k 行无感知 |
+| TD-168 | M1-F | `CREATE TRIGGER` 无幂等保护（部分失败后重跑 upgrade 报已存在） | 已延后 | M2 | 迁移重跑场景罕见；需时改 DO 块判 pg_trigger |
+| TD-169 | M1-F | `append_audit` 返回的 ORM 实例 `prev_hash/hash/hash_version` 是 flush 前过期值 | 已采纳 | M2 | 调用方需 refresh 或 RETURNING；M2 接审计查询页时一并处理 |
+| TD-162 | M1-F | 持 AUDIT_HASH_KEY 者可伪造入链行（hash_version=1 且哈希一致），链校验无法区分 | 已采纳 | M6 | 外部锚点（anchor_ref 预留字段 + 定期 WORM 导出哈希到外部存储）可收口；当前审计密钥仅平台运维持有，泄露面极小 |
+| TD-163 | M1-F | 哈希未覆盖 ip/user_agent/metadata_json/before_json_redacted/after_json_redacted，超级用户改这些字段不可检测 | 已采纳 | M6 | 与外部锚点一并考虑（扩字段会破坏现有链）；当前仅覆盖核心业务字段（与简报字段表一致） |
 | TD-161 | M1-E2 | 例外标记可被伪造直写：CHECK 有 `self_exception_used IS TRUE` 这一条款后，"绕过审核函数直写同人 + 标记为真"在数据库层与合法例外同形，无法区分 | 已采纳 | M2 | 检测改走反查而非再加一道约束（用户 2026-10-23 确认三条款 CHECK）：真例外一定带 `approval.self_exception.used` 审计，故 M2 审计巡检加一条反查——`school_review_records` 里 `self_exception_used IS TRUE` 却在同 `request_id` 找不到对应审计的行即告警。落点与 TD-153（跨租工单化）同一批安全巡检 |
 
 ---

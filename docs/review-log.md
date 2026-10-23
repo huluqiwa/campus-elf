@@ -338,6 +338,14 @@
 - 最终门禁：后端 **561 passed**（全量退出码 0）、`ruff check app tests` 全绿、`mypy --no-incremental app tests`（149 文件）无问题、`bandit -r app -x tests` / `bandit -r alembic -s B608` 退出码 0、`alembic check` 无漂移、head=`f7a9b1c3d5e8`；本期不改前端（`/school/personnel` 无前端入口，TD-152），无新增 Playwright 用例。
 - 远端 CI（`d7a7663`）：`backend` #39950816551 success、`security` #39950816785 success；`frontend`/`evals` 未触发（无对应路径改动）。
 
+### M1-F 审计哈希链：独立审查两轮（2026-10-24）
+
+- 第一轮：**不通过**（1 Blocker + 4 Major + 4 Minor）。Blocker B1：并发插入下触发器无串行化 → 链必然分叉；Major：校验脚本对未入链行静默、created_at 依赖会话时区、测试覆盖与简报清单不符、文档未同步。
+- 第一轮修复：advisory lock 串行化 + 并发测试；校验脚本报告未入链行；created_at 统一 UTC 编码；补并发/错误密钥/自检触发器缺失测试；config 注释改 fail-open；文档回写。
+- 第二轮：**不通过**（0 Blocker / 5 Major）。MA-1：BIGSERIAL sequence 在锁前分配，锁序与 sequence 序倒置仍可分叉；MA-2：未入链检测"链从未开始"分支死代码 + 零测试；MA-3：自检测试仍用 os.environ.setdefault + 篡改检测是恒真断言；MA-4：README/review-log 未更新；MA-5：第一轮 Minor 项无 TD 处置。
+- 第二轮修复：锁后重分配 sequence（锁序=sequence 序）；死代码修复（first_chained IS NULL 时也检测 v0 行）；自检测试改 monkeypatch（第三轮复审确认落地）；篡改检测改为脚本级 subprocess 测试（退出码 1 + 未入链行输出）；README/review-log 更新；MA-5 各项登记 TD。
+- 最终门禁：后端 574 passed、ruff/mypy/bandit 全绿。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |
