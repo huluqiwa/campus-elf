@@ -72,6 +72,10 @@ cd .. && bash scripts/ci.sh            # 或 bash scripts/ci.sh --with-e2e
 6. **测试栈容器重启后**：偶发端口转发短暂异常，重跑 `bash scripts/test-stack.sh up` 即可。
 7. **Playwright 必须在 `frontend/` 根目录跑**（配置是 `frontend/playwright.config.ts`，用系统 Chrome + `webServer` 起 4173/4174 预览）。在 `frontend/e2e/` 里跑找不到配置 → 既没有 `baseURL`（`Cannot navigate to invalid URL`），又会退回未安装的 Playwright Chromium（`Executable doesn't exist ... chromium_headless_shell`）；本机装了系统 Chrome，正确做法是回根目录跑，不必下载浏览器。
 8. **`bandit -r app` 对任何 issue 都非零退出（含 Low）**，其中 B101（`assert` 用于运行时收窄类型）最容易踩：生产代码不要用 `assert` 做不变量守卫，改成把条件并入分支判断（`if x is not None and ...`）并由末尾的 `RuntimeError` 兜住落空分支。M1-D2 首次本地 CI 就是这条挂的。
+9. **别用 `pytest | tail` / `| tee` 判绿**：管道会返回 tail 的退出码，测试失败也可能显示成功。正确写法：`pytest -q > /tmp/pytest.log 2>&1; echo "PYTEST_EXIT=$?"`，再看日志末尾汇总。
+10. **禁止 `ruff format`**：CI 只跑 `ruff check`，格式化会制造大量与功能无关的 diff；只按 check 报错点修。
+11. **测试栈容器重启会导致角色口令漂移**：表现为集成测试成片 `InvalidPasswordError`（`campus_elf_test_platform`）。重跑 `bash scripts/test-stack.sh up`（幂等 `ALTER ROLE ... PASSWORD`）并确认 `TEST_DATABASE_URL`/`TEST_APP_DATABASE_URL`/`TEST_PLATFORM_DATABASE_URL` 三条都能连上，再信任任何全量结果。
+12. **取用例数用 `pytest --collect-only -q -o addopts=""`**：默认 `addopts` 里已有 `-q`，再叠一个会变成 `-qq`，跑完不打印“N passed”汇总；计数与最终门禁数字要分开取。
 
 ### 2.1 接手时先做"环境自检"（新工具跑这几条，然后汇报，别猜）
 
