@@ -47,7 +47,7 @@ cd backend
 uv sync --frozen
 uv run ruff check app tests
 uv run mypy --no-incremental app tests
-REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 411 passed）
+REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 561 passed）
 uv run alembic -x db_url="$TEST_DATABASE_URL" check   # 迁移漂移检查
 
 # 3) 前端
@@ -128,7 +128,7 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 | `docs/milestone.md` | 里程碑范围与退出标准（M1~M6） |
 | `docs/test-plan.md` | 测试分层、业务场景矩阵（BS-xx）、A23 隔离矩阵、AI 评估 |
 | `docs/rbac-matrix.md`、`docs/state-machines.md`、`docs/tenant-isolation.md` | 权限矩阵 / 状态机 / 隔离规范 |
-| `docs/tech-debt.md` | 技术债台账（TD-001~TD-110），未处置不得进下一里程碑 |
+| `docs/tech-debt.md` | 技术债台账（TD-001~TD-161），未处置不得进下一里程碑 |
 | `docs/review-log.md` | 审查与复审记录（每轮结论、发现、修复） |
 | `docs/deployment.md` | 部署、三连接角色、生产强制配置、启动自检 |
 | `docs/m0-acceptance.md`、`docs/benchmarks-m0.md` | M0 验收与基准 |
@@ -173,7 +173,7 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 1) 通读 AGENTS.md（规则源头：纪律/红线/测试门禁/审查门禁/Git 与汇报规范）；
 2) 通读 docs/handoff.md（交接手册：当前状态表、环境怎么起、工作流门禁、文档地图、已知环境坑）；
 3) 读 docs/milestone.md（M1 剩余范围）、docs/tech-debt.md（未处置技术债）、docs/review-log.md（最近审查结论）；
-4) 读 docs/design-briefs/ 下与下一步相关的简报（M1-C2、M1-D），以及 docs/spec.md、docs/design.md 对应章节。
+4) 读 docs/design-briefs/ 下与下一步相关的简报（下一步 M1-F 审计哈希链，简报尚未创建；已完成的 M1-E2 简报只作参考），以及 docs/spec.md §3.14、docs/design.md 审计章节、docs/milestone.md M1 范围。
 
 然后向我汇报：当前处在哪个功能点、下一步该做什么、你打算按什么顺序做、需要我确认哪些决策。
 在我说"开始"之前，不要创建或修改任何生产代码。
@@ -210,7 +210,7 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 ## 7. 交接检查清单（交接前逐条确认）
 
 - [ ] 工作树干净（`git status`），无未提交改动、无临时文件。
-- [ ] `main` 已推送且远端 CI 全绿（backend/frontend/evals/security）。
+- [ ] `main` 已推送且**触发的** CI 工作流全绿（未触发的按路径过滤说明原因）。
 - [ ] `docs/handoff.md` §1 状态表与 README「当前状态」是最新的。
 - [ ] 未处置技术债清单已读（`docs/tech-debt.md`），知道哪些条目目标在下一个里程碑。
 - [ ] 待确认决策已列明（当前：无阻塞；M1-C2 四项细节已确认）。
