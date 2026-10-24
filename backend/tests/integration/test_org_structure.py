@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
@@ -20,7 +20,7 @@ from app.org.scopes_sync import (
     scope_row_diff,
     sync_class_scope_rows,
 )
-from tests.support.db import clean_test_data, make_test_engine, upgrade_test_database
+from tests.support.db import clean_test_data, database_url, make_test_engine, upgrade_test_database
 from tests.support.dsn import assert_test_database_dsn
 
 pytestmark = [pytest.mark.integration]
@@ -350,3 +350,71 @@ async def test_import_retry_compensation_and_cas(clean_db: AsyncEngine) -> None:
         )
         assert claimed1.rowcount == 1
         assert claimed2.rowcount == 0
+
+
+async def test_department_tree_move_rewrites_paths(
+    clean_db: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1：移动子树后整棵子树 path 事务内重写；环检测拒绝移到自己子树下。"""
+
+    from app.db.models.imports import ImportJob  # noqa: F401
+
+    monkeypatch.setenv("DATABASE_URL", database_url("tenant"))
+    monkeypatch.setenv("PLATFORM_DATABASE_URL", database_url("platform"))
+    from app.config import get_settings as _get_settings
+    from app.db.session import dispose_engine as _dispose_engine
+
+    _get_settings.cache_clear()
+    await _dispose_engine()
+
+    try:
+        await _run_department_move_scenario(clean_db, monkeypatch)
+    finally:
+        # 本用例重建的引擎绑定在本用例的事件循环上；不清会毒害后续业务测试
+        _get_settings.cache_clear()
+        await _dispose_engine()
+
+
+async def _run_department_move_scenario(clean_db: AsyncEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.db.models.org import Department
+    from app.org.departments import (
+        DepartmentError,
+        create_department,
+        update_department,
+    )
+    from app.org.import_task import ImportActor
+
+    tenant_id, user_id = await _insert(
+        clean_db, _USER_SQL,
+        {"user_type": "school_admin", "login_id": "it-dept", "name": "部门校管"},
+    )
+    actor = ImportActor(user_id=UUID(user_id), tenant_id=tenant_id)
+
+    root = await create_department(actor, name="信息学院", code=None, parent_id=None)
+    child = await create_department(actor, name="软件系", code=None, parent_id=root.id)
+    grandchild = await create_department(actor, name="软工一组", code=None, parent_id=child.id)
+    other = await create_department(actor, name="外语学院", code=None, parent_id=None)
+
+    # 移动软件系 → 外语学院下：子树（含孙）path 全部重写
+    await update_department(actor, child.id, parent_id=other.id)
+
+    factory = async_sessionmaker(clean_db, expire_on_commit=False)
+    async with factory() as session:
+        rows: Any = (
+            await session.execute(
+                select(Department).order_by(Department.name.asc())
+            )
+        ).scalars().all()
+        paths = {row.name: row.path for row in rows}
+    assert paths["软件系"] == f"{other.path}/{child.id}"
+    assert paths["软工一组"] == f"{other.path}/{child.id}/{grandchild.id}"
+
+    # 环检测：给信息学院挂一个新子部门，再把信息学院移到该子部门下 → 成环 422
+    # （原子部门软件系已移出，其 path 已重写，不能再用 path 判环——须沿 parent_id 链上溯）
+    new_child = await create_department(
+        actor, name="新子部门", code=None, parent_id=root.id
+    )
+    with pytest.raises(DepartmentError) as exc_info:
+        await update_department(actor, root.id, parent_id=new_child.id)
+    assert exc_info.value.code == "DEPARTMENT_CYCLE"
+

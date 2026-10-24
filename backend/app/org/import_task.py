@@ -229,9 +229,9 @@ def _validate_row(
     if email is not None and "@" not in email:
         return "email", "VALUE_INVALID", "邮箱格式不正确"
     if import_type == "students" and (
-        not row.get("class_grade") or not row.get("class_name")
+        bool(row.get("class_grade")) != bool(row.get("class_name"))
     ):
-        return "class_grade", "VALUE_REQUIRED", "年级与班级不能为空"
+        return "class_grade", "VALUE_INVALID", "年级与班级须同时提供"
     return None, None, None
 
 
@@ -347,6 +347,21 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                 continue
 
             if import_type == "teachers":
+                department_id: UUID | None = None
+                department_path = row.get("department") or None
+                if department_path:
+                    from app.org.departments import resolve_department_path
+
+                    async with db_session(tenant_id=tenant_uuid) as session:
+                        department_id = await resolve_department_path(
+                            session, tenant_uuid, department_path
+                        )
+                    if department_id is None:
+                        field = "department"
+                        raise OrgError(
+                            "DEPARTMENT_NOT_FOUND",
+                            "部门不存在（按名称全路径逐级匹配失败）", 422,
+                        )
                 await create_teacher(
                     actor,
                     login_id=login_id,
@@ -356,16 +371,23 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                     gender=row.get("gender") or None,
                     position=row.get("position") or None,
                     email=row.get("email") or None,
+                    department_id=department_id,
                 )
             else:
-                async with db_session(tenant_id=tenant_uuid) as session:
-                    class_id = await _locate_class(
-                        session, tenant_uuid,
-                        row.get("class_grade", ""), row.get("class_name", ""),
-                    )
-                if class_id is None:
-                    field = "class_grade"
-                    raise OrgError("CLASS_NOT_FOUND", "目标班级不存在（年级/班名不匹配）", 422)
+                class_grade = row.get("class_grade", "")
+                class_name = row.get("class_name", "")
+                class_id: UUID | None = None
+                if class_grade and class_name:
+                    async with db_session(tenant_id=tenant_uuid) as session:
+                        class_id = await _locate_class(
+                            session, tenant_uuid, class_grade, class_name,
+                        )
+                    if class_id is None:
+                        field = "class_grade"
+                        raise OrgError(
+                            "CLASS_NOT_FOUND", "目标班级不存在（年级/班名不匹配）", 422
+                        )
+                # 未提供年级/班名 = 未分班学生（spec ORG-05 验收口径），class_id 置空
                 await create_student(
                     actor,
                     login_id=login_id,

@@ -29,6 +29,7 @@ TENANT_TABLES = (
     # 子表在前：import_row_errors → import_jobs → teacher_class_courses → ...
     "import_row_errors",
     "import_jobs",
+    "departments",  # teachers.department_id 引用，先清部门再清教师
     "teacher_class_courses",
     "students",
     "teachers",

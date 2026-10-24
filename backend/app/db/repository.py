@@ -166,12 +166,13 @@ class TenantScopedRepository[ModelT: TenantScopedModel]:
 
         return self.scoped(select(self._model))
 
-    async def get(self, object_id: UUID) -> ModelT | None:
-        """按主键取单行（自动带租户边界）。"""
+    async def get(self, object_id: UUID, *, with_for_update: bool = False) -> ModelT | None:
+        """按主键取单行（自动带租户边界；`with_for_update` 供读改写竞争场景）。"""
 
-        result = await self._session.execute(
-            self.scoped(select(self._model).where(self._model.id == object_id))
-        )
+        stmt = self.scoped(select(self._model).where(self._model.id == object_id))
+        if with_for_update:
+            stmt = stmt.with_for_update()
+        result = await self._session.execute(stmt)
         # SQLAlchemy 对泛型模型的返回类型推断不精确，这里显式声明
         return cast(ModelT | None, result.scalar_one_or_none())
 

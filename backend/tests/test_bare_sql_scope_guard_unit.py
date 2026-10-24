@@ -50,10 +50,17 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
             "无单一请求主体的范围语义（与 rbac 定义同步同类）；写路径只在组织关系变更的同一事务内调用"
         )
     },
+    "app/org/departments.py": {
+        "*": (
+            "部门树（M2-ORG05）：子树移动的 path 重写与沿父链的成环检测是跨行树操作，"
+            "无仓储原语覆盖；delete/exists 探针只读主键与计数。"
+            "行级写入仍走仓储；path 重写在组织变更的同一事务内"
+        )
+    },
 }
 
 # 豁免条目上限：超过就说明"直连"正在变成常态，必须回头收敛到仓储。
-MAX_EXEMPT_MODULES = 8
+MAX_EXEMPT_MODULES = 9
 
 # 已知命名盲区（M2-ORG02 复审登记）：`sa_update(Model)` 形态不匹配下方 update 正则。
 # 当前两处使用（retry CAS / 看门狗收口）均为「行经仓储取得 + 条件更新」的正当路径且 RLS 生效；

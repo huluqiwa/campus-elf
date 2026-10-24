@@ -95,3 +95,21 @@
 
 - 审查重点：移动子树 path 重写的完整性（漏改=层级包含错判，直接影响 M3 人群）；导入路径解析的歧义处理；删除 409 条件；审计前后值；RLS。
 - 允许偏差：列名/错误码文本；用例数 ±3。
+
+## 9. 实现结果
+
+**交付物**：迁移 `a4c8e2f6b1d3`（departments 表 + RLS + 授权 + 根部门部分唯一索引 + path 索引 + teachers.department_id 加列）；`app/db/models/org.py` 增 Department；`app/org/departments.py` 独立树服务模块（建/改名改码停用/删除/移动含子树 path 重写/整树查询/调岗/名称全路径解析）；`app/org/import_task.py` 教师行部门解析（未知 → DEPARTMENT_NOT_FOUND 错误行，field=department）；`app/api/school_org.py` 增 4 端点（GET/POST/PUT/DELETE departments + PUT teachers/{id} 调岗）；`create_teacher` 增可选 department_id。
+
+**测试**：集成 8→9（移动重写+环检测、调岗、唯一约束）；BS-M2-03（建树→导入带部门（1 合法 1 未知错误行 field=department）→调岗审计前后值（部门名口径）→删除 409（有教师/有子）→调离后删叶子→未分班+部分提供错误行）。
+
+**实现期偏差/要点（审查对照用）**：
+1. 根部门同级唯一：唯一约束视 NULL 为互异，以部分唯一索引 `uq_departments_tenant_root_name` 补齐；
+2. 成环检测沿 parent_id 链上溯（path 在移动事务内重写，旧祖先 id 不再出现于新父 path——path 判环失效）；
+3. 学生导入年级/班级为**可选列**（未分班合法，spec ORG-05 验收口径），同时提供才解析定位，部分提供 → 错误行（VALUE_INVALID）；
+4. 调岗接口权限用 `school.org.manage`（组织结构语义；矩阵行 174 人员编辑为 personnel.edit——调岗语义归组织结构，与 D3 班级/课程/任教同口径）；
+5. 裸 SQL 守卫：departments.py 登记豁免（子树 path 重写无仓储原语，同 scopes_sync 类），上限 8→9；
+6. 「人群按新部门生效（缓存失效）」验收：无应用层缓存需失效（范围/组织读取每请求查库），M3 KB-09 交付时验证层级包含（path 前缀查询已就绪）；
+7. `teachers.department_id` 未随 M2-ORG01/03 迁移预留：FK 目标 departments 表本点才建，无法提前建 FK（§9.7 预告已兑现，本点加列）；
+8. 班级/课程/任教维护取 `school.org.manage`（矩阵 §5 行 175 描述扩展为「组织结构维护」）；端点实际 15 条；
+9. POST /school/teachers 增可选 department_id（M4 复审：design §5.4「含 department_id 归属」原样落地）；
+10. 解析器部门列别名：部门/department/部门路径 三者均归一为 canonical department。

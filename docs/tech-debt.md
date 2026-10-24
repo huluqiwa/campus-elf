@@ -201,6 +201,8 @@
 | TD-173 | M1-F 复审 | 审计写入在整段外层事务期间持有全局 advisory lock（单链串行化）：吞吐上限与外层事务时长耦合，高频写场景可能成为热点 | 已采纳 | M6 | 与 TD-163（外部锚点）同批评估：量级上来后分段链/锁内最小化；M1 量级（登录/权限拒绝频度）实测无感知 |
 | TD-174 | M2-ORG01-03 | class 范围行与组织关系表双写：一致性靠「同事务 + 同步函数 + 部分唯一索引 + 对账测试」，无数据库级外键联动 | 已采纳 | M2 末评审 | 若 ORG-02 异步导入出现同步缺口，补周期对账任务（`expected_class_scope_pairs` vs 实际行）与告警；当前全部写路径单点收敛在 `app/org`，缺口风险集中在导入 |
 | TD-175 | M2-ORG02 | 导入上传文件（含 PII）存对象存储且无生命周期/删除端点，失败 job 的孤儿对象永久保留 | 已采纳 | M6 | 随存储生命周期策略（TD-083 同类）统一：对象桶生命周期规则 + job 删除端点级联清理；M2 末评审确认无更早需求 |
+| TD-176 | M2-ORG05 | 复合外键裸 `ON DELETE SET NULL` 会把全部引用列置 NULL（含 NOT NULL 的 tenant_id）→ 并发删除/调岗竞争时 500 而非优雅置空；同类模式已在 classes 班主任/辅导员 FK 存在 | 已采纳 | M6 | PG15+ 支持 `ON DELETE SET NULL (列清单)` 语法：M6 部署硬化时统一迁移改写（departments/teachers 与 classes 两处）；正常路径已被 409 预检挡住不可达 |
+| TD-177 | M2-ORG05 | 部门树移动的子树 path 重写为大事务（子树行数线性）+ READ COMMITTED 下并发移动的路径重写竞争（已对被移动行 FOR UPDATE 降险） | 已采纳 | M6 | 校级规模（几十~几百部门）可忽略；M6 压测时用 EXPLAIN 验证 path 索引（varchar_pattern_ops）与重写耗时；如需强一致改 advisory lock |
 | TD-162 | M1-F | 持 AUDIT_HASH_KEY 者可伪造入链行（hash_version=1 且哈希一致），链校验无法区分 | 已采纳 | M6 | 外部锚点（anchor_ref 预留字段 + 定期 WORM 导出哈希到外部存储）可收口；当前审计密钥仅平台运维持有，泄露面极小 |
 | TD-163 | M1-F | 哈希未覆盖 ip/user_agent/metadata_json/before_json_redacted/after_json_redacted，超级用户改这些字段不可检测 | 已采纳 | M6 | 与外部锚点一并考虑（扩字段会破坏现有链）；当前仅覆盖核心业务字段（与简报字段表一致） |
 | TD-161 | M1-E2 | 例外标记可被伪造直写：CHECK 有 `self_exception_used IS TRUE` 这一条款后，"绕过审核函数直写同人 + 标记为真"在数据库层与合法例外同形，无法区分 | 已采纳 | M2 | 检测改走反查而非再加一道约束（用户 2026-10-23 确认三条款 CHECK）：真例外一定带 `approval.self_exception.used` 审计，故 M2 审计巡检加一条反查——`school_review_records` 里 `self_exception_used IS TRUE` 却在同 `request_id` 找不到对应审计的行即告警。落点与 TD-153（跨租工单化）同一批安全巡检 |

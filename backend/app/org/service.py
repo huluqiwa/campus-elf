@@ -84,6 +84,7 @@ class TeacherItem:
     age: int | None
     gender: str | None
     position: str | None
+    department_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,6 +570,7 @@ async def create_teacher(
     gender: str | None,
     position: str | None,
     email: str | None,
+    department_id: UUID | None = None,
 ) -> CreatedProfile:
     tenant_id = _require_tenant(principal)
     initial_password = generate_initial_password()
@@ -590,9 +592,22 @@ async def create_teacher(
             must_change_password=True,
         )
         await repository.add(user)
+        if department_id is not None:
+            # 存在性 + 在用状态（M1 复审：停用部门不得获得新归属）
+            from app.db.models.org import Department
+
+            dept_repository: TenantScopedRepository[Department] = TenantScopedRepository(
+                session, Department, tenant_id, scope=ScopeBypass(reason=_PROBE_REASON),
+            )
+            dept = await dept_repository.get(department_id)
+            if dept is None:
+                raise OrgError("DEPARTMENT_NOT_FOUND", "目标部门不存在", 422)
+            if dept.status != "active":
+                raise OrgError("DEPARTMENT_DISABLED", "目标部门已停用", 422)
         teacher = Teacher(
             tenant_id=tenant_id, user_id=user.id,
             employee_no=employee_no, name=name, age=age, gender=gender, position=position,
+            department_id=department_id,
         )
         await repository.add(teacher)
         await _bind_builtin_role(session, tenant_id, user.id, role_code="teacher")
@@ -605,6 +620,7 @@ async def create_teacher(
         item = TeacherItem(
             id=teacher.id, user_id=user.id, login_id=login_id, employee_no=employee_no,
             name=name, age=age, gender=gender, position=position,
+            department_id=teacher.department_id,
         )
     return CreatedProfile(item=item, initial_password=initial_password)
 

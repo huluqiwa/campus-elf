@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-**当前阶段：M2 组织与人员进行中（ORG-01/03 与 ORG-02 异步导入已交付；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
+**当前阶段：M2 组织与人员进行中（ORG-01/03、ORG-02 导入、ORG-05 部门树已交付；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
 
 已完成：
 
@@ -22,7 +22,7 @@
 - **M1-F 审计哈希链（AUD-01）**：审计仅追加升级为跨表单链（触发器计算 `prev_hash`/`hash`，密钥经 GUC 注入不入日志）、哈希链查询接口与 `backend/scripts/verify_audit_chain.py` 校验脚本、应用启动自检；TD-068/091 收口。
 - **M1 验收报告（含 TD-110 收口）**：`docs/m1-acceptance.md`。专用 compose 栈（`deploy/backend/Dockerfile` + `deploy/docker-compose.e2e.yml` + `scripts/e2e-stack.sh`）跑真实后端全栈 E2E：`frontend/e2e-fullstack/` **12 例全绿**（三端真实登录、首登强制改密、MailHog 真实邮件重置、平台 tenants/audit 业务接口、数据范围、越权 403、会话设备被踢 401）；边界技术债台账 171 条全部有处置（169 既有 + 本次新增 TD-170/171），TD-147 部署注意已写入 handoff §5.1。
 
-当前门禁（M1 验收时点，2026-10-24）：后端 **616 passed**、前端 **32 单测 + 28 mock E2E + 12 全栈 E2E（TD-110）**、`ruff`/`mypy`/`alembic check`/`bandit` 本地全绿、迁移 head `a8c3e9f1b5d7`（无漂移）；M1-D1、M1-D2、M1-E1、M1-E2 均已通过复审与远端 CI（backend / security）。
+当前门禁（M1 验收时点，2026-10-24）：后端 **620 passed**、前端 **32 单测 + 28 mock E2E + 12 全栈 E2E（TD-110）**、`ruff`/`mypy`/`alembic check`/`bandit` 本地全绿、迁移 head `a8c3e9f1b5d7`（无漂移）；M1-D1、M1-D2、M1-E1、M1-E2 均已通过复审与远端 CI（backend / security）。
 
 进行中/待做：
 

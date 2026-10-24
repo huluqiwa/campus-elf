@@ -10,7 +10,14 @@ from app.db.models.identity import (
 )
 from app.db.models.imports import ImportJob, ImportRowError
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
-from app.db.models.org import Course, OrgClass, Student, Teacher, TeacherClassCourse
+from app.db.models.org import (
+    Course,
+    Department,
+    OrgClass,
+    Student,
+    Teacher,
+    TeacherClassCourse,
+)
 from app.db.models.rbac import (
     PERMISSION_CATALOG,
     DataScope,
@@ -33,6 +40,7 @@ __all__ = [
     "AuditLog",
     "Course",
     "DataScope",
+    "Department",
     "ImportJob",
     "ImportRowError",
     "MfaRecoveryCode",

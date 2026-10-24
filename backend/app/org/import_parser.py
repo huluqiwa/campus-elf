@@ -48,11 +48,15 @@ HEADER_ALIASES: dict[str, str] = {
     "class_grade": "class_grade",
     "班级": "class_name",
     "class_name": "class_name",
+    "部门": "department",
+    "department": "department",
+    "部门路径": "department",
 }
 
 REQUIRED_HEADERS: dict[str, set[str]] = {
     "teachers": {"employee_no", "name"},
-    "students": {"student_no", "name", "class_grade", "class_name"},
+    # 年级/班级为可选列（未分班学生合法，spec ORG-05 验收口径）；提供时须成对
+    "students": {"student_no", "name"},
 }
 
 

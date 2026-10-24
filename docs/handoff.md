@@ -24,7 +24,8 @@
 | M1 | M1 验收报告（含 TD-110 全栈 E2E） | ✅ 完成（`docs/m1-acceptance.md`；12 例全栈 E2E 全绿 + 28 mock 回归 + 后端 572 passed；边界 TD 台账 171 条全处置） |
 | M2 | M2-ORG01-03 人员档案与组织关系（ORG-01/03 + TD-151 class 数据范围 + TD-070 cursor 分页） | ✅ 完成（三轮独立审查通过 0B/0M；迁移 `c9d5f1e3a7b9` 五表 + RLS；简报 `docs/design-briefs/M2-ORG01-03.md`） |
 | M2 | M2-ORG02 CSV/XLSX 异步导入（ORG-02 + TD-069 收口 + TD-174 对账验证） | ✅ 完成（三轮独立审查通过 0B/0M；迁移 `e2a6c8d4b0f2`；看门狗 cron 收口 stale running；简报 `docs/design-briefs/M2-ORG02-import.md`） |
-| M2 | M2-ORG05 部门树 / ORG-04 身份证 / B 端页面 | ⏳ 未开始（M2 剩余功能点；TD-126/137/141/143 随对应点收口） |
+| M2 | M2-ORG05 部门/科室树（A30：departments + 教师归属 + 导入扩展 + 调岗审计） | ✅ 完成（复审确认中；迁移 `a4c8e2f6b1d3`；简报 `docs/design-briefs/M2-ORG05-departments.md`） |
+| M2 | M2-ORG04 身份证 / B 端页面 | ⏳ 未开始（M2 剩余功能点；TD-126/137/141/143 随对应点收口） |
 | M3/M4 | 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 KB-09/KB-10、AI-10） |
 
 - **建议的下一步顺序**：M2 剩余功能点（ORG-02 导入 → ORG-05 部门树 → ORG-04 身份证 → B 端页面）→ M3 → M4。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6。

@@ -14,10 +14,12 @@ from uuid import UUID
 from sqlalchemy import (
     CheckConstraint,
     ForeignKeyConstraint,
+    Index,
     SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -56,6 +58,56 @@ class OrgClass(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     counselor_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
 
 
+class Department(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """部门/科室树（A30）：邻接表 + id 物化路径。
+
+    `path` 形如 `/{root_id}/{child_id}/…/{own_id}`（以自身 id 结尾）：
+    子树查询 `path LIKE '{自身 path}/%'`；改名不动 path；移动子树由服务层重写。
+    根部门（parent_id IS NULL）同级唯一性由部分唯一索引保证
+    （迁移 a4c8e2f6b1d3 的 `uq_departments_tenant_root_name`）。
+    """
+
+    __tablename__ = "departments"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "parent_id", "name", name="uq_departments_tenant_id_parent_id_name"
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_departments_id_tenant_id"),
+        CheckConstraint("status IN ('active', 'disabled')", name="ck_departments_status_valid"),
+        CheckConstraint("parent_id <> id", name="ck_departments_parent_not_self"),
+        # 根部门同级唯一（唯一约束视 NULL 为互异，覆盖不到）
+        Index(
+            "uq_departments_tenant_root_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("parent_id IS NULL"),
+        ),
+        # 子树前缀查询（M3 父部门人群命中子部门）；pattern_ops 让 LIKE 'prefix%' 走索引
+        Index(
+            "ix_departments_path",
+            "path",
+            postgresql_ops={"path": "varchar_pattern_ops"},
+        ),
+        ForeignKeyConstraint(
+            ["parent_id", "tenant_id"],
+            ["departments.id", "departments.tenant_id"],
+            name="fk_departments_parent_id_departments",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], name="fk_departments_tenant_id_tenants",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    code: Mapped[str | None] = mapped_column(String(32))
+    parent_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    path: Mapped[str] = mapped_column(String(600), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+
+
 class Course(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     """课程（编码租户内唯一）。"""
 
@@ -79,7 +131,14 @@ class Teacher(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
         UniqueConstraint("tenant_id", "employee_no", name="uq_teachers_tenant_id_employee_no"),
         # 供 teacher_class_courses 做复合外键 (teacher_id, tenant_id)
         UniqueConstraint("id", "tenant_id", name="uq_teachers_id_tenant_id"),
+        Index("ix_teachers_tenant_id_department_id", "tenant_id", "department_id"),
         CheckConstraint("age IS NULL OR age BETWEEN 16 AND 80", name="ck_teachers_age_range"),
+        ForeignKeyConstraint(
+            ["department_id", "tenant_id"],
+            ["departments.id", "departments.tenant_id"],
+            name="fk_teachers_department_id_departments",
+            ondelete="SET NULL",
+        ),
         CheckConstraint(
             "gender IS NULL OR gender IN ('male', 'female', 'other')",
             name="ck_teachers_gender_valid",
@@ -98,6 +157,8 @@ class Teacher(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     age: Mapped[int | None] = mapped_column(SmallInteger)
     gender: Mapped[Gender | None] = mapped_column(String(8))
     position: Mapped[str | None] = mapped_column(String(64))
+    # 部门归属（A30，供 M3 KB-09 人群判定）；可空 = 未归属
+    department_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     id_card_enc: Mapped[str | None] = mapped_column(Text)
     id_card_hmac: Mapped[str | None] = mapped_column(String(64))
     id_card_mask: Mapped[str | None] = mapped_column(String(32))

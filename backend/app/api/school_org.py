@@ -1,4 +1,4 @@
-"""校方侧组织结构与人员档案接口（M2 ORG-01/03，`docs/design-briefs/M2-ORG01-03.md`）。
+"""校方侧组织结构与人员档案接口（M2 ORG-01/03 + ORG-05 部门树，简报见 docs/design-briefs/）。
 
 权限映射（rbac-matrix §5 行 173–176）：
 - 读：`school.personnel.view`；
@@ -21,7 +21,9 @@ from pydantic import BaseModel, Field
 
 from app.auth.principal import Principal, require_permission
 from app.db.repository import CursorError
+from app.org import departments as departments_service
 from app.org import service
+from app.org.departments import DepartmentError
 from app.org.service import OrgError, Page
 
 router = APIRouter(prefix="/school", tags=["school"])
@@ -62,6 +64,7 @@ class TeacherResponse(BaseModel):
     age: int | None
     gender: str | None
     position: str | None
+    department_id: UUID | None = None
     initial_password: str | None = None
 
 
@@ -124,6 +127,7 @@ class TeacherCreateRequest(BaseModel):
     gender: str | None = Field(default=None, pattern="^(male|female|other)$")
     position: str | None = Field(default=None, max_length=64)
     email: str | None = Field(default=None, max_length=254)
+    department_id: UUID | None = None
 
 
 class StudentCreateRequest(BaseModel):
@@ -283,6 +287,7 @@ async def create_teacher(
         id=item.id, user_id=item.user_id, login_id=item.login_id,
         employee_no=item.employee_no, name=item.name, age=item.age,
         gender=item.gender, position=item.position,
+        department_id=getattr(item, "department_id", None),
         initial_password=created.initial_password,
     )
 
@@ -392,3 +397,120 @@ async def delete_assignment(
         await service.delete_assignment(viewer, assignment_id)
     except OrgError as exc:
         raise _http_error(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# 部门/科室树（M2-ORG05；D1 id 物化路径 / D4 叶子+无归属才可硬删）
+# ---------------------------------------------------------------------------
+
+class DepartmentResponse(BaseModel):
+    id: UUID
+    parent_id: UUID | None
+    name: str
+    code: str | None
+    path: str
+    status: str
+
+
+class DepartmentCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    code: str | None = Field(default=None, max_length=32)
+    parent_id: UUID | None = None
+
+
+class DepartmentUpdateRequest(BaseModel):
+    """字段级 PUT：缺省=不改；parent_id 显式传 null/值 = 移动。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    code: str | None = Field(default=None, max_length=32)
+    status: str | None = Field(default=None, pattern="^(active|disabled)$")
+    parent_id: UUID | None = None
+
+
+class TeacherDepartmentUpdateRequest(BaseModel):
+    """教师调岗：department_id=null = 取消归属。"""
+
+    department_id: UUID | None
+
+
+def _department_response(item: Any) -> DepartmentResponse:
+    return DepartmentResponse(
+        id=item.id, parent_id=item.parent_id, name=item.name,
+        code=item.code, path=item.path, status=item.status,
+    )
+
+
+@router.get("/departments", response_model=list[DepartmentResponse])
+async def list_departments(
+    viewer: Annotated[Principal, ViewerDep],
+) -> list[DepartmentResponse]:
+    """整棵部门树（扁平 + parent_id；校级规模一次拉全量，无 cursor——简报偏差已记录）。"""
+
+    try:
+        items = await departments_service.list_departments(viewer)
+    except DepartmentError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+    return [_department_response(item) for item in items]
+
+
+@router.post("/departments", status_code=201, response_model=DepartmentResponse)
+async def create_department(
+    payload: DepartmentCreateRequest, viewer: Annotated[Principal, OrgManageDep]
+) -> DepartmentResponse:
+    try:
+        item = await departments_service.create_department(
+            viewer, name=payload.name, code=payload.code, parent_id=payload.parent_id
+        )
+    except DepartmentError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+    return _department_response(item)
+
+
+@router.put("/departments/{department_id}", response_model=DepartmentResponse)
+async def update_department(
+    department_id: UUID,
+    payload: DepartmentUpdateRequest,
+    viewer: Annotated[Principal, OrgManageDep],
+) -> DepartmentResponse:
+    kwargs: dict[str, Any] = {}
+    for field_name in ("name", "code", "status", "parent_id"):
+        if field_name in payload.model_fields_set:
+            kwargs[field_name] = getattr(payload, field_name)
+    try:
+        item = await departments_service.update_department(
+            viewer, department_id, **kwargs
+        )
+    except DepartmentError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+    return _department_response(item)
+
+
+@router.delete("/departments/{department_id}", status_code=204)
+async def delete_department(
+    department_id: UUID, viewer: Annotated[Principal, OrgManageDep]
+) -> None:
+    try:
+        await departments_service.delete_department(viewer, department_id)
+    except DepartmentError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+
+
+@router.put("/teachers/{teacher_id}", response_model=TeacherResponse)
+async def update_teacher_department(
+    teacher_id: UUID,
+    payload: TeacherDepartmentUpdateRequest,
+    viewer: Annotated[Principal, OrgManageDep],
+) -> TeacherResponse:
+    """教师调岗（ORG-05）：审计变更前后值（部门名口径）。"""
+
+    try:
+        item = await departments_service.update_teacher_department(
+            viewer, teacher_id, department_id=payload.department_id
+        )
+    except DepartmentError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+    return TeacherResponse(
+        id=item.id, user_id=item.user_id, login_id=item.login_id,
+        employee_no=item.employee_no, name=item.name, age=item.age,
+        gender=item.gender, position=item.position, initial_password=None,
+    )
