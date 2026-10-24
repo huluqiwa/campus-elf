@@ -242,6 +242,7 @@ async def test_bs_m2_02_import_requires_permission(client: AsyncClient) -> None:
     assert denied.status_code == 403, denied.text
 
 
+@pytest.mark.timeout(900)  # 1000 行建档 bcrypt(cost12) ≈ 8 分钟（远超默认 120s）
 async def test_bs_m2_02_import_thousand_rows(client: AsyncClient) -> None:
     """验收：1000 行异步导入 → 进度/结果可查，全部成功（性能观感基线）。"""
 
