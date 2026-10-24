@@ -209,8 +209,8 @@ LLM-05-CampusCompanionElf/
 | `departments` | id, tenant_id, parent_id, name, code, path, status | 部门/科室树（A30）；复合外键 `(parent_id, tenant_id)`；唯一 `(tenant_id, parent_id, name)` |
 | `courses` | id, tenant_id, code, name | 课程 |
 | `teacher_class_courses` | teacher_id, class_id, course_id, term | 任教关系 |
-| `import_jobs` | id, tenant_id, type, file_object_key, status, total_rows, success_rows, failed_rows, error_report_key, retry_count | 导入 |
-| `import_row_errors` | job_id, row_no, field, error_code, message | 错误行 |
+| `import_jobs` | id, tenant_id, type, conflict(error\|skip), file_object_key, status, total_rows, success_rows, failed_rows, skipped_rows, error_report_key, row_filter_json(重试行号), retried_by, retry_count, created_by, started_at, finished_at, message | 导入（M2-ORG02 实际形态；错误行重试=派生 job 只导失败行） |
+| `import_row_errors` | id, tenant_id, job_id, row_no, field, error_code, message, raw_json(原始行，重试免二次解析) | 错误行 |
 
 ### 4.3 知识库
 
@@ -430,7 +430,9 @@ audit_logs: 仅追加，prev_hash/hash 链
 | GET/POST | `/school/teachers` | 教师列表/创建（含 department_id 归属） |
 | GET/POST | `/school/students` | 学生列表/创建 |
 | POST | `/school/imports` | CSV/XLSX 异步导入 |
-| GET | `/school/imports/{job_id}` | 导入进度/错误报告 |
+| GET | `/school/imports/{job_id}` | 导入进度/汇总 |
+| GET | `/school/imports/{job_id}/errors` | 错误行报告 |
+| POST | `/school/imports/{job_id}/retry` | 失败行重试（派生任务） |
 | POST | `/school/permission-accounts` | 权限账号 |
 | GET | `/school/dashboard/overview` | 看板统计 |
 

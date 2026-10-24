@@ -380,6 +380,19 @@
 - 更好做法与 TD 处置：TD-070（cursor，本点收口/Personnel 迁移随 B 端页面）、TD-151（class 收口，course 随 M3）、TD-174（新，双写对账，M2 末评审）。
 - 结论：**可提交**（0 Blocker / 0 Major）。
 
+### M2-ORG02 CSV/XLSX 异步导入（2026-10-24）
+
+- 设计简报：docs/design-briefs/M2-ORG02-import.md（D1-D4 已确认；§9 偏差 + §10 复审记录）
+- commit/diff：staged diff（20 文件 +1651 → 修复后 25 文件）
+- 审查人/agent：独立审查子 agent（与实现者独立上下文），两轮
+- Findings：
+  - 第一轮：Blocker 0；Major 6（解析器空列错位映射、错误行 field 恒 "row"、D3 文件内重复策略未实现且简报失实、上传体积限制未接线、retry 入队失败死端、running 卡死无恢复）；Minor 9（裸 add 绕守卫、空行行号口径、_http_error 死代码、解析阻塞事件循环、job 生命周期审计缺失、冲突预探测重复查询、进度判定漏 skip、编码/性别别名、design.md/handoff/README 文档缺口）。
+  - 第一轮修复：全部 6 Major + 9 Minor 落地（列位映射、OrgError.field、seen_numbers/FILE_DUPLICATE、BodySizeLimit 接线、补偿清 retried_by、看门狗 cron、错误行仓储化、空行占号、to_thread、审计、CAS、文档回写）。
+  - 第二轮：Major 2 项小修（① exc.field 未消费——一行修复 + BS 断言 ORG_LOGIN_TAKEN field=login_id；② M6 恢复承诺未兑现——选定方案 b：failed 任务可 retry 整文件重跑，已导入行以冲突报错收敛，_finish/进度仅 running 可写不复活终态）；Minor：cron 节奏修正（每 15 分钟四条）、BS retry 断言补 field、README/handoff 落盘、design.md 重复行删除、守卫 sa_update 盲区登记、retry CAS/补偿用例补齐。
+- 复测：受影响用例 55 passed；全量 **618 passed**（1211s）；ruff/mypy 167 文件全绿；alembic check 无漂移（head e2a6c8d4b0f2）。
+- 更好做法与 TD 处置：TD-175（新，导入文件对象无生命周期，M6）；TD-174 对账在本点实测恒一致（导入不产生教师范围行）。
+- 结论：**可提交**（0 Blocker / 0 Major）。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

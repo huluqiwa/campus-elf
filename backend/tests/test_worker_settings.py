@@ -5,14 +5,25 @@ from arq.worker import create_worker
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.org.import_task import run_import_job
 from app.workers.settings import WorkerSettings, build_redis_settings, queue_name
 from app.workers.tasks import echo
 
 
-def test_worker_settings_registers_echo() -> None:
-    """Worker 入口挂载 echo 任务。"""
+def test_worker_settings_registers_tasks() -> None:
+    """Worker 入口挂载 echo 与导入任务（M2-ORG02）。"""
 
-    assert WorkerSettings.functions == [echo]
+    assert len(WorkerSettings.functions) == 2
+    assert run_import_job in WorkerSettings.functions
+    assert echo in WorkerSettings.functions
+
+
+def test_worker_settings_registers_import_watchdog_cron() -> None:
+    """看门狗 cron 每 15 分钟（:00/:15/:30/:45 四条）注册。"""
+
+    cron = [job for job in (WorkerSettings.cron_jobs or []) if "import" in job.name]
+    assert len(cron) == 4
+    assert {job.minute for job in cron} == {0, 15, 30, 45}
 
 
 def test_arq_cli_wires_namespaced_queue() -> None:

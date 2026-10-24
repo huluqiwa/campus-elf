@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import app.db.models  # noqa: F401  显式注册全部模型（守卫从 registry 推导表清单，不依赖收集顺序）
 from app.db.base import Base, TenantScopedMixin
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,9 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
 # 豁免条目上限：超过就说明"直连"正在变成常态，必须回头收敛到仓储。
 MAX_EXEMPT_MODULES = 8
 
+# 已知命名盲区（M2-ORG02 复审登记）：`sa_update(Model)` 形态不匹配下方 update 正则。
+# 当前两处使用（retry CAS / 看门狗收口）均为「行经仓储取得 + 条件更新」的正当路径且 RLS 生效；
+# 若 CAS 增多，考虑在仓储提供条件更新原语并恢复正则覆盖。
 _TABLE_RE = re.compile(r"\b(?:from|into|update|join)\s+(?:public\.)?([a-z_]+)\b", re.IGNORECASE)
 _ORM_CALL_TEMPLATE = r"\b(?:select|insert|update|delete|get|exists|scalar)\s*\(\s*(?:[A-Za-z_]+\.)?{name}\b"
 

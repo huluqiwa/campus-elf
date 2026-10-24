@@ -15,7 +15,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 import anyio
@@ -24,13 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.writer import append_audit
 from app.auth.passwords import generate_initial_password, hash_password
-from app.auth.principal import Principal
 from app.db.models.identity import User
 from app.db.models.org import Course, OrgClass, Student, Teacher, TeacherClassCourse
 from app.db.models.rbac import Role, UserRole
 from app.db.repository import ScopeBypass, ScopeDecision, TenantScopedRepository
 from app.db.session import db_session
 from app.org.scopes_sync import build_user_class_member_factory, sync_class_scope_rows
+from app.rbac.scopes import DataScopeContext
 
 # 列表分页上界（与 personnel 同口径）
 MAX_PAGE_SIZE = 100
@@ -43,13 +43,19 @@ logger = logging.getLogger(__name__)
 
 
 class OrgError(RuntimeError):
-    """组织结构的业务错误（映射为 HTTP 状态码）。"""
+    """组织结构的业务错误（映射为 HTTP 状态码）。
 
-    def __init__(self, code: str, message: str, http_status: int) -> None:
+    `field` 可选：标注出错字段（导入错误行报告的结构化字段来源；None=行级错误）。
+    """
+
+    def __init__(
+        self, code: str, message: str, http_status: int, *, field: str | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.http_status = http_status
+        self.field = field
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,17 +122,38 @@ class CreatedProfile:
     initial_password: str
 
 
-def _require_tenant(principal: Principal) -> UUID:
+class OrgActor(Protocol):
+    """组织写路径的执行者最小结构（请求主体或导入任务的系统执行者）。
+
+    结构化协议（只读成员）：`Principal`（每请求解析，property 成员）与
+    `ImportActor`（Arq 任务内代表上传者执行）都天然满足；服务层不关心令牌细节。
+    """
+
+    @property
+    def user_id(self) -> UUID: ...
+
+    @property
+    def realm(self) -> str: ...
+
+    @property
+    def tenant_id(self) -> UUID | None: ...
+
+    @property
+    def scope_context(self) -> ScopeDecision: ...
+
+
+def _require_tenant(principal: OrgActor) -> UUID:
     if principal.realm != "tenant" or principal.tenant_id is None:
         raise OrgError("REALM_MISMATCH", "组织管理只在校方租户上下文内可用", 403)
     return principal.tenant_id
 
 
-def _require_school_scope(principal: Principal) -> UUID:
+def _require_school_scope(principal: OrgActor) -> UUID:
     """目录类读路径（班级/课程/教师/任教列表）仅全校范围：校方管理功能而非个人数据。"""
 
     tenant_id = _require_tenant(principal)
-    if not principal.scope_context.sees_whole_school:
+    scope = principal.scope_context
+    if not isinstance(scope, DataScopeContext) or not scope.sees_whole_school:
         raise OrgError("SCOPE_MISMATCH", "该目录仅全校范围可见", 403)
     return tenant_id
 
@@ -149,7 +176,7 @@ def _map_integrity_error(exc: Exception, code: str, message: str) -> OrgError:
 
 async def _audit(
     session: AsyncSession,
-    principal: Principal,
+    principal: OrgActor,
     tenant_id: UUID,
     *,
     action: str,
@@ -260,7 +287,7 @@ async def _class_item(session: AsyncSession, tenant_id: UUID, org_class: OrgClas
 
 
 async def create_class(
-    principal: Principal,
+    principal: OrgActor,
     *,
     grade: str,
     name: str,
@@ -308,7 +335,7 @@ async def create_class(
 
 
 async def update_class(
-    principal: Principal,
+    principal: OrgActor,
     class_id: UUID,
     *,
     grade: Any = UNSET,
@@ -402,7 +429,7 @@ async def update_class(
         return await _class_item(session, tenant_id, org_class)
 
 
-async def delete_class(principal: Principal, class_id: UUID) -> None:
+async def delete_class(principal: OrgActor, class_id: UUID) -> None:
     tenant_id = _require_tenant(principal)
     async with db_session(tenant_id=tenant_id) as session:
         repository: TenantScopedRepository[OrgClass] = _repository(
@@ -433,7 +460,7 @@ async def delete_class(principal: Principal, class_id: UUID) -> None:
 
 
 async def list_classes(
-    principal: Principal, *, limit: int = 50, cursor: str | None = None
+    principal: OrgActor, *, limit: int = 50, cursor: str | None = None
 ) -> Page:
     tenant_id = _require_school_scope(principal)
     async with db_session(tenant_id=tenant_id) as session:
@@ -451,7 +478,7 @@ async def list_classes(
 # 课程（目录数据，非个人数据）
 # ---------------------------------------------------------------------------
 
-async def create_course(principal: Principal, *, code: str, name: str) -> CourseItem:
+async def create_course(principal: OrgActor, *, code: str, name: str) -> CourseItem:
     tenant_id = _require_tenant(principal)
     async with db_session(tenant_id=tenant_id) as session:
         repository: TenantScopedRepository[Course] = _repository(
@@ -470,7 +497,7 @@ async def create_course(principal: Principal, *, code: str, name: str) -> Course
         return CourseItem(id=course.id, code=code, name=name)
 
 
-async def list_courses(principal: Principal, *, limit: int = 50, cursor: str | None = None) -> Page:
+async def list_courses(principal: OrgActor, *, limit: int = 50, cursor: str | None = None) -> Page:
     tenant_id = _require_school_scope(principal)
     async with db_session(tenant_id=tenant_id) as session:
         repository: TenantScopedRepository[Course] = _repository(
@@ -519,21 +546,21 @@ async def _first_by(
 
 async def _assert_login_free(session: AsyncSession, tenant_id: UUID, login_id: str) -> None:
     if await _first_by(session, User, tenant_id, User.login_id == login_id) is not None:
-        raise OrgError("ORG_LOGIN_TAKEN", "登录名（学号/工号）已被占用", 409)
+        raise OrgError("ORG_LOGIN_TAKEN", "登录名（学号/工号）已被占用", 409, field="login_id")
 
 
 async def _assert_employee_no_free(session: AsyncSession, tenant_id: UUID, employee_no: str) -> None:
     if await _first_by(session, Teacher, tenant_id, Teacher.employee_no == employee_no) is not None:
-        raise OrgError("ORG_NO_TAKEN", "工号已被占用", 409)
+        raise OrgError("ORG_NO_TAKEN", "工号已被占用", 409, field="employee_no")
 
 
 async def _assert_student_no_free(session: AsyncSession, tenant_id: UUID, student_no: str) -> None:
     if await _first_by(session, Student, tenant_id, Student.student_no == student_no) is not None:
-        raise OrgError("ORG_NO_TAKEN", "学号已被占用", 409)
+        raise OrgError("ORG_NO_TAKEN", "学号已被占用", 409, field="student_no")
 
 
 async def create_teacher(
-    principal: Principal,
+    principal: OrgActor,
     *,
     login_id: str,
     employee_no: str,
@@ -583,7 +610,7 @@ async def create_teacher(
 
 
 async def create_student(
-    principal: Principal,
+    principal: OrgActor,
     *,
     login_id: str,
     student_no: str,
@@ -653,7 +680,7 @@ async def _login_ids_for(
 
 
 async def list_students(
-    principal: Principal,
+    principal: OrgActor,
     *,
     limit: int = 50,
     cursor: str | None = None,
@@ -683,7 +710,7 @@ async def list_students(
 
 
 async def list_teachers(
-    principal: Principal, *, limit: int = 50, cursor: str | None = None
+    principal: OrgActor, *, limit: int = 50, cursor: str | None = None
 ) -> Page:
     """教师目录（仅全校范围；条目不含初始密码与身份证列）。"""
 
@@ -712,7 +739,7 @@ async def list_teachers(
 # ---------------------------------------------------------------------------
 
 async def create_assignment(
-    principal: Principal,
+    principal: OrgActor,
     *,
     teacher_id: UUID,
     class_id: UUID,
@@ -756,7 +783,7 @@ async def create_assignment(
         )
 
 
-async def delete_assignment(principal: Principal, assignment_id: UUID) -> None:
+async def delete_assignment(principal: OrgActor, assignment_id: UUID) -> None:
     tenant_id = _require_tenant(principal)
     async with db_session(tenant_id=tenant_id) as session:
         repository: TenantScopedRepository[TeacherClassCourse] = _repository(
@@ -779,7 +806,7 @@ async def delete_assignment(principal: Principal, assignment_id: UUID) -> None:
 
 
 async def list_assignments(
-    principal: Principal,
+    principal: OrgActor,
     *,
     limit: int = 50,
     cursor: str | None = None,

@@ -36,6 +36,9 @@ REQUIRED_RLS_TABLES: tuple[str, ...] = (
     "teachers",
     "students",
     "teacher_class_courses",
+    # M2-ORG02：导入任务（含上传者与原始行数据）
+    "import_jobs",
+    "import_row_errors",
 )
 
 

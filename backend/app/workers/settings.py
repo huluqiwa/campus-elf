@@ -15,6 +15,7 @@ from arq.typing import StartupShutdown, WorkerCoroutine
 from arq.worker import Function
 
 from app.config import Settings, get_settings
+from app.org.import_task import fail_stale_import_jobs, run_import_job
 from app.workers.tasks import cleanup_refresh_tokens, echo
 
 
@@ -75,9 +76,34 @@ class WorkerSettings:
     """
 
     # echo 的签名比 WorkerCoroutine 协议更窄（协议要求 *args/**kwargs），故 cast。
-    functions: Sequence[WorkerCoroutine | Function] = [cast(WorkerCoroutine, echo)]
+    functions: Sequence[WorkerCoroutine | Function] = [
+        cast(WorkerCoroutine, echo),
+        run_import_job,
+    ]
     # 每天 03:30（UTC）清理过期/已撤销刷新令牌（TD-067）
     cron_jobs: Sequence[CronJob] | None = [
+        # 看门狗每 15 分钟（:00/:15/:30/:45 四条；arq cron 的 minute 语义是「每小时第 N 分」）
+        *[
+            CronJob(
+                "fail_stale_import_jobs",
+                cast(WorkerCoroutine, fail_stale_import_jobs),
+                month=None,
+                day=None,
+                weekday=None,
+                hour=None,
+                minute=minute,
+                second=0,
+                microsecond=0,
+                run_at_startup=False,
+                unique=True,
+                job_id=None,
+                timeout_s=None,
+                keep_result_s=None,
+                keep_result_forever=None,
+                max_tries=None,
+            )
+            for minute in (0, 15, 30, 45)
+        ],
         CronJob(
             "cleanup_refresh_tokens",
             cast(WorkerCoroutine, cleanup_refresh_tokens),

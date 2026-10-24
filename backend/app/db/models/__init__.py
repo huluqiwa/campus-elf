@@ -8,6 +8,7 @@ from app.db.models.identity import (
     RefreshToken,
     User,
 )
+from app.db.models.imports import ImportJob, ImportRowError
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
 from app.db.models.org import Course, OrgClass, Student, Teacher, TeacherClassCourse
 from app.db.models.rbac import (
@@ -32,6 +33,8 @@ __all__ = [
     "AuditLog",
     "Course",
     "DataScope",
+    "ImportJob",
+    "ImportRowError",
     "MfaRecoveryCode",
     "OrgClass",
     "Permission",

@@ -278,3 +278,75 @@ async def test_cursor_pagination(clean_db: AsyncEngine) -> None:
 
         with pytest.raises(ValueError):
             await repository.list_cursor(limit=3, cursor="broken-cursor")
+
+
+async def test_import_retry_compensation_and_cas(clean_db: AsyncEngine) -> None:
+    """入队失败补偿清除 retried_by；retry CAS 只允许一个派生（并发正确性）。"""
+
+    import uuid as uuid_module
+
+    from app.db.models.imports import ImportJob
+
+    tenant_id, user_id = await _insert(clean_db, _USER_SQL, {"user_type": "school_admin", "login_id": "it-retry", "name": "重试校管"})
+    factory = async_sessionmaker(clean_db, expire_on_commit=False)
+
+    # 1) 入队失败补偿：retried_by 被清除，源 job 可再次 retry
+    async with factory() as session, session.begin():
+        repository: TenantScopedRepository[ImportJob] = TenantScopedRepository(
+            session, ImportJob, tenant_id, scope=ScopeBypass(reason="集成直查导入补偿行为")
+        )
+        source = ImportJob(
+            tenant_id=tenant_id, type="students", conflict="error",
+            file_object_key="imports/x/x.csv", status="completed_with_errors",
+            total_rows=3, success_rows=1, failed_rows=2, created_by=user_id,
+        )
+        await repository.add(source)
+        derived = ImportJob(
+            tenant_id=tenant_id, type="students", conflict="error",
+            file_object_key=source.file_object_key, status="failed",
+            total_rows=2, failed_rows=2, created_by=user_id, retry_count=1,
+        )
+        await repository.add(derived)
+        source.retried_by = derived.id
+        job_id, derived_id = source.id, derived.id
+
+    async with factory() as session, session.begin():
+        repository2: TenantScopedRepository[ImportJob] = TenantScopedRepository(
+            session, ImportJob, tenant_id, scope=ScopeBypass(reason="补偿验证")
+        )
+        source2 = await repository2.get(job_id)
+        assert source2 is not None and source2.retried_by == derived_id
+        source2.retried_by = None  # 补偿动作本身
+    async with factory() as session:
+        repository3: TenantScopedRepository[ImportJob] = TenantScopedRepository(
+            session, ImportJob, tenant_id, scope=ScopeBypass(reason="补偿验证")
+        )
+        source3 = await repository3.get(job_id)
+        assert source3 is not None and source3.retried_by is None
+
+    # 2) CAS：retried_by 已被第一个 claim 置值 → 第二个 claim 影响 0 行
+    from sqlalchemy import update as sa_update
+
+    async with factory() as session, session.begin():
+        repository4: TenantScopedRepository[ImportJob] = TenantScopedRepository(
+            session, ImportJob, tenant_id, scope=ScopeBypass(reason="CAS 验证")
+        )
+        first = ImportJob(
+            tenant_id=tenant_id, type="students", conflict="error",
+            file_object_key=source.file_object_key, status="pending",
+            created_by=user_id, row_filter_json=[3, 4], retry_count=1,
+        )
+        await repository4.add(first)
+        _ = uuid_module.uuid4  # 占位引用
+        claimed1: Any = await session.execute(
+            sa_update(ImportJob)
+            .where(ImportJob.id == source.id, ImportJob.retried_by.is_(None))
+            .values(retried_by=first.id)
+        )
+        claimed2: Any = await session.execute(
+            sa_update(ImportJob)
+            .where(ImportJob.id == source.id, ImportJob.retried_by.is_(None))
+            .values(retried_by=uuid_module.uuid4())
+        )
+        assert claimed1.rowcount == 1
+        assert claimed2.rowcount == 0

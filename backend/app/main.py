@@ -19,6 +19,7 @@ from app.api.health import router as health_router
 from app.api.platform_audit import router as platform_audit_router
 from app.api.platform_rbac import router as platform_rbac_router
 from app.api.platform_tenants import router as platform_tenants_router
+from app.api.school_imports import router as school_imports_router
 from app.api.school_org import router as school_org_router
 from app.api.school_personnel import router as school_personnel_router
 from app.config import get_settings
@@ -29,6 +30,8 @@ from app.tenant.middleware import RequestContextMiddleware
 
 # 10MB 资质文件 + multipart 边界/表单字段余量（仅注册路由）
 MAX_REGISTER_BODY_BYTES = 11 * 1024 * 1024
+# 导入文件 ≤10MB（解析器 MAX_FILE_SIZE 同口径）+ multipart 表单余量（M2-ORG02）
+MAX_IMPORT_BODY_BYTES = 11 * 1024 * 1024
 
 
 @asynccontextmanager
@@ -82,7 +85,11 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
     # 体积限制只作用于登记路径，避免给后续 KB 大上传引入全局上限（M27）
     application.add_middleware(
         BodySizeLimitMiddleware,
-        limits={f"{settings.api_prefix}/platform/tenants/register": MAX_REGISTER_BODY_BYTES},
+        limits={
+            f"{settings.api_prefix}/platform/tenants/register": MAX_REGISTER_BODY_BYTES,
+            # M2-ORG02：导入文件体积限制（10MB 文件 + 表单余量）
+            f"{settings.api_prefix}/school/imports": MAX_IMPORT_BODY_BYTES,
+        },
     )
     application.add_middleware(RequestContextMiddleware)
 
@@ -94,6 +101,7 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
     application.include_router(platform_tenants_router, prefix=settings.api_prefix)
     application.include_router(school_personnel_router, prefix=settings.api_prefix)
     application.include_router(school_org_router, prefix=settings.api_prefix)
+    application.include_router(school_imports_router, prefix=settings.api_prefix)
     application.include_router(platform_rbac_router, prefix=settings.api_prefix)
     return application
 

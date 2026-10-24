@@ -96,3 +96,31 @@
 
 - 审查重点：行级原子性（无半成品）；错误报告含行号/字段/原因且不含敏感信息；任务可重入（进度不倒退）；retry 只导失败行；对象存储凭据不泄漏；权限声明齐全；TD-174 对账断言真实。
 - 允许偏差：列名微调、状态机命名、错误码文本；用例数 ±3。
+
+## 9. 实现结果
+
+**交付物**：openpyxl 依赖（3.1.5，uv.lock 同步）；迁移 `e2a6c8d4b0f2`（import_jobs/import_row_errors + RLS）；`app/db/models/imports.py`；`app/org/import_parser.py`（CSV/XLSX/编码链/gb18030/别名表头/上限）；`app/org/import_task.py`（`run_import_job`：逐行独立事务、错误行含原始行 JSON、每 50 行进度回写、TD-174 对账、幂等仅 pending 执行）；`app/org/service.py` 引入 `OrgActor` 只读协议（Principal 与导入执行者结构化满足）；`app/api/school_imports.py` 4 端点（上传即 422 拒绝解析致命错误/错误行整数游标/retry 派生 job）；worker `functions` 注册。
+
+**测试**：解析器单测 14（CSV/XLSX/gb18030/BOM/表头错/超限/伪装扩展名/空行行号）；BS-M2-02 三例（错误报告与 retry 全链路 / 无权限 403 / 1000 行全成功，约 8.5 分钟——bcrypt cost 12 建号为主成本，`--timeout=900` 单独放宽）。
+
+**实现期偏差与要点**：
+1. 行错误 record 曾被「预填 INTERNAL_ERROR + or 链」掩盖真实错误码（审查前自测发现，已修正为校验通过即不预填）；
+2. `import_jobs` 增 `created_by/row_filter_json/retried_by/started_at/finished_at/message/conflict/skipped_rows`、`import_row_errors` 增 `raw_json`（design §4.2 已回写）；
+3. 凭据分发不在本点（D2）：导入账号口令为不可猜测随机值 + must_change_password，学生/教师首登走重置流程（TD-126 承接）；
+4. 教师范围行与导入无关（任教关系不导入），TD-174 对账在任务收尾执行且恒一致，无需常驻对账任务；
+5. 登录名可选列缺省=工号/学号；表头支持中文别名；**文件内重复学号/工号一律报错行**
+   （错误码 `FILE_DUPLICATE`，不受 conflict 策略影响——同一文件内互相矛盾的两行不可跳过）；
+   库内重复按 conflict：error=报错行（建档函数原子检查给出精确字段），skip=跳过并标注。
+
+## 10. 复审补充（2026-10-24，审查 M1-M6 落地记录）
+
+- M1 列位错位：`_normalize_headers` 返回 (原始下标, canonical) 映射，未命名列整列丢弃、重复列名拒绝（`HEADER_DUPLICATE`）；
+- M2 错误行 field：OrgError 携带 field，建档冲突/班级定位 raise 点标注字段；
+- M3 文件内重复：任务内 `seen_numbers` 集合，FILE_DUPLICATE；
+- M4：上传体积限制接入 BodySizeLimitMiddleware（/school/imports 11MiB）+ 读取后 MAX_UPLOAD_SIZE 双保险；
+- M5：retry 入队失败补偿清除源 job retried_by（不再锁死）+ retry CAS（并发双击仅一个成功）；
+- M6：stale running 看门狗 cron `fail_stale_import_jobs`（每 15 分钟一次，started_at 超 60 分钟收口 failed）；
+  收口后的 failed 任务可经 retry **整文件重跑**（方案 b：不带 row_filter，已导入行以冲突错误行现形，
+  覆盖收敛；崩溃点之后未处理的行不会丢失）；`_finish`/进度回写仅 running 可写（与看门狗竞态不复活终态）；
+- Minor：错误行走仓储、空行占行号（与电子表格对齐）、解析下放线程、job 生命周期审计（org.import.created/retried）、_http_error 死代码删除；
+- TD 登记：对象存储无生命周期（导入文件含 PII 永久保留）→ 随 M6 存储生命周期统一；性别/编码值级别名 → 按真实文件反馈再加。

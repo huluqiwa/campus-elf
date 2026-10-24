@@ -97,7 +97,7 @@
 | TD-066 | M1-A | 开发/生产尚未提供应用登录角色与三连接分离 | 已采纳 | M1-B | 已实现：迁移创建组角色 `campus_elf_tenant`/`campus_elf_platform`，应用侧支持 `DATABASE_URL`/`PLATFORM_DATABASE_URL`/`MIGRATION_DATABASE_URL`，测试栈自动创建登录角色并导出 `TEST_APP_DATABASE_URL`/`TEST_PLATFORM_DATABASE_URL`；dev/prod 仍需部署脚本建登录角色并配置三连接 |
 | TD-067 | M1-A | refresh token 过期清理任务未实现 | 已完成 | M1-C | Arq 每日 03:30 清理过期/久已撤销行（保留期 30 天，`cleanup_refresh_tokens`），租户表按租户上下文逐租户删除；集成测试覆盖保留期边界 |
 | TD-068 | M1-A | 审计哈希链校验脚本/只读接口未实现 | 已完成 | M1-F | `scripts/verify_audit_chain.py`（逐行验 prev_hash + HMAC + 未入链行检测）+ `GET /platform/audit-logs`（platform.audit.view + cursor 分页）；集成测试覆盖合法链/错误密钥/未入链行 |
-| TD-069 | M1-A | `updated_at` 仅 ORM 侧 `onupdate`，非 ORM 更新不刷新 | 已延后 | M2 | 需要时补数据库触发器或统一走 ORM 更新 |
+| TD-069 | M1-A | `updated_at` 仅 ORM 侧 `onupdate`，非 ORM 更新不刷新 | 已完成 | M2 | ✅ M2-ORG02 已收口：导入进度/终态回写统一走 ORM update（`import_task._update_progress/_finish`）；全库非 ORM 更新路径已清零（组织模块探针亦改为仓储） |
 | TD-070 | M1-A | `list_all` 用 limit/offset 分页（design §5.1 约定 cursor） | 已采纳 | M2 | ✅ M2-ORG01-03 已收口：仓储新增 `list_cursor`（keyset (created_at,id)），组织五接口全部 cursor 分页；`/school/personnel` 的信封迁移随 B 端页面功能点一并做 |
 | TD-071 | M1-A | 尚无「零 skip」CI 断言（仅覆盖缺变量场景） | 已采纳 | M1 尾 | 可在 CI 解析 pytest 的 -rs 输出，断言白名单外 skipped=0 |
 | TD-072 | M1-A | 平台跨租查询通道（二次授权+审计）未实现 | 已完成 | M1-E2 | 通道已交付：`app/personnel/cross_tenant.py`（仅平台 realm + `platform.cross_tenant.read`、事务第一条语句 `SET LOCAL TRANSACTION READ ONLY`、一次一个 `tenant_id`、理由必填、成功读取写 `platform.cross_tenant.read` 审计且审计失败则请求失败）+ `POST /api/v1/platform/cross-tenant/personnel/read`；口径 ② 的"最小通道"落地，**二次授权的工单化仍延后（TD-153）** |
@@ -200,6 +200,7 @@
 | TD-172 | M1 验收 | backend 的 `scripts/` 目录不在 ruff/mypy 门禁范围（scope 为 `app tests`），`e2e_seed.py` 仅验收期单独检查 | 已采纳 | M2 | M2 第一个功能点开工时把 `scripts` 纳入 backend ruff/mypy scope 与 `scripts/ci.sh`（evals 已有 `src tests scripts` 先例），避免范围蔓延到本次验收提交 |
 | TD-173 | M1-F 复审 | 审计写入在整段外层事务期间持有全局 advisory lock（单链串行化）：吞吐上限与外层事务时长耦合，高频写场景可能成为热点 | 已采纳 | M6 | 与 TD-163（外部锚点）同批评估：量级上来后分段链/锁内最小化；M1 量级（登录/权限拒绝频度）实测无感知 |
 | TD-174 | M2-ORG01-03 | class 范围行与组织关系表双写：一致性靠「同事务 + 同步函数 + 部分唯一索引 + 对账测试」，无数据库级外键联动 | 已采纳 | M2 末评审 | 若 ORG-02 异步导入出现同步缺口，补周期对账任务（`expected_class_scope_pairs` vs 实际行）与告警；当前全部写路径单点收敛在 `app/org`，缺口风险集中在导入 |
+| TD-175 | M2-ORG02 | 导入上传文件（含 PII）存对象存储且无生命周期/删除端点，失败 job 的孤儿对象永久保留 | 已采纳 | M6 | 随存储生命周期策略（TD-083 同类）统一：对象桶生命周期规则 + job 删除端点级联清理；M2 末评审确认无更早需求 |
 | TD-162 | M1-F | 持 AUDIT_HASH_KEY 者可伪造入链行（hash_version=1 且哈希一致），链校验无法区分 | 已采纳 | M6 | 外部锚点（anchor_ref 预留字段 + 定期 WORM 导出哈希到外部存储）可收口；当前审计密钥仅平台运维持有，泄露面极小 |
 | TD-163 | M1-F | 哈希未覆盖 ip/user_agent/metadata_json/before_json_redacted/after_json_redacted，超级用户改这些字段不可检测 | 已采纳 | M6 | 与外部锚点一并考虑（扩字段会破坏现有链）；当前仅覆盖核心业务字段（与简报字段表一致） |
 | TD-161 | M1-E2 | 例外标记可被伪造直写：CHECK 有 `self_exception_used IS TRUE` 这一条款后，"绕过审核函数直写同人 + 标记为真"在数据库层与合法例外同形，无法区分 | 已采纳 | M2 | 检测改走反查而非再加一道约束（用户 2026-10-23 确认三条款 CHECK）：真例外一定带 `approval.self_exception.used` 审计，故 M2 审计巡检加一条反查——`school_review_records` 里 `self_exception_used IS TRUE` 却在同 `request_id` 找不到对应审计的行即告警。落点与 TD-153（跨租工单化）同一批安全巡检 |
