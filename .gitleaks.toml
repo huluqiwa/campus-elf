@@ -27,4 +27,6 @@ regexes = [
   "Student-New-Pass-22",
   "Tenant-Test-Pass-1",
   "Platform-Test-Pass-1",
+  # M2-ORG01-03 业务场景的校管种子口令（仅测试种子账号；非真实凭证）。
+  "M2-Principal-Pass-1",
 ]
