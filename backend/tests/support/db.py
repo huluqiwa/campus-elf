@@ -26,6 +26,12 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 # 允许清理的租户级表（顺序：先子表后主表）
 TENANT_TABLES = (
+    # 子表在前：teacher_class_courses → students/teachers → classes/courses → 用户与权限
+    "teacher_class_courses",
+    "students",
+    "teachers",
+    "classes",
+    "courses",
     "user_roles",
     "role_permissions",
     "data_scopes",

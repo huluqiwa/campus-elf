@@ -19,6 +19,7 @@ from app.api.health import router as health_router
 from app.api.platform_audit import router as platform_audit_router
 from app.api.platform_rbac import router as platform_rbac_router
 from app.api.platform_tenants import router as platform_tenants_router
+from app.api.school_org import router as school_org_router
 from app.api.school_personnel import router as school_personnel_router
 from app.config import get_settings
 from app.core.logging import configure_logging
@@ -92,6 +93,7 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
     application.include_router(platform_audit_router, prefix=settings.api_prefix)
     application.include_router(platform_tenants_router, prefix=settings.api_prefix)
     application.include_router(school_personnel_router, prefix=settings.api_prefix)
+    application.include_router(school_org_router, prefix=settings.api_prefix)
     application.include_router(platform_rbac_router, prefix=settings.api_prefix)
     return application
 

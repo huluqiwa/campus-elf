@@ -75,6 +75,8 @@ class Principal:
     # 数据范围类型（RBAC-02，M1-E2 口径 ⑨⑩）：角色 + 用户两条绑定取并集；
     # 平台主体恒为空集（平台不按"学校/本人"划数据，跨租可见性由 `platform.*` 权限单独决定）。
     scope_types: frozenset[str] = frozenset()
+    # class 范围的 scope_id 集合（M2-ORG01-03 D1；空集 = 没有班级范围授权）
+    class_ids: frozenset[UUID] = frozenset()
     # 当前会话是否完成过 MFA（来自访问令牌 amr；改密重签时原样保留）
     mfa_verified: bool = False
 
@@ -91,7 +93,8 @@ class Principal:
         """
 
         return DataScopeContext(
-            subject_user_id=self.user_id, scope_types=self.scope_types
+            subject_user_id=self.user_id, scope_types=self.scope_types,
+            class_ids=self.class_ids,
         )
 
 
@@ -104,6 +107,7 @@ class _Identity:
     roles: frozenset[str]
     permissions: frozenset[str]
     scope_types: frozenset[str] = frozenset()
+    class_ids: frozenset[UUID] = frozenset()
 
 
 async def _must_change_password(
@@ -191,6 +195,7 @@ async def _tenant_identity(session: AsyncSession, user_id: UUID) -> _Identity:
         roles=frozenset(str(code) for code in role_rows),
         permissions=frozenset(str(code) for code in permission_rows),
         scope_types=scope.scope_types,
+        class_ids=scope.class_ids,
     )
 
 
@@ -309,6 +314,7 @@ async def get_current_principal(
         roles=identity.roles,
         permissions=identity.permissions,
         scope_types=identity.scope_types,
+        class_ids=identity.class_ids,
         mfa_verified=claims.mfa_verified,
     )
 

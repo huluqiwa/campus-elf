@@ -204,7 +204,7 @@ LLM-05-CampusCompanionElf/
 | `user_roles` | user_id, role_id, tenant_id（复合外键保证与父行同租） | 多角色 |
 | `data_scopes` | id, tenant_id, role_id/user_id, scope_type(school/class/course/self), scope_id | 数据范围 |
 | `teachers` | id, tenant_id, user_id, employee_no, name, age, gender, position, **department_id**, id_card_enc, id_card_hmac, id_card_mask | 身份证加密/掩码；部门归属供文档人群判定（A30） |
-| `students` | id, tenant_id, user_id, student_no, name, class_id, gender, head_teacher_id, counselor_id, id_card_enc, id_card_hmac, id_card_mask | 档案 |
+| `students` | id, tenant_id, user_id, student_no, name, class_id, gender, id_card_enc, id_card_hmac, id_card_mask | 档案；班主任/辅导员权威在 `classes`（M2-ORG01-03 D2，读路径 join 聚合，不冗余落列） |
 | `classes` | id, tenant_id, grade, name, head_teacher_id, counselor_id | 班级（grade 供"年级"人群使用） |
 | `departments` | id, tenant_id, parent_id, name, code, path, status | 部门/科室树（A30）；复合外键 `(parent_id, tenant_id)`；唯一 `(tenant_id, parent_id, name)` |
 | `courses` | id, tenant_id, code, name | 课程 |

@@ -1,0 +1,174 @@
+"""组织结构模型（M2 ORG-01/03）：班级、课程、教师档案、学生档案、任教关系。
+
+口径（`docs/design-briefs/M2-ORG01-03.md`，已确认）：
+
+- **D2**：班主任/辅导员权威在 `classes`；`students` 不落冗余列（响应里由服务层 join 聚合）；
+- **D3**：`id_card_*` 三列仅预留列位，本模块**没有任何读写路径**（ORG-04 交付加密与接口）；
+- **D4**：档案与账号 1:1（unique (tenant_id, user_id)，账号删除级联删档案）；
+- **D1**：class 范围行的数据库完整性由迁移里的部分唯一索引保证
+  （`uq_data_scopes_user_class`，见 `rbac.DataScope`），本模块的同步函数负责增删。
+"""
+
+from uuid import UUID
+
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKeyConstraint,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+
+# 与 users.user_type 同口径：组织表只服务这两类人员（school_admin 无档案表）
+Gender = str  # 'male' / 'female' / 'other'，由 CHECK 约束收口
+
+
+class OrgClass(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """班级（年级 + 名称租户内唯一；班主任/辅导员的权威源）。"""
+
+    __tablename__ = "classes"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "grade", "name", name="uq_classes_tenant_id_grade_name"),
+        # 供 students / teacher_class_courses 做复合外键 (class_id, tenant_id)
+        UniqueConstraint("id", "tenant_id", name="uq_classes_id_tenant_id"),
+        ForeignKeyConstraint(
+            ["head_teacher_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_classes_head_teacher_id_users",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["counselor_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_classes_counselor_id_users",
+            ondelete="SET NULL",
+        ),
+    )
+
+    grade: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    head_teacher_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    counselor_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+
+
+class Course(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """课程（编码租户内唯一）。"""
+
+    __tablename__ = "courses"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code", name="uq_courses_tenant_id_code"),
+        # 供 teacher_class_courses 做复合外键 (course_id, tenant_id)
+        UniqueConstraint("id", "tenant_id", name="uq_courses_id_tenant_id"),
+    )
+
+    code: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class Teacher(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """教师档案（与 users 1:1；id_card_* 预留列位，ORG-04 前无读写路径）。"""
+
+    __tablename__ = "teachers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_teachers_tenant_id_user_id"),
+        UniqueConstraint("tenant_id", "employee_no", name="uq_teachers_tenant_id_employee_no"),
+        # 供 teacher_class_courses 做复合外键 (teacher_id, tenant_id)
+        UniqueConstraint("id", "tenant_id", name="uq_teachers_id_tenant_id"),
+        CheckConstraint("age IS NULL OR age BETWEEN 16 AND 80", name="ck_teachers_age_range"),
+        CheckConstraint(
+            "gender IS NULL OR gender IN ('male', 'female', 'other')",
+            name="ck_teachers_gender_valid",
+        ),
+        ForeignKeyConstraint(
+            ["user_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_teachers_user_id_users",
+            ondelete="CASCADE",
+        ),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    employee_no: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    age: Mapped[int | None] = mapped_column(SmallInteger)
+    gender: Mapped[Gender | None] = mapped_column(String(8))
+    position: Mapped[str | None] = mapped_column(String(64))
+    id_card_enc: Mapped[str | None] = mapped_column(Text)
+    id_card_hmac: Mapped[str | None] = mapped_column(String(64))
+    id_card_mask: Mapped[str | None] = mapped_column(String(32))
+
+
+class Student(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """学生档案（class_id 可空 = 未分班；id_card_* 预留列位，ORG-04 前无读写路径）。"""
+
+    __tablename__ = "students"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_students_tenant_id_user_id"),
+        UniqueConstraint("tenant_id", "student_no", name="uq_students_tenant_id_student_no"),
+        CheckConstraint(
+            "gender IS NULL OR gender IN ('male', 'female', 'other')",
+            name="ck_students_gender_valid",
+        ),
+        ForeignKeyConstraint(
+            ["user_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_students_user_id_users",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["class_id", "tenant_id"],
+            ["classes.id", "classes.tenant_id"],
+            name="fk_students_class_id_classes",
+            ondelete="SET NULL",
+        ),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    student_no: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    gender: Mapped[Gender | None] = mapped_column(String(8))
+    class_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    id_card_enc: Mapped[str | None] = mapped_column(Text)
+    id_card_hmac: Mapped[str | None] = mapped_column(String(64))
+    id_card_mask: Mapped[str | None] = mapped_column(String(32))
+
+
+class TeacherClassCourse(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """任教关系（教师 × 班级 × 课程 × 学期；class 范围行由此表与 classes 派生）。"""
+
+    __tablename__ = "teacher_class_courses"
+    __table_args__ = (
+        UniqueConstraint(
+            "teacher_id", "class_id", "course_id", "term",
+            name="uq_teacher_class_courses_teacher_id_class_id_course_id_term",
+        ),
+        ForeignKeyConstraint(
+            ["teacher_id", "tenant_id"],
+            ["teachers.id", "teachers.tenant_id"],
+            name="fk_teacher_class_courses_teacher_id_teachers",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["class_id", "tenant_id"],
+            ["classes.id", "classes.tenant_id"],
+            name="fk_teacher_class_courses_class_id_classes",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["course_id", "tenant_id"],
+            ["courses.id", "courses.tenant_id"],
+            name="fk_teacher_class_courses_course_id_courses",
+            ondelete="CASCADE",
+        ),
+    )
+
+    teacher_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    class_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    course_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    term: Mapped[str] = mapped_column(String(16), nullable=False)
+

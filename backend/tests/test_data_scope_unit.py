@@ -14,7 +14,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.db.models.identity import User
 from app.rbac.scopes import (
-    SUPPORTED_SCOPE_TYPES,
     DataScopeContext,
     scope_context_from_rows,
     scope_predicate,
@@ -96,22 +95,51 @@ def test_scope_context_from_rows_rejects_unknown_type() -> None:
         scope_context_from_rows(subject_user_id=uuid4(), rows=[("warehouse", None)])
 
 
-def test_unimplemented_class_scope_does_not_widen_visibility() -> None:
-    """本期未实现的 class/course：谓词只能按 self 收窄或拒绝，绝不展开成全校。"""
+def test_class_scope_without_factory_does_not_widen_visibility() -> None:
+    """class 范围在**没有成员子查询工厂**的模型上不贡献可见性（fail-closed，绝不放大成全校）。
+
+    M2-ORG01-03 起实现 class 过滤，但只在提供了工厂的模型生效（如人员/学生列表）；
+    其他模型拿到 class 范围仍只能按 self 收窄或拒绝。
+    """
 
     context = scope_context_from_rows(
-        subject_user_id=uuid4(), rows=[("class", "scope-a"), ("self", None)]
+        subject_user_id=uuid4(), rows=[("class", str(uuid4())), ("self", None)]
     )
 
-    assert "class" not in SUPPORTED_SCOPE_TYPES
     sql = _sql(select(User.id).where(scope_predicate(User, context, owner_attr="id")))
-    assert "users.id =" in sql  # 未实现的范围类型不贡献可见性，仍按 self 收窄
+    assert "users.id =" in sql  # 没有工厂：class 不贡献可见性，仍按 self 收窄
 
 
-def test_class_only_scope_denies_until_m2_implements_it() -> None:
-    """只有 class/course 范围时不可见任何行：未实现的范围不得退化成全校。"""
+def test_class_only_scope_denies_without_factory() -> None:
+    """只有 class 范围且无工厂时不可见任何行：不得退化成全校。"""
 
-    context = scope_context_from_rows(subject_user_id=uuid4(), rows=[("class", "scope-a")])
+    context = scope_context_from_rows(subject_user_id=uuid4(), rows=[("class", str(uuid4()))])
+
+    sql = _sql(select(User.id).where(scope_predicate(User, context, owner_attr="id")))
+    assert "false" in sql.lower()
+
+
+def test_class_scope_with_factory_narrows_to_members() -> None:
+    """class 范围 + 成员子查询工厂 → 谓词 = self ∪ 班级成员（M2-ORG01-03 D1）。"""
+
+    member_ids = select(User.id).where(User.id == uuid4())
+    context = scope_context_from_rows(
+        subject_user_id=uuid4(), rows=[("class", str(uuid4())), ("self", None)]
+    )
+
+    sql = _sql(
+        select(User.id).where(
+            scope_predicate(User, context, owner_attr="id", class_member_subquery=member_ids)
+        )
+    )
+    assert "users.id =" in sql
+    assert "IN" in sql.upper()
+
+
+def test_course_scope_still_does_not_widen_visibility() -> None:
+    """course 过滤的业务表在 M3（TD-151）：本期 course 不贡献可见性。"""
+
+    context = scope_context_from_rows(subject_user_id=uuid4(), rows=[("course", str(uuid4()))])
 
     sql = _sql(select(User.id).where(scope_predicate(User, context, owner_attr="id")))
     assert "false" in sql.lower()

@@ -57,7 +57,7 @@ _DEFINITIONS: tuple[tuple[str, str], ...] = (
     ("school.dashboard.view", "查看校方基础看板"),
     ("school.feedback.view", "查看反馈列表与详情"),
     ("school.feedback.update", "标记反馈处理状态/答复反馈"),
-    ("school.org.manage", "维护部门/科室组织树"),
+    ("school.org.manage", "维护组织结构（部门树/班级/课程/任教关系）"),
     ("school.personnel.view", "查看人员档案（按数据范围）"),
     ("school.personnel.create", "新建人员档案"),
     ("school.personnel.edit", "修改人员档案"),

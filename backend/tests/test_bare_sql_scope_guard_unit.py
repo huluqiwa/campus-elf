@@ -43,6 +43,12 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
     "app/workers/tasks.py": {
         "refresh_tokens": "后台清理任务：跨租户清理过期令牌，属运维写路径而非业务读路径"
     },
+    "app/org/scopes_sync.py": {
+        "*": (
+            "class 范围行同步（M2-ORG01-03 D1）：按租户聚合组织关系推导期望范围行并差量增删，"
+            "无单一请求主体的范围语义（与 rbac 定义同步同类）；写路径只在组织关系变更的同一事务内调用"
+        )
+    },
 }
 
 # 豁免条目上限：超过就说明"直连"正在变成常态，必须回头收敛到仓储。

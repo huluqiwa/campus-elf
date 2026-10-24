@@ -366,6 +366,20 @@
 - 口径更正：M1-F 集成测试正确计数为 **8 条**（此前 commit message 与本记录的「9 条」系首条用例拆两项误计）。
 - 结论：**M1-F 复审通过，移除「待复审确认」标注**。
 
+### M2-ORG01-03 人员档案与组织关系（2026-10-24）
+
+- 设计简报：docs/design-briefs/M2-ORG01-03.md（D1-D4 已确认；§9 记录 9 项实现期偏差）
+- commit/diff：staged diff（24 文件，约 +2990：迁移五表 + D1 class 数据范围贯通 + 组织 CRUD/审计/cursor + BS-M2-01）
+- 审查人/agent：独立审查子 agent（与实现者独立上下文），三轮
+- Findings：
+  - 第一轮：Blocker 0；Major 3（坏 cursor 500、启动自检 RLS 清单缺新表、handoff/README 未随提交）；Minor 11（同值短路跨 id 空间、审计口径不一致、断言弱、死代码工厂、过滤下推、在职校验、count 全行加载、department_id 取舍未记、端点数/矩阵/catalog 描述、双 docstring、list[Any] 契约）。
+  - 第二轮：**不通过**——修复声明与实际 diff 系统性不符（长补丁脚本中途断言失败导致部分文件未写盘，7 项未落地、2 项半成品、临时脚本残留）。教训：批量补丁必须逐文件写盘后立即验证。
+  - 第二轮修复：弃用补丁脚本，逐文件 Edit + 落盘 grep 验证；全部 14 项落地（CursorError 窄异常、typed response_model、selfcheck 清单、handoff/README、同值比较后置、审计档案 id 口径、断言增强、死代码删除、extra 过滤下推、在职校验、SQL count、简报/matrix/catalog 回写、docstring、临时脚本清理）。
+  - 第三轮：仅剩 1 项（HTTP 级坏游标 400 断言）→ BS-M2-01 补 3 行断言并复测通过；复审确认通过。
+- 复测：受影响用例 55 passed（含 RLS 覆盖/隔离/readiness）；全量 **596 passed**（511s）；ruff/mypy 161 文件全绿；alembic check 无漂移（head c9d5f1e3a7b9）。
+- 更好做法与 TD 处置：TD-070（cursor，本点收口/Personnel 迁移随 B 端页面）、TD-151（class 收口，course 随 M3）、TD-174（新，双写对账，M2 末评审）。
+- 结论：**可提交**（0 Blocker / 0 Major）。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

@@ -89,7 +89,7 @@
 | `school.dashboard.view` | 基础看板 |
 | `school.feedback.view` | 反馈查看 |
 | `school.feedback.update` | 标记处理/答复 |
-| `school.org.manage` | 部门树维护（A30） |
+| `school.org.manage` | 组织结构维护：部门树（A30）/班级/课程/任教关系 |
 | `school.personnel.view` | 人员查看 |
 | `school.personnel.create/edit/delete` | 人员维护 |
 | `school.personnel.import` | 批量导入 |

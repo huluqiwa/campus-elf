@@ -17,6 +17,7 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -126,6 +127,15 @@ class DataScope(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
         CheckConstraint(
             "(scope_type IN ('class', 'course')) = (scope_id IS NOT NULL)",
             name="scope_id_required_for_class_course",
+        ),
+        # class 范围行的数据库完整性（M2-ORG01-03 D1）：同一用户对同一班级只允许一行。
+        # 迁移 c9d5f1e3a7b9 创建同名部分唯一索引；同步函数增删，这里是最后防线。
+        Index(
+            "uq_data_scopes_user_class",
+            "user_id",
+            "scope_id",
+            unique=True,
+            postgresql_where=text("scope_type = 'class' AND user_id IS NOT NULL"),
         ),
     )
 

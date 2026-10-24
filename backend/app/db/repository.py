@@ -10,11 +10,15 @@
 - 查询一律追加 `tenant_id == ctx` + 范围谓词，配合 RLS 形成第二、三道防线。
 """
 
+import base64
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol, cast
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.rbac.scopes import DataScopeContext, scope_predicate
@@ -46,6 +50,34 @@ class TenantScopedModel(Protocol):
     created_at: Any
 
 
+def encode_cursor(created_at: datetime, object_id: UUID) -> str:
+    """把分页游标编码为不透明字符串（base64url(JSON)）。"""
+
+    payload = json.dumps({"t": created_at.isoformat(), "id": str(object_id)}).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii")
+
+
+def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
+    """解码分页游标。
+
+    异常:
+        CursorError: 游标不是合法的 base64/JSON/字段类型（由路由层映射 400，
+            绝不能当成「第一页」静默吞掉——那会让翻页悄悄回到开头）。
+    """
+
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
+        created_at = datetime.fromisoformat(payload["t"])
+        object_id = UUID(str(payload["id"]))
+    except Exception as exc:
+        raise CursorError(f"无法解码分页游标：{cursor[:32]}…") from exc
+    return created_at, object_id
+
+
+class CursorError(ValueError):
+    """分页游标无法解码（HTTP 400 语义；与仓储配置类 ValueError 区分）。"""
+
+
 class CrossTenantAccessError(RuntimeError):
     """试图访问/写入非当前租户的数据。"""
 
@@ -61,6 +93,7 @@ class TenantScopedRepository[ModelT: TenantScopedModel]:
         *,
         scope: ScopeDecision,
         owner_attr: str = "user_id",
+        class_scope_factory: Callable[[frozenset[UUID]], Select[Any]] | None = None,
     ) -> None:
         """绑定会话、模型、租户与数据范围上下文。
 
@@ -70,6 +103,10 @@ class TenantScopedRepository[ModelT: TenantScopedModel]:
             tenant_id: 当前租户。
             scope: 数据范围判据，或显式的 `ScopeBypass(reason=…)`。
             owner_attr: `self` 范围对应的归属列名（默认 `user_id`；主键即归属的表传 `id`）。
+            class_scope_factory: class 范围的成员子查询工厂——输入当前主体可见的
+                班级 id 集合，返回「归属列可见值」的子查询（例如学生表中这些班级的
+                user_id 集合）。为 None 时 class 范围对该模型不贡献可见性
+                （fail-closed，绝不放大成全校）。
 
         异常:
             ValueError: 模型缺少 tenant_id（用错了仓储），
@@ -90,6 +127,7 @@ class TenantScopedRepository[ModelT: TenantScopedModel]:
         self._tenant_id = tenant_id
         self._scope = scope
         self._owner_attr = owner_attr
+        self._class_scope_factory = class_scope_factory
 
     @property
     def tenant_id(self) -> UUID:
@@ -108,8 +146,18 @@ class TenantScopedRepository[ModelT: TenantScopedModel]:
 
         stmt = stmt.where(self._model.tenant_id == self._tenant_id)
         if isinstance(self._scope, DataScopeContext):
+            class_member_subquery = (
+                self._class_scope_factory(self._scope.class_ids)
+                if self._scope.class_ids and self._class_scope_factory is not None
+                else None
+            )
             stmt = stmt.where(
-                scope_predicate(self._model, self._scope, owner_attr=self._owner_attr)
+                scope_predicate(
+                    self._model,
+                    self._scope,
+                    owner_attr=self._owner_attr,
+                    class_member_subquery=class_member_subquery,
+                )
             )
         return stmt
 
@@ -138,6 +186,43 @@ class TenantScopedRepository[ModelT: TenantScopedModel]:
             .offset(offset)
         )
         return [cast(ModelT, row) for row in result.scalars().all()]
+
+    async def list_cursor(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        extra: Any | None = None,
+    ) -> tuple[list[ModelT], str | None]:
+        """按 cursor 分页列出（TD-070：稳定键集分页，不重不漏）。
+
+        游标 = 最后一行的 (created_at, id)；与 `list_all` 同一稳定次序
+        （created_at DESC, id DESC），keyset 条件 `(created_at, id) < 游标`。
+
+        返回:
+            (本页行, 下一页游标)；下一页游标为 None 表示没有更多数据
+            （按「取满 limit 才给游标」判定，代价是恰好整页时多查一次，可接受）。
+
+        异常:
+            ValueError: cursor 无法解码（由路由层映射为 400）。
+        """
+
+        page_size = max(1, limit)
+        stmt = self.base_query().order_by(self._model.created_at.desc(), self._model.id.desc())
+        if extra is not None:
+            # 过滤必须在游标推进**之前**：先分页后过滤会让游标跳过被过滤的行
+            stmt = stmt.where(extra)
+        if cursor is not None:
+            marker_created_at, marker_id = decode_cursor(cursor)
+            stmt = stmt.where(
+                tuple_(self._model.created_at, self._model.id) < tuple_(marker_created_at, marker_id)
+            )
+        stmt = stmt.limit(page_size)
+        rows = [cast(ModelT, row) for row in (await self._session.execute(stmt)).scalars().all()]
+        next_cursor = (
+            encode_cursor(rows[-1].created_at, rows[-1].id) if len(rows) == page_size else None
+        )
+        return rows, next_cursor
 
     def assert_same_tenant(self, obj: ModelT) -> None:
         """校验对象归属当前租户。

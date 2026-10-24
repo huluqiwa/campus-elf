@@ -23,6 +23,7 @@ from app.auth.principal import Principal
 from app.db.models.identity import User
 from app.db.repository import ScopeBypass, ScopeDecision, TenantScopedRepository
 from app.db.session import db_session
+from app.org.scopes_sync import build_user_class_member_factory
 
 # 列表分页上界：与 `campus` 侧其他列表接口同一口径，防止一次拉走整租户名册
 MAX_PAGE_SIZE = 100
@@ -84,9 +85,16 @@ def to_item(user: Any) -> PersonnelItem:
 def _repository(
     session: AsyncSession, tenant_id: UUID, scope: ScopeDecision
 ) -> TenantScopedRepository[User]:
-    """人员档案仓储：`self` 范围的归属列就是主键（"本人"= 这一行）。"""
+    """人员档案仓储：`self` 范围的归属列就是主键（"本人"= 这一行）。
 
-    return TenantScopedRepository(session, User, tenant_id, scope=scope, owner_attr="id")
+    `class` 范围（M2-ORG01-03 D1）：可见成员 = 所辖班级里的**学生** user_id 集合
+    （工厂按模型构造；教师互见不在其中，目录类列表由 school 范围承担）。
+    """
+
+    return TenantScopedRepository(
+        session, User, tenant_id, scope=scope, owner_attr="id",
+        class_scope_factory=build_user_class_member_factory(tenant_id),
+    )
 
 
 def _require_tenant(principal: Principal) -> UUID:

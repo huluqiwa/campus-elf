@@ -9,6 +9,7 @@ from app.db.models.identity import (
     User,
 )
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
+from app.db.models.org import Course, OrgClass, Student, Teacher, TeacherClassCourse
 from app.db.models.rbac import (
     PERMISSION_CATALOG,
     DataScope,
@@ -29,8 +30,10 @@ from app.db.models.tenant import PlatformUser, Tenant
 __all__ = [
     "PERMISSION_CATALOG",
     "AuditLog",
+    "Course",
     "DataScope",
     "MfaRecoveryCode",
+    "OrgClass",
     "Permission",
     "PlatformMfaRecoveryCode",
     "PlatformRefreshToken",
@@ -45,7 +48,10 @@ __all__ = [
     "Role",
     "RolePermission",
     "SchoolReviewRecord",
+    "Student",
     "SystemSetting",
+    "Teacher",
+    "TeacherClassCourse",
     "Tenant",
     "TenantRegistrationRequest",
     "User",

@@ -30,6 +30,12 @@ REQUIRED_RLS_TABLES: tuple[str, ...] = (
     "password_reset_tokens",
     "mfa_recovery_codes",
     "audit_logs",
+    # M2-ORG01-03：组织与人员（含个人档案，RLS 缺失即越权面）
+    "classes",
+    "courses",
+    "teachers",
+    "students",
+    "teacher_class_courses",
 )
 
 

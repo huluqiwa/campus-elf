@@ -8,6 +8,8 @@ import asyncio
 import os
 import re
 from pathlib import Path
+from typing import cast
+from uuid import UUID
 
 import asyncpg
 import pytest
@@ -26,6 +28,8 @@ M1C2_PREVIOUS_REVISION = "c8e2f4a6b1d3"
 D1_PREVIOUS_REVISION = "d4e6f8a0b2c1"
 D1_REVISION = "b2d4f6a8c0e1"
 M1F_PREVIOUS_REVISION = "f7a9b1c3d5e8"
+M2_PREVIOUS_REVISION = "a8c3e9f1b5d7"
+M2_ORG_TABLES = ("classes", "courses", "teachers", "students", "teacher_class_courses")
 M1F_TEST_KEY = "m1f-rollback-audit-key-0123456789abcdef"
 
 
@@ -702,6 +706,85 @@ def test_m1f_downgrade_with_audit_rows_then_upgrade() -> None:
         assert fresh["prev_hash"] == seeded[-1]["hash"]
     finally:
         asyncio.run(_drop_database(dsn, temp_database))
+
+
+def test_m2_org_downgrade_drops_tables_then_upgrade_restores() -> None:
+    """M2-ORG01-03：downgrade 摘掉组织五表（数据随之消失，首点无存量语义），再 upgrade 后可重建。"""
+
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL 未设置；先运行 scripts/test-stack.sh up 并导出 TEST_*")
+    assert_test_database_dsn(admin_url)
+
+    dsn, database = _admin_dsn(admin_url)
+    temp_database = f"{database}_m2rollback"
+    temp_dsn = dsn.rsplit("/", 1)[0] + f"/{temp_database}"
+    temp_url = admin_url.rsplit("/", 1)[0] + f"/{temp_database}"
+
+    async def table_exists(table: str) -> bool:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            value = await connection.fetchval(
+                "select 1 from information_schema.tables "
+                "where table_schema = 'public' and table_name = $1",
+                table,
+            )
+            return value is not None
+        finally:
+            await connection.close()
+
+    async def seed_class() -> UUID:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            tenant_id = await connection.fetchval(
+                "insert into tenants (name, status) values ('M2 回滚中学', 'active') returning id"
+            )
+            await connection.execute(
+                "insert into classes (tenant_id, grade, name) values ($1, '2026级', '回滚班')",
+                tenant_id,
+            )
+            return cast(UUID, tenant_id)
+        finally:
+            await connection.close()
+
+    async def rebuild_class(tenant_id: UUID) -> None:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            await connection.execute(
+                "insert into classes (tenant_id, grade, name) values ($1, '2026级', '重建班')",
+                tenant_id,
+            )
+        finally:
+            await connection.close()
+
+    asyncio.run(_create_database(dsn, temp_database))
+    try:
+        config = _alembic_config(temp_url)
+        command.upgrade(config, "head")
+        seeded_tenant = asyncio.run(seed_class())
+
+        command.downgrade(config, M2_PREVIOUS_REVISION)
+        for table in M2_ORG_TABLES:
+            assert not asyncio.run(table_exists(table)), f"{table} 应随 downgrade 移除"
+        # class 范围行部分唯一索引也应随 downgrade 移除（downgrade 里先 drop index）
+        assert not asyncio.run(_m2_index_exists(temp_dsn, "uq_data_scopes_user_class"))
+
+        command.upgrade(config, "head")
+        asyncio.run(rebuild_class(seeded_tenant))
+    finally:
+        asyncio.run(_drop_database(dsn, temp_database))
+
+
+async def _m2_index_exists(dsn: str, index_name: str) -> bool:
+    connection = await asyncpg.connect(dsn)
+    try:
+        value = await connection.fetchval(
+            "select 1 from pg_indexes where schemaname = 'public' and indexname = $1",
+            index_name,
+        )
+        return value is not None
+    finally:
+        await connection.close()
 
 
 def test_m1c2_downgrade_with_session_reasons_then_upgrade() -> None:

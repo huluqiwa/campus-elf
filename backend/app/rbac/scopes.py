@@ -7,16 +7,18 @@
 - `school`（全校）覆盖其余一切；只有 `self` 时按归属列钉到当前主体；
 - **解析不到任何范围行 = 空集**（查询直接不可见），不回退成全校：
   授权缺失应当让用户看不到数据，而不是让他看到整个租户；
-- `class`/`course` 是合法的值（库里 CHECK 允许），但服务端过滤要到 M2 有班级/任课关系才实现。
-  在那之前它们**不贡献可见性**——否则"授了班级范围"会被读成"能看全校"。
+- `class` 自 M2-ORG01-03 起参与过滤：范围行携带 `scope_id`（班级 id），
+  由仓储方提供「班级 → 成员归属列」的子查询工厂后并入谓词；模型没有工厂时
+  class 范围**不贡献可见性**（fail-closed，绝不放大成全校）；
+- `course` 仍是合法值但本期不贡献可见性（可按课程过滤的业务表在 M3，TD-151）。
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, get_args
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, false, true
+from sqlalchemy import ColumnElement, Select, false, true
 
 from app.db.models.rbac import ScopeType
 
@@ -25,8 +27,9 @@ from app.db.models.rbac import ScopeType
 # 库里那条 CHECK 本身由集成测试与启动自检验证（`tests/db/test_data_scope_integration.py`）。
 KNOWN_SCOPE_TYPES: frozenset[str] = frozenset(get_args(ScopeType))
 
-# 本期真正实现了服务端过滤的范围类型（`class`/`course` → M2，见 TD-151）
-SUPPORTED_SCOPE_TYPES: frozenset[str] = frozenset({"school", "self"})
+# `class` 自 M2-ORG01-03 起在提供了成员子查询工厂的模型上生效；
+# `course` 仍不贡献可见性（按课程过滤的业务表在 M3，TD-151）。
+SUPPORTED_SCOPE_TYPES: frozenset[str] = frozenset({"school", "self", "class"})
 # 取数 SQL 不在这里：本模块只负责"范围行意味着什么"（纯判据，可单测、可被矩阵测试解析），
 # 而"每请求怎么把范围行读出来"属于认证层（`app/auth/principal.py`），
 # 那里已经是裸 SQL 守卫的豁免模块——把 SQL 放这里只会多养一个豁免条目（守卫的初衷是少而不是多）。
@@ -39,10 +42,13 @@ class DataScopeContext:
     参数:
         subject_user_id: 当前主体用户 id（`self` 范围的锚点）。
         scope_types: 角色与用户范围的并集；空集表示「没有任何范围授权」。
+        class_ids: `class` 范围行的 scope_id 集合（空集 = 没有班级范围）。
+            `course` 范围行本期不解析（不贡献可见性，TD-151）。
     """
 
     subject_user_id: UUID
     scope_types: frozenset[str]
+    class_ids: frozenset[UUID] = field(default_factory=frozenset)
 
     @property
     def sees_whole_school(self) -> bool:
@@ -52,9 +58,16 @@ class DataScopeContext:
 
     @property
     def denies_everything(self) -> bool:
-        """是否看不到任何行：没有任何范围，或只有本期未实现的 `class`/`course`。"""
+        """是否看不到任何行：没有 school/self，也没有任何 class 范围。
 
-        return not self.sees_whole_school and "self" not in self.scope_types
+        只有 `course` 范围仍算「看不到」（course 过滤在 M3 才有业务表承载）。
+        """
+
+        return (
+            not self.sees_whole_school
+            and "self" not in self.scope_types
+            and not self.class_ids
+        )
 
 
 def scope_context_from_rows(
@@ -62,26 +75,41 @@ def scope_context_from_rows(
 ) -> DataScopeContext:
     """把 `data_scopes` 查询结果（scope_type, scope_id）归一成一个上下文。
 
-    `scope_id` 本期不参与判定（只有 `class`/`course` 才用它，见 TD-151），
-    但仍然读出来：将来按班级过滤时不需要改这里的取数口径。
+    `scope_id` 只有 `class` 行参与判定（M2-ORG01-03）；`course` 行读取并校验后不解析。
+    scope_id 出现非法 UUID 视为脏数据：不能静默忽略——忽略会让范围悄悄放大。
 
     异常:
-        ValueError：出现数据库 CHECK 之外的 scope_type（说明模型与库口径漂移，
-            或有人手工写入了脏值）。不能静默忽略——忽略会让「未知范围」退化成无过滤。
+        ValueError：出现数据库 CHECK 之外的 scope_type，或 class 行的 scope_id 不是合法 UUID
+            （说明模型与库口径漂移，或有人手工写入了脏值）。不能静默忽略——
+            忽略会让「未知范围」退化成无过滤。
     """
 
     types: set[str] = set()
-    for scope_type, _scope_id in rows:
+    class_ids: set[UUID] = set()
+    for scope_type, scope_id in rows:
         if scope_type not in KNOWN_SCOPE_TYPES:
             raise ValueError(
                 f"未知的数据范围类型：{scope_type!r}（允许值 {sorted(KNOWN_SCOPE_TYPES)}）"
             )
         types.add(scope_type)
-    return DataScopeContext(subject_user_id=subject_user_id, scope_types=frozenset(types))
+        if scope_type == "class":
+            if scope_id is None:
+                raise ValueError("class 范围行缺少 scope_id（库 CHECK 之外的脏数据）")
+            try:
+                class_ids.add(scope_id if isinstance(scope_id, UUID) else UUID(str(scope_id)))
+            except ValueError as exc:
+                raise ValueError(f"class 范围行的 scope_id 不是合法 UUID：{scope_id!r}") from exc
+    return DataScopeContext(
+        subject_user_id=subject_user_id, scope_types=frozenset(types), class_ids=frozenset(class_ids)
+    )
 
 
 def scope_predicate(
-    model: type[Any], context: DataScopeContext, *, owner_attr: str
+    model: type[Any],
+    context: DataScopeContext,
+    *,
+    owner_attr: str,
+    class_member_subquery: Select[Any] | None = None,
 ) -> ColumnElement[bool]:
     """生成这一行「当前主体是否可见」的 SQL 谓词。
 
@@ -89,9 +117,13 @@ def scope_predicate(
         model: 目标模型（需要归属列时用属性名寻址，避免调用方传错列）。
         context: 当前主体的范围判据。
         owner_attr: `self` 范围对应的归属列名（如 `users.id`、`leave_requests.user_id`）。
+        class_member_subquery: 「班级范围可见成员」的取数子查询（返回归属列的值集合，
+            由仓储方按模型构造，例如学生表中我班学生的 user_id）。为 None 时
+            class 范围对该模型**不贡献可见性**（fail-closed，绝不放大成全校）。
 
     返回值:
-        SQLAlchemy 布尔表达式：全校 → 恒真；仅本人 → 归属列等于主体；无范围 → 恒假。
+        SQLAlchemy 布尔表达式：全校 → 恒真；(self ∪ class 子查询) 的并集；
+        无任何范围 → 恒假。
 
     异常:
         ValueError：需要归属列但模型上没有该列（配置错误，宁可报错也不放行整表）。
@@ -100,15 +132,20 @@ def scope_predicate(
     if context.sees_whole_school:
         return true()
     if context.denies_everything:
-        # 没有任何范围，或只有 class/course（本期未实现）：按「看不到」处理
+        # 没有 school/self/class 任一范围：按「看不到」处理
         return false()
     owner_column: ColumnElement[Any] | None = getattr(model, owner_attr, None)
     if owner_column is None:
         raise ValueError(
-            f"{model.__name__} 缺少归属列 {owner_attr}，无法按 self 范围过滤；"
+            f"{model.__name__} 缺少归属列 {owner_attr}，无法按数据范围过滤；"
             "请显式声明归属列或改用全校范围"
         )
-    return owner_column == context.subject_user_id
+    predicate: ColumnElement[bool] = false()
+    if "self" in context.scope_types:
+        predicate |= owner_column == context.subject_user_id
+    if context.class_ids and class_member_subquery is not None:
+        predicate |= owner_column.in_(class_member_subquery)
+    return predicate
 
 
 __all__ = [
