@@ -98,3 +98,25 @@
 
 - 审查重点：密钥不落日志/审计/错误响应；nonce 随机（同号两次加密密文不同）；HMAC 密钥与加密密钥分离（HMAC 用独立派生或 KEK 不同域）；掩码不含明文残留；reason 不截断进审计；审计动作含操作者/目标/reason；RLS 跨租 HMAC 不可匹配；无权限/无理由的 403/422 有测试钉住。
 - 允许偏差：错误码文本；掩码分隔符样式；用例数 ±3。
+
+## 9. 实现结果（含独立审查修复轮）
+
+**交付物（按已确认 D1-A/D2-A/D3-A 落地）**：
+- `app/security/id_card.py`：validate（GB 11643-1999）/mask/encrypt（AES-256-GCM，nonce 随机，AAD 绑定 `idcard:{tenant_id}:{档案行 id}`）/decrypt/hmac（HKDF 子密钥）/hmac_subkey；
+- `app/org/id_card_service.py`：`set_teacher/student_id_card`（写入三件套 + 同租两表 HMAC 查重 + 唯一索引兜底 IntegrityError→409 + 审计 `org.id_card.created|updated` 只含掩码）、`read_teacher/student_id_card`（受控查看 + `sensitive.id_card.read` 审计含 reason）、`validate_or_422`（非法号→422 `ID_CARD_INVALID`）、`IdCardNotConfigured`（501 门控）；
+- 写入路径（D2-A）：`POST /school/teachers|students` 与 `PUT /school/teachers|students/{id}` 可选 `id_card_number`（教师 PUT 保持 ORG-05 调岗契约：department_id 必填可空）；导入 `身份证号` 可选列；
+- 受控查看（D3-A）：`GET /school/personnel/{id}/id-card`，reason 走**请求体**（≥10 字符），`Cache-Control: no-store`；
+- 列表掩码：`/school/personnel` 列表/详情按 user_id 批量回填 `id_card_mask`（行已过数据范围过滤）；
+- 迁移 `f8b2d6a0c4e8`：teachers/students `(tenant_id, id_card_hmac)` 部分唯一索引（未采集 NULL 不参与），模型 `__table_args__` 镜像；
+- config.py `id_card_kek`（SecretStr 可选）+ `.env.example` `ID_CARD_KEK` 条目。
+
+**测试**：单元 15（加密往返/nonce 随机/AAD 绑定/HMAC 确定性与跨租差异/掩码无泄漏/校验码/15 位拒绝）；BS-M2-04 三用例（建档即采集→同号 409→非法 422→未采集 404→列表掩码（HTTP 断言）→无权限 403→请求体理由查看+审计明文不泄漏→编辑更新→导入含身份证列→**导入写入密文经受控查看可解**（B1 回归）→错误行结构化 `ID_CARD_DUPLICATE/ID_CARD_INVALID` + raw_json 脱敏（B2 回归）；学生路径：跨表查重 409/PUT 更新/回读；KEK 缺省：501 且其余建档不受影响）；集成 73 + 全量门禁见 review-log。
+
+**独立审查（两轮）**：第一轮 2 Blocker（B1 AAD 身份错位、B2 raw_json 明文）+ 6 Major（404 路径 UnboundLocalError、422/501 映射缺失、无唯一约束且 create 零查重、列表掩码恒 NULL、未登记偏离 D2/D3、测试缺口）+ 5 Minor——全部修复（详见 docs/review-log.md M2-ORG04 节）；第二轮复审确认 0 Blocker / 0 Major。
+
+**实现期偏差/要点（均已登记）**：
+1. `ID_CARD_KEK` 在 config 层为可选（任何环境缺省=501，不阻塞启动）——登记为已确认偏差：其余功能不依赖该密钥；
+2. 教师导入选配 `部门` 列已在 ORG-05 交付，身份证列本点追加（可选）；
+3. 教师 PUT 保持 ORG-05「department_id 必填可空」契约，身份证更新为可选附加——两步提交非原子登记 **TD-179**（M2 末评审）；
+4. 跨表（教师↔学生）并发同号查重竞窗登记 **TD-180**（同表由唯一索引兜底 409；M6 评估 advisory lock 收口）；
+5. `_check_hmac_unique`/`id_card_service` 裸 SQL 查询在 bare-SQL 守卫豁免清单登记（HMAC 查重需跨 Teacher/Student 两表指纹列，写路径走仓储）。

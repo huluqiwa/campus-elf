@@ -16,14 +16,15 @@ from dataclasses import asdict
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.auth.principal import Principal, require_permission
 from app.db.repository import CursorError
 from app.org import departments as departments_service
-from app.org import service
+from app.org import id_card_service, service
 from app.org.departments import DepartmentError
+from app.org.id_card_service import IdCardNotConfigured
 from app.org.service import OrgError, Page
 
 router = APIRouter(prefix="/school", tags=["school"])
@@ -40,6 +41,7 @@ def _http_error(exc: OrgError) -> HTTPException:
 # ---------------------------------------------------------------------------
 # 响应模型
 # ---------------------------------------------------------------------------
+
 
 class ClassResponse(BaseModel):
     id: UUID
@@ -98,6 +100,7 @@ class PageResponse[ItemT](BaseModel):
 # 请求模型
 # ---------------------------------------------------------------------------
 
+
 class ClassCreateRequest(BaseModel):
     grade: str = Field(min_length=1, max_length=16)
     name: str = Field(min_length=1, max_length=64)
@@ -128,6 +131,8 @@ class TeacherCreateRequest(BaseModel):
     position: str | None = Field(default=None, max_length=64)
     email: str | None = Field(default=None, max_length=254)
     department_id: UUID | None = None
+    # 可选采集（D2-A）：格式/校验码由服务层校验（非法 → 422 ID_CARD_INVALID）
+    id_card_number: str | None = Field(default=None, max_length=20)
 
 
 class StudentCreateRequest(BaseModel):
@@ -137,6 +142,7 @@ class StudentCreateRequest(BaseModel):
     gender: str | None = Field(default=None, pattern="^(male|female|other)$")
     class_id: UUID | None = None
     email: str | None = Field(default=None, max_length=254)
+    id_card_number: str | None = Field(default=None, max_length=20)
 
 
 class AssignmentCreateRequest(BaseModel):
@@ -173,6 +179,7 @@ async def _paged[ItemT](
 # 班级
 # ---------------------------------------------------------------------------
 
+
 @router.post("/classes", status_code=201, response_model=ClassResponse)
 async def create_class(
     payload: ClassCreateRequest, viewer: Annotated[Principal, OrgManageDep]
@@ -188,8 +195,11 @@ async def create_class(
     except OrgError as exc:
         raise _http_error(exc) from exc
     return ClassResponse(
-        id=item.id, grade=item.grade, name=item.name,
-        head_teacher_id=item.head_teacher_id, counselor_id=item.counselor_id,
+        id=item.id,
+        grade=item.grade,
+        name=item.name,
+        head_teacher_id=item.head_teacher_id,
+        counselor_id=item.counselor_id,
     )
 
 
@@ -220,15 +230,16 @@ async def update_class(
     except OrgError as exc:
         raise _http_error(exc) from exc
     return ClassResponse(
-        id=item.id, grade=item.grade, name=item.name,
-        head_teacher_id=item.head_teacher_id, counselor_id=item.counselor_id,
+        id=item.id,
+        grade=item.grade,
+        name=item.name,
+        head_teacher_id=item.head_teacher_id,
+        counselor_id=item.counselor_id,
     )
 
 
 @router.delete("/classes/{class_id}", status_code=204)
-async def delete_class(
-    class_id: UUID, viewer: Annotated[Principal, OrgManageDep]
-) -> None:
+async def delete_class(class_id: UUID, viewer: Annotated[Principal, OrgManageDep]) -> None:
     try:
         await service.delete_class(viewer, class_id)
     except OrgError as exc:
@@ -238,6 +249,7 @@ async def delete_class(
 # ---------------------------------------------------------------------------
 # 课程
 # ---------------------------------------------------------------------------
+
 
 @router.post("/courses", status_code=201, response_model=CourseResponse)
 async def create_course(
@@ -263,6 +275,7 @@ async def list_courses(
 # 教师
 # ---------------------------------------------------------------------------
 
+
 @router.post("/teachers", status_code=201, response_model=TeacherResponse)
 async def create_teacher(
     payload: TeacherCreateRequest, viewer: Annotated[Principal, PersonnelCreateDep]
@@ -277,16 +290,24 @@ async def create_teacher(
             gender=payload.gender,
             position=payload.position,
             email=payload.email,
+            id_card_number=payload.id_card_number,
         )
     except OrgError as exc:
         raise _http_error(exc) from exc
+    except IdCardNotConfigured as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
     item = created.item
     if not isinstance(item, service.TeacherItem):  # pragma: no cover - 类型收窄兜底
         raise RuntimeError("教师建档返回了学生档案类型")
     return TeacherResponse(
-        id=item.id, user_id=item.user_id, login_id=item.login_id,
-        employee_no=item.employee_no, name=item.name, age=item.age,
-        gender=item.gender, position=item.position,
+        id=item.id,
+        user_id=item.user_id,
+        login_id=item.login_id,
+        employee_no=item.employee_no,
+        name=item.name,
+        age=item.age,
+        gender=item.gender,
+        position=item.position,
         department_id=getattr(item, "department_id", None),
         initial_password=created.initial_password,
     )
@@ -311,6 +332,7 @@ async def list_teachers(
 # 学生
 # ---------------------------------------------------------------------------
 
+
 @router.post("/students", status_code=201, response_model=StudentResponse)
 async def create_student(
     payload: StudentCreateRequest, viewer: Annotated[Principal, PersonnelCreateDep]
@@ -324,16 +346,24 @@ async def create_student(
             gender=payload.gender,
             class_id=payload.class_id,
             email=payload.email,
+            id_card_number=payload.id_card_number,
         )
     except OrgError as exc:
         raise _http_error(exc) from exc
+    except IdCardNotConfigured as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
     item = created.item
     if not isinstance(item, service.StudentItem):  # pragma: no cover - 类型收窄兜底
         raise RuntimeError("学生建档返回了教师档案类型")
     return StudentResponse(
-        id=item.id, user_id=item.user_id, login_id=item.login_id,
-        student_no=item.student_no, name=item.name, gender=item.gender,
-        class_id=item.class_id, initial_password=created.initial_password,
+        id=item.id,
+        user_id=item.user_id,
+        login_id=item.login_id,
+        student_no=item.student_no,
+        name=item.name,
+        gender=item.gender,
+        class_id=item.class_id,
+        initial_password=created.initial_password,
     )
 
 
@@ -356,6 +386,7 @@ async def list_students(
 # 任教关系
 # ---------------------------------------------------------------------------
 
+
 @router.post("/teacher-assignments", status_code=201, response_model=AssignmentResponse)
 async def create_assignment(
     payload: AssignmentCreateRequest, viewer: Annotated[Principal, OrgManageDep]
@@ -371,8 +402,11 @@ async def create_assignment(
     except OrgError as exc:
         raise _http_error(exc) from exc
     return AssignmentResponse(
-        id=item.id, teacher_id=item.teacher_id, class_id=item.class_id,
-        course_id=item.course_id, term=item.term,
+        id=item.id,
+        teacher_id=item.teacher_id,
+        class_id=item.class_id,
+        course_id=item.course_id,
+        term=item.term,
     )
 
 
@@ -403,6 +437,7 @@ async def delete_assignment(
 # 部门/科室树（M2-ORG05；D1 id 物化路径 / D4 叶子+无归属才可硬删）
 # ---------------------------------------------------------------------------
 
+
 class DepartmentResponse(BaseModel):
     id: UUID
     parent_id: UUID | None
@@ -427,16 +462,42 @@ class DepartmentUpdateRequest(BaseModel):
     parent_id: UUID | None = None
 
 
-class TeacherDepartmentUpdateRequest(BaseModel):
-    """教师调岗：department_id=null = 取消归属。"""
+class TeacherUpdateRequest(BaseModel):
+    """教师编辑（D2-A）：保持 ORG-05 调岗契约（department_id 必填可空），身份证可选更新。"""
 
     department_id: UUID | None
+    id_card_number: str | None = Field(default=None, max_length=20)
+
+
+class StudentUpdateRequest(BaseModel):
+    """学生编辑（D2-A）：本点仅承接 id_card_number 可选更新。"""
+
+    id_card_number: str | None = Field(default=None, max_length=20)
+
+
+class IdCardMaskResponse(BaseModel):
+    mask: str
+
+
+class IdCardFullResponse(BaseModel):
+    number: str
+    mask: str
+
+
+class IdCardReadRequest(BaseModel):
+    """受控查看理由（D3-A：放请求体，避免 URL/访问日志扩散）。"""
+
+    reason: str = Field(min_length=10, max_length=200)
 
 
 def _department_response(item: Any) -> DepartmentResponse:
     return DepartmentResponse(
-        id=item.id, parent_id=item.parent_id, name=item.name,
-        code=item.code, path=item.path, status=item.status,
+        id=item.id,
+        parent_id=item.parent_id,
+        name=item.name,
+        code=item.code,
+        path=item.path,
+        status=item.status,
     )
 
 
@@ -477,9 +538,7 @@ async def update_department(
         if field_name in payload.model_fields_set:
             kwargs[field_name] = getattr(payload, field_name)
     try:
-        item = await departments_service.update_department(
-            viewer, department_id, **kwargs
-        )
+        item = await departments_service.update_department(viewer, department_id, **kwargs)
     except DepartmentError as exc:
         raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
     return _department_response(item)
@@ -496,12 +555,15 @@ async def delete_department(
 
 
 @router.put("/teachers/{teacher_id}", response_model=TeacherResponse)
-async def update_teacher_department(
+async def update_teacher(
     teacher_id: UUID,
-    payload: TeacherDepartmentUpdateRequest,
+    payload: TeacherUpdateRequest,
     viewer: Annotated[Principal, OrgManageDep],
 ) -> TeacherResponse:
-    """教师调岗（ORG-05）：审计变更前后值（部门名口径）。"""
+    """教师编辑（ORG-05 调岗 + ORG-04 身份证可选更新）：审计变更前后值（部门名口径）。
+
+    已知限制（TD-179）：调岗与身份证更新分两步提交，身份证步失败时调岗已生效。
+    """
 
     try:
         item = await departments_service.update_teacher_department(
@@ -509,8 +571,90 @@ async def update_teacher_department(
         )
     except DepartmentError as exc:
         raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+    if payload.id_card_number is not None:
+        try:
+            await id_card_service.set_teacher_id_card(
+                viewer, teacher_id, number=payload.id_card_number
+            )
+        except OrgError as exc:
+            raise _http_error(exc) from exc
+        except IdCardNotConfigured as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
     return TeacherResponse(
-        id=item.id, user_id=item.user_id, login_id=item.login_id,
-        employee_no=item.employee_no, name=item.name, age=item.age,
-        gender=item.gender, position=item.position, initial_password=None,
+        id=item.id,
+        user_id=item.user_id,
+        login_id=item.login_id,
+        employee_no=item.employee_no,
+        name=item.name,
+        age=item.age,
+        gender=item.gender,
+        position=item.position,
+        initial_password=None,
     )
+
+
+@router.put("/students/{student_id}", response_model=IdCardMaskResponse)
+async def update_student(
+    student_id: UUID,
+    payload: StudentUpdateRequest,
+    viewer: Annotated[Principal, OrgManageDep],
+) -> IdCardMaskResponse:
+    """学生编辑（D2-A）：本点仅身份证可选更新，返回掩码。"""
+
+    if payload.id_card_number is None:
+        raise HTTPException(status_code=422, detail="无可更新字段")
+    try:
+        mask = await id_card_service.set_student_id_card(
+            viewer, student_id, number=payload.id_card_number
+        )
+    except OrgError as exc:
+        raise _http_error(exc) from exc
+    except IdCardNotConfigured as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    return IdCardMaskResponse(mask=mask)
+
+
+SensitiveDep = require_permission("school.personnel.sensitive.read", realm="tenant")
+
+
+@router.get(
+    "/personnel/{personnel_id}/id-card",
+    response_model=IdCardFullResponse,
+)
+async def read_id_card(
+    personnel_id: UUID,
+    payload: IdCardReadRequest,
+    viewer: Annotated[Principal, SensitiveDep],
+    response: Response,
+) -> IdCardFullResponse:
+    """受控完整查看（M2-ORG04 D3）：sensitive.read + 请求体理由 → 解密明文 + 审计。
+
+    reason 放请求体（D3-A）：避免自由文本进 URL/访问日志。
+    """
+
+    if viewer.tenant_id is None or viewer.realm != "tenant":
+        raise HTTPException(status_code=403, detail="仅校方租户上下文可查看")
+
+    view: id_card_service.IdCardView | None = None
+    last_error: OrgError | None = None
+    for reader in (
+        id_card_service.read_teacher_id_card,
+        id_card_service.read_student_id_card,
+    ):
+        try:
+            view = await reader(viewer, personnel_id, reason=payload.reason)
+            break
+        except OrgError as exc:
+            if exc.http_status == 404:
+                last_error = exc
+                continue
+            raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+        except IdCardNotConfigured as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+
+    if view is None:
+        detail = last_error.message if last_error is not None else "人员或身份证不存在"
+        raise HTTPException(status_code=404, detail=detail)
+
+    response.headers["Cache-Control"] = "no-store"
+    return IdCardFullResponse(number=view.number, mask=view.mask)

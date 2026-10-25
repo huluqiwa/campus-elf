@@ -3,7 +3,8 @@
 口径（`docs/design-briefs/M2-ORG01-03.md`，已确认）：
 
 - **D2**：班主任/辅导员权威在 `classes`；`students` 不落冗余列（响应里由服务层 join 聚合）；
-- **D3**：`id_card_*` 三列仅预留列位，本模块**没有任何读写路径**（ORG-04 交付加密与接口）；
+- **D3**：`id_card_*` 三列自 ORG-04 起由 `app/org/id_card_service.py` 读写
+  （enc/hmac/mask 三件套；明文不落日志/审计）；
 - **D4**：档案与账号 1:1（unique (tenant_id, user_id)，账号删除级联删档案）；
 - **D1**：class 范围行的数据库完整性由迁移里的部分唯一索引保证
   （`uq_data_scopes_user_class`，见 `rbac.DataScope`），本模块的同步函数负责增删。
@@ -123,7 +124,7 @@ class Course(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
 
 
 class Teacher(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
-    """教师档案（与 users 1:1；id_card_* 预留列位，ORG-04 前无读写路径）。"""
+    """教师档案（与 users 1:1；id_card_* 三件套由 id_card_service 读写，ORG-04）。"""
 
     __tablename__ = "teachers"
     __table_args__ = (
@@ -131,6 +132,14 @@ class Teacher(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
         UniqueConstraint("tenant_id", "employee_no", name="uq_teachers_tenant_id_employee_no"),
         # 供 teacher_class_courses 做复合外键 (teacher_id, tenant_id)
         UniqueConstraint("id", "tenant_id", name="uq_teachers_id_tenant_id"),
+        # 身份证指纹同租唯一兜底（M2-ORG04 复审 M3）：未采集（NULL）不参与
+        Index(
+            "uq_teachers_idcard_hmac",
+            "tenant_id",
+            "id_card_hmac",
+            unique=True,
+            postgresql_where=text("id_card_hmac IS NOT NULL"),
+        ),
         Index("ix_teachers_tenant_id_department_id", "tenant_id", "department_id"),
         CheckConstraint("age IS NULL OR age BETWEEN 16 AND 80", name="ck_teachers_age_range"),
         ForeignKeyConstraint(
@@ -165,12 +174,20 @@ class Teacher(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
 
 
 class Student(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
-    """学生档案（class_id 可空 = 未分班；id_card_* 预留列位，ORG-04 前无读写路径）。"""
+    """学生档案（class_id 可空 = 未分班；id_card_* 三件套由 id_card_service 读写，ORG-04）。"""
 
     __tablename__ = "students"
     __table_args__ = (
         UniqueConstraint("tenant_id", "user_id", name="uq_students_tenant_id_user_id"),
         UniqueConstraint("tenant_id", "student_no", name="uq_students_tenant_id_student_no"),
+        # 身份证指纹同租唯一兜底（M2-ORG04 复审 M3）：未采集（NULL）不参与
+        Index(
+            "uq_students_idcard_hmac",
+            "tenant_id",
+            "id_card_hmac",
+            unique=True,
+            postgresql_where=text("id_card_hmac IS NOT NULL"),
+        ),
         CheckConstraint(
             "gender IS NULL OR gender IN ('male', 'female', 'other')",
             name="ck_students_gender_valid",

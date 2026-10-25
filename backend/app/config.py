@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     # 审计哈希链密钥（M1-F）：≥32 字节随机值，与 JWT_SECRET/ENCRYPTION_KEK 相互独立。
     # 缺失时（dev/test）审计仍写入但标 hash_version=0 不入链（fail-open，链校验可检测此类行）
     audit_hash_key: SecretStr | None = None
+    # 身份证加密密钥（M2-ORG04）：base64 32 字节，与 ENCRYPTION_KEK/审计链密钥相互独立（D1 决策）。
+    # 可选（复审登记）：任何环境缺失时身份证写入/查看接口返回 501（服务层门控，不阻塞启动）；
+    # 生产部署应配置（见 .env.example ID_CARD_KEK），轮换流程延后 TD（简报 §6）。
+    id_card_kek: SecretStr | None = None
 
     # ---------- 密码策略 / 失败锁定 / 邮件重置（M1-D1） ----------
     # 同一账号在窗口内连续失败达到上限即锁定（AUTH-05）

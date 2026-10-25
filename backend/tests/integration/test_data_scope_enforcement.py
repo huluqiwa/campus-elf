@@ -49,7 +49,8 @@ pytestmark = [pytest.mark.integration]
 VIEW = "school.personnel.view"
 # 口径 ⑥ / 简报 §2-C 固定的响应形状：多一个字段（尤其 `login_id`）就是用例失败。
 _RESPONSE_KEYS = frozenset(
-    {"id", "user_type", "display_name", "status", "last_login_at", "email_masked"}
+    {"id", "user_type", "display_name", "status", "last_login_at", "email_masked",
+     "id_card_mask"}
 )
 SCHOOL_A = "SCH-E2-A"
 SCHOOL_B = "SCH-E2-B"
@@ -229,7 +230,7 @@ async def test_response_shape_excludes_login_id(client: AsyncClient) -> None:
 
     为什么单独一条：`login_id` 是校方内部主标识，列表接口只需要 id 就能定位；
     把它放进响应等于给每个持 `school.personnel.view` 的角色一份可导出的名册。
-    """
+    M2-ORG04：响应形状新增 `id_card_mask`（掩码展示值，无明文/密文/HMAC 泄漏）。"""
 
     headers = await _login(client, A_SCHOOL_VIEWER)
     response = await client.get("/api/v1/school/personnel?limit=100", headers=headers)

@@ -59,8 +59,8 @@
 | 解析不到范围 | **空集**（fail-closed），不回退成全校；平台 realm 不写范围行（`data_scopes` 是租户级表，平台侧走 §5-11 的 realm/权限判定） |
 | 越权响应 | 列表静默过滤到范围内；显式 id 越权 → **404**（与"不存在"同形，不暴露存在性）并写安全审计 `data_scope.denied`（带当前范围与拒绝原因） |
 | 出厂默认范围 | 超管/管理员 = `school`，`teacher_b_end`/`student`/`teacher` = `self`（声明在 `backend/app/rbac/seeds.py:BuiltinRole.scopes`，落库到 `rbac_builtin_role_scope_defaults`）；新租户开通即写入，同步**只补"还没有任何范围行"的角色**——人工收窄或撤掉的不加回来（与权限映射同一口径） |
-| 真实调用点 | `GET /api/v1/school/personnel`、`GET /api/v1/school/personnel/{id}`（`school.personnel.view`）；响应形状固定为 `id/user_type/display_name/status/last_login_at/email_masked`（口径 ⑥：**不含 `login_id`**（学号/工号）、明文 `email`、密码哈希、MFA 字段），由 `test_response_shape_excludes_login_id` 逐字段钉住 |
-| 本期未交付 | `class`/`course` 过滤与任课关系（TD-151 → M2/M3）；`school.personnel.sensitive.read` 的完整查看通道（§5-3，随 M2 人员模块）；人员列表的前端入口（TD-152 → M2） |
+| 真实调用点 | `GET /api/v1/school/personnel`、`GET /api/v1/school/personnel/{id}`（`school.personnel.view`）；响应形状固定为 `id/user_type/display_name/status/last_login_at/email_masked/id_card_mask`（口径 ⑥：**不含 `login_id`**（学号/工号）、明文 `email`/身份证、密码哈希、MFA 字段），由 `test_response_shape_excludes_login_id` 逐字段钉住（M2-ORG04 增 `id_card_mask` 仅掩码列） |
+| 本期未交付 | `class`/`course` 过滤与任课关系（TD-151 → M2/M3）；人员列表的前端入口（TD-152 → M2）。已交付：`school.personnel.sensitive.read` 完整查看通道 `GET /school/personnel/{id}/id-card`（理由走请求体 ≥10 字符 + `sensitive.id_card.read` 审计 + no-store，M2-ORG04） |
 
 ---
 

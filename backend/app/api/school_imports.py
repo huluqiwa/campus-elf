@@ -34,7 +34,11 @@ MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 
 
 async def _audit_job(
-    principal: Principal, tenant_id: UUID, *, action: str, resource_id: str,
+    principal: Principal,
+    tenant_id: UUID,
+    *,
+    action: str,
+    resource_id: str,
     metadata: dict[str, Any],
 ) -> None:
     """job 生命周期审计（org.import.*；行级效果已由建档审计覆盖）。"""
@@ -46,10 +50,16 @@ async def _audit_job(
     try:
         async with db_session(tenant_id=tenant_id) as session:
             await append_audit(
-                session, action=action, resource_type="org_import",
-                resource_id=resource_id, actor_realm="tenant",
-                actor_id=principal.user_id, tenant_id=tenant_id,
-                result="success", metadata=metadata, request_id=None,
+                session,
+                action=action,
+                resource_type="org_import",
+                resource_id=resource_id,
+                actor_realm="tenant",
+                actor_id=principal.user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata=metadata,
+                request_id=None,
             )
     except Exception as exc:
         logging.getLogger(__name__).warning(
@@ -98,17 +108,23 @@ def _job_repository(
 
 def _job_response(job: ImportJob) -> ImportJobResponse:
     return ImportJobResponse(
-        id=job.id, type=job.type, conflict=job.conflict, status=job.status,
-        total_rows=job.total_rows, success_rows=job.success_rows,
-        failed_rows=job.failed_rows, skipped_rows=job.skipped_rows,
-        retried_by=job.retried_by, created_at=job.created_at,
-        started_at=job.started_at, finished_at=job.finished_at, message=job.message,
+        id=job.id,
+        type=job.type,
+        conflict=job.conflict,
+        status=job.status,
+        total_rows=job.total_rows,
+        success_rows=job.success_rows,
+        failed_rows=job.failed_rows,
+        skipped_rows=job.skipped_rows,
+        retried_by=job.retried_by,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        message=job.message,
     )
 
 
-async def _enqueue(
-    tenant_id: UUID, job_id: UUID, *, source_job_id: UUID | None = None
-) -> None:
+async def _enqueue(tenant_id: UUID, job_id: UUID, *, source_job_id: UUID | None = None) -> None:
     """入队；Redis 不可达 → job 置 failed 并 503（避免悬挂 pending）。
 
     重试路径（source_job_id 非空）：补偿必须**同事务清除源 job 的 retried_by**，
@@ -121,7 +137,9 @@ async def _enqueue(
     except Exception as exc:
         async with db_session(tenant_id=tenant_id) as session:
             repository: TenantScopedRepository[ImportJob] = TenantScopedRepository(
-                session, ImportJob, tenant_id,
+                session,
+                ImportJob,
+                tenant_id,
                 scope=ScopeBypass(reason="入队失败回写自身 job 终态"),
             )
             job = await repository.get(job_id)
@@ -165,7 +183,8 @@ async def create_import(
     suffix = ".xlsx" if filename.lower().endswith(".xlsx") else ".csv"
     object_key = f"imports/{tenant_id}/{uuid4().hex}{suffix}"
     content_type = (
-        "text/csv" if suffix == ".csv"
+        "text/csv"
+        if suffix == ".csv"
         else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     store = build_object_store(get_settings())
@@ -174,23 +193,28 @@ async def create_import(
     async with db_session(tenant_id=tenant_id) as session:
         repository = _job_repository(session, tenant_id, viewer)
         job = ImportJob(
-            tenant_id=tenant_id, type=import_type, conflict=conflict,
-            file_object_key=object_key, status="pending", created_by=viewer.user_id,
+            tenant_id=tenant_id,
+            type=import_type,
+            conflict=conflict,
+            file_object_key=object_key,
+            status="pending",
+            created_by=viewer.user_id,
         )
         await repository.add(job)
 
     await _enqueue(tenant_id, job.id)
     await _audit_job(
-        viewer, tenant_id, action="org.import.created", resource_id=str(job.id),
+        viewer,
+        tenant_id,
+        action="org.import.created",
+        resource_id=str(job.id),
         metadata={"type": import_type, "conflict": conflict},
     )
     return _job_response(job)
 
 
 @router.get("/imports/{job_id}", response_model=ImportJobResponse)
-async def get_import(
-    job_id: UUID, viewer: Annotated[Principal, ImporterDep]
-) -> ImportJobResponse:
+async def get_import(job_id: UUID, viewer: Annotated[Principal, ImporterDep]) -> ImportJobResponse:
     tenant_id = _tenant_or_403(viewer)
     async with db_session(tenant_id=tenant_id) as session:
         repository = _job_repository(session, tenant_id, viewer)
@@ -215,7 +239,10 @@ async def list_import_errors(
         if await job_repository.get(job_id) is None:
             raise HTTPException(status_code=404, detail="导入任务不存在")
         error_repository: TenantScopedRepository[ImportRowError] = TenantScopedRepository(
-            session, ImportRowError, tenant_id, scope=viewer.scope_context,
+            session,
+            ImportRowError,
+            tenant_id,
+            scope=viewer.scope_context,
         )
         stmt = (
             error_repository.base_query()
@@ -231,8 +258,10 @@ async def list_import_errors(
         return ImportErrorsResponse(
             items=[
                 ImportRowErrorResponse(
-                    row_no=row.row_no, field=row.field,
-                    error_code=row.error_code, message=row.message,
+                    row_no=row.row_no,
+                    field=row.field,
+                    error_code=row.error_code,
+                    message=row.message,
                 )
                 for row in rows
             ],
@@ -266,9 +295,13 @@ async def retry_import(
             raise HTTPException(status_code=409, detail="该任务已重试过，请对派生任务操作")
 
         derived = ImportJob(
-            tenant_id=tenant_id, type=source.type, conflict=source.conflict,
-            file_object_key=source.file_object_key, status="pending",
-            created_by=viewer.user_id, row_filter_json=row_filter,
+            tenant_id=tenant_id,
+            type=source.type,
+            conflict=source.conflict,
+            file_object_key=source.file_object_key,
+            status="pending",
+            created_by=viewer.user_id,
+            row_filter_json=row_filter,
             retry_count=source.retry_count + 1,
         )
         await repository.add(derived)
@@ -285,9 +318,15 @@ async def retry_import(
 
     await _enqueue(tenant_id, derived.id, source_job_id=job_id)
     await _audit_job(
-        viewer, tenant_id, action="org.import.retried", resource_id=str(job_id),
-        metadata={"derived_job_id": str(derived.id), "failed_rows": source.failed_rows,
-                  "full_rerun": source.status == "failed"},
+        viewer,
+        tenant_id,
+        action="org.import.retried",
+        resource_id=str(job_id),
+        metadata={
+            "derived_job_id": str(derived.id),
+            "failed_rows": source.failed_rows,
+            "full_rerun": source.status == "failed",
+        },
     )
     return ImportRetryResponse(source_job_id=job_id, job_id=derived.id)
 
@@ -298,13 +337,16 @@ async def _failed_row_numbers(
     """失败行号集合（重试行过滤；走仓储与上传者范围——job 本身在其范围内）。"""
 
     repository: TenantScopedRepository[ImportRowError] = TenantScopedRepository(
-        session, ImportRowError, tenant_id, scope=principal.scope_context,
+        session,
+        ImportRowError,
+        tenant_id,
+        scope=principal.scope_context,
     )
     rows = (
-        await session.execute(
-            repository.base_query().where(ImportRowError.job_id == job_id)
-        )
-    ).scalars().all()
+        (await session.execute(repository.base_query().where(ImportRowError.job_id == job_id)))
+        .scalars()
+        .all()
+    )
     return {row.row_no for row in rows}
 
 
@@ -312,4 +354,3 @@ def _tenant_or_403(principal: Principal) -> UUID:
     if principal.realm != "tenant" or principal.tenant_id is None:
         raise HTTPException(status_code=403, detail="批量导入只在校方租户上下文内可用")
     return principal.tenant_id
-

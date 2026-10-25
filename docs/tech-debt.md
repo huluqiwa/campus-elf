@@ -203,6 +203,9 @@
 | TD-175 | M2-ORG02 | 导入上传文件（含 PII）存对象存储且无生命周期/删除端点，失败 job 的孤儿对象永久保留 | 已采纳 | M6 | 随存储生命周期策略（TD-083 同类）统一：对象桶生命周期规则 + job 删除端点级联清理；M2 末评审确认无更早需求 |
 | TD-176 | M2-ORG05 | 复合外键裸 `ON DELETE SET NULL` 会把全部引用列置 NULL（含 NOT NULL 的 tenant_id）→ 并发删除/调岗竞争时 500 而非优雅置空；同类模式已在 classes 班主任/辅导员 FK 存在 | 已采纳 | M6 | PG15+ 支持 `ON DELETE SET NULL (列清单)` 语法：M6 部署硬化时统一迁移改写（departments/teachers 与 classes 两处）；正常路径已被 409 预检挡住不可达 |
 | TD-177 | M2-ORG05 | 部门树移动的子树 path 重写为大事务（子树行数线性）+ READ COMMITTED 下并发移动的路径重写竞争（已对被移动行 FOR UPDATE 降险） | 已采纳 | M6 | 校级规模（几十~几百部门）可忽略；M6 压测时用 EXPLAIN 验证 path 索引（varchar_pattern_ops）与重写耗时；如需强一致改 advisory lock |
+| TD-178 | M2-ORG04 | HTTP 人员核查适配器（spec 说默认关闭，超时降级，人工确认）未实现 | 已延后 | M5/M6 | MVP 无真实第三方核查服务可对接；接口形状（适配器协议 + 超时降级 + 人工确认状态）在有真实服务时设计并实现 |
+| TD-179 | M2-ORG04 | `PUT /school/teachers/{id}` 调岗与身份证更新分两步提交（身份证步失败 409/422 时调岗已生效），非原子 | 已采纳 | M2 末评审 | 复审 M5 对齐 D2-A 时的取舍：合并需把调岗逻辑迁出 departments 服务或提供组合服务函数，收益有限；若 B 端反馈「一步编辑」成刚需，提供单事务组合服务并保留逐项审计 |
+| TD-180 | M2-ORG04 | 跨表（教师↔学生）HMAC 查重是两查询 check-then-act：同表并发由部分唯一索引兜底为 409，跨表并发同号竞窗仍可双写 | 已采纳 | M6 | 残余窗口极窄（同毫秒跨表写同号）；M6 若需收口，方案为 PG advisory lock（按 hmac 前缀）或物化 `person_id_cards` 单表唯一索引 |
 | TD-162 | M1-F | 持 AUDIT_HASH_KEY 者可伪造入链行（hash_version=1 且哈希一致），链校验无法区分 | 已采纳 | M6 | 外部锚点（anchor_ref 预留字段 + 定期 WORM 导出哈希到外部存储）可收口；当前审计密钥仅平台运维持有，泄露面极小 |
 | TD-163 | M1-F | 哈希未覆盖 ip/user_agent/metadata_json/before_json_redacted/after_json_redacted，超级用户改这些字段不可检测 | 已采纳 | M6 | 与外部锚点一并考虑（扩字段会破坏现有链）；当前仅覆盖核心业务字段（与简报字段表一致） |
 | TD-161 | M1-E2 | 例外标记可被伪造直写：CHECK 有 `self_exception_used IS TRUE` 这一条款后，"绕过审核函数直写同人 + 标记为真"在数据库层与合法例外同形，无法区分 | 已采纳 | M2 | 检测改走反查而非再加一道约束（用户 2026-10-23 确认三条款 CHECK）：真例外一定带 `approval.self_exception.used` 审计，故 M2 审计巡检加一条反查——`school_review_records` 里 `self_exception_used IS TRUE` 却在同 `request_id` 找不到对应审计的行即告警。落点与 TD-153（跨租工单化）同一批安全巡检 |

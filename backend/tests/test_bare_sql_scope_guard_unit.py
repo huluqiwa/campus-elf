@@ -57,10 +57,16 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
             "行级写入仍走仓储；path 重写在组织变更的同一事务内"
         )
     },
+    "app/org/id_card_service.py": {
+        "*": (
+            "身份证查重与受控查看（M2-ORG04）：HMAC 查重需查 Teacher/Student 两表的指纹列，"
+            "受控查看需读密文列；写入走仓储。明文不落日志/审计。"
+        )
+    },
 }
 
 # 豁免条目上限：超过就说明"直连"正在变成常态，必须回头收敛到仓储。
-MAX_EXEMPT_MODULES = 9
+MAX_EXEMPT_MODULES = 10
 
 # 已知命名盲区（M2-ORG02 复审登记）：`sa_update(Model)` 形态不匹配下方 update 正则。
 # 当前两处使用（retry CAS / 看门狗收口）均为「行经仓储取得 + 条件更新」的正当路径且 RLS 生效；

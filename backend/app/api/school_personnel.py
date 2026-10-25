@@ -31,6 +31,7 @@ class PersonResponse(BaseModel):
     status: str
     last_login_at: datetime | None
     email_masked: str | None
+    id_card_mask: str | None = None
 
 
 def _to_response(item: PersonnelItem) -> PersonResponse:
@@ -41,6 +42,7 @@ def _to_response(item: PersonnelItem) -> PersonResponse:
         status=item.status,
         last_login_at=item.last_login_at,
         email_masked=item.email_masked,
+        id_card_mask=item.id_card_mask,
     )
 
 

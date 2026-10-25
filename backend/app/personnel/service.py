@@ -50,6 +50,7 @@ class PersonnelItem:
     形状按简报 §2-C/口径 ⑥ 固定：`id/user_type/display_name/status/last_login_at` + 掩码邮箱。
     **不含 `login_id`**——它是学号/工号，属于「完整查看需权限+理由+审计」那一类标识符，
     而本期响应通道只有 `school.personnel.view`，给出去等于把内部主键扩散给列表调用方。
+    M2-ORG04 增 `id_card_mask`（仅掩码展示值；明文/密文/HMAC 任何通道不出现）。
     """
 
     id: UUID
@@ -58,6 +59,7 @@ class PersonnelItem:
     status: str
     last_login_at: datetime | None
     email_masked: str | None
+    id_card_mask: str | None = None
 
 
 def _mask_email(email: str | None) -> str | None:
@@ -71,7 +73,9 @@ def _mask_email(email: str | None) -> str | None:
     return f"{local[:1]}***@{domain}"
 
 
-def to_item(user: Any) -> PersonnelItem:
+def to_item(user: Any, *, id_card_mask: str | None = None) -> PersonnelItem:
+    """组装对外视图；`id_card_mask` 由调用方按已过滤行批量回填（M2-ORG04 复审 M4）。"""
+
     return PersonnelItem(
         id=user.id,
         user_type=user.user_type,
@@ -79,7 +83,50 @@ def to_item(user: Any) -> PersonnelItem:
         status=user.status,
         last_login_at=user.last_login_at,
         email_masked=_mask_email(user.email),
+        id_card_mask=id_card_mask,
     )
+
+
+_MASK_BACKFILL_REASON = (
+    "人员列表回填身份证掩码列（仅掩码展示值）；行主键集合已过数据范围过滤，此处不扩大可见面"
+)
+
+
+async def _id_card_masks_for(
+    session: AsyncSession, tenant_id: UUID, user_ids: list[UUID]
+) -> dict[UUID, str]:
+    """按 user_id 批量回填身份证掩码（M2-ORG04 复审 M4）：教师/学生档案表各查一次。
+
+    只读 `id_card_mask` 展示列；入参 user_id 是**已通过数据范围过滤**的人员行，
+    ScopeBypass 仅免范围谓词的二次裁剪，不改变可见人群。
+    """
+
+    from app.db.models.org import Student, Teacher
+
+    if not user_ids:
+        return {}
+    masks: dict[UUID, str] = {}
+    for model in (Teacher, Student):
+        repository: TenantScopedRepository[Any] = TenantScopedRepository(
+            session,
+            model,
+            tenant_id,
+            scope=ScopeBypass(reason=_MASK_BACKFILL_REASON),
+        )
+        rows = (
+            (
+                await session.execute(
+                    repository.base_query().where(
+                        model.user_id.in_(user_ids), model.id_card_mask.is_not(None)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            masks[row.user_id] = str(row.id_card_mask)
+    return masks
 
 
 def _repository(
@@ -92,7 +139,11 @@ def _repository(
     """
 
     return TenantScopedRepository(
-        session, User, tenant_id, scope=scope, owner_attr="id",
+        session,
+        User,
+        tenant_id,
+        scope=scope,
+        owner_attr="id",
         class_scope_factory=build_user_class_member_factory(tenant_id),
     )
 
@@ -131,7 +182,8 @@ async def list_personnel(
         if user_type is not None:
             stmt = stmt.where(User.user_type == user_type)
         rows = (await session.execute(stmt)).scalars().all()
-        return [to_item(row) for row in rows]
+        masks = await _id_card_masks_for(session, tenant_id, [row.id for row in rows])
+        return [to_item(row, id_card_mask=masks.get(row.id)) for row in rows]
 
 
 async def get_personnel(
@@ -148,7 +200,8 @@ async def get_personnel(
         repository = _repository(session, tenant_id, principal.scope_context)
         user = await repository.get(personnel_id)
         if user is not None:
-            return to_item(user)
+            masks = await _id_card_masks_for(session, tenant_id, [user.id])
+            return to_item(user, id_card_mask=masks.get(user.id))
 
     # 走到这里：按当前范围看不到。区分"真不存在"与"存在但越权"，后者要留安全痕迹。
     async with db_session(tenant_id=tenant_id) as session:
@@ -159,9 +212,7 @@ async def get_personnel(
     raise PersonnelError("PERSONNEL_NOT_FOUND", "人员不存在或不在可见范围内", 404)
 
 
-async def _audit_denied(
-    principal: Principal, personnel_id: UUID, request_id: str | None
-) -> None:
+async def _audit_denied(principal: Principal, personnel_id: UUID, request_id: str | None) -> None:
     """写一条 `data_scope.denied` 审计（best-effort：审计故障不改变 404 结果）。"""
 
     tenant_id = principal.tenant_id

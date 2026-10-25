@@ -16,10 +16,11 @@
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import anyio
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.writer import append_audit
@@ -217,6 +218,7 @@ async def _exists(
 # 班级（班主任/辅导员权威源，D2）
 # ---------------------------------------------------------------------------
 
+
 async def _resolve_teacher_user_ids(
     session: AsyncSession, tenant_id: UUID, teacher_ids: list[UUID]
 ) -> list[UUID]:
@@ -260,14 +262,16 @@ async def _teacher_profile_ids_for_users(
     if not user_ids:
         return {}
     repository: TenantScopedRepository[Teacher] = _repository(
-        session, Teacher, tenant_id,
+        session,
+        Teacher,
+        tenant_id,
         ScopeBypass(reason="班级响应回填教师档案 id（存储列是账号 id），仅限已可见行"),
     )
     teachers = (
-        await session.execute(
-            repository.base_query().where(Teacher.user_id.in_(user_ids))
-        )
-    ).scalars().all()
+        (await session.execute(repository.base_query().where(Teacher.user_id.in_(user_ids))))
+        .scalars()
+        .all()
+    )
     return {teacher.user_id: teacher.id for teacher in teachers}
 
 
@@ -275,15 +279,20 @@ async def _class_item(session: AsyncSession, tenant_id: UUID, org_class: OrgClas
     """对外视图：head_teacher_id/counselor_id 为**教师档案 id**（存储列是 users.id）。"""
 
     mapping = await _teacher_profile_ids_for_users(
-        session, tenant_id,
+        session,
+        tenant_id,
         [u for u in (org_class.head_teacher_id, org_class.counselor_id) if u is not None],
     )
     return ClassItem(
-        id=org_class.id, grade=org_class.grade, name=org_class.name,
+        id=org_class.id,
+        grade=org_class.grade,
+        name=org_class.name,
         head_teacher_id=mapping.get(org_class.head_teacher_id)
-        if org_class.head_teacher_id is not None else None,
+        if org_class.head_teacher_id is not None
+        else None,
         counselor_id=mapping.get(org_class.counselor_id)
-        if org_class.counselor_id is not None else None,
+        if org_class.counselor_id is not None
+        else None,
     )
 
 
@@ -305,9 +314,9 @@ async def create_class(
         )
         head_user_id = resolved_ids[0] if head_teacher_id is not None else None
         counselor_user_id = (
-            resolved_ids[-1] if counselor_id is not None and head_teacher_id is not None else (
-                resolved_ids[0] if counselor_id is not None else None
-            )
+            resolved_ids[-1]
+            if counselor_id is not None and head_teacher_id is not None
+            else (resolved_ids[0] if counselor_id is not None else None)
         )
         repository: TenantScopedRepository[OrgClass] = _repository(
             session, OrgClass, tenant_id, principal.scope_context
@@ -325,12 +334,18 @@ async def create_class(
             raise _map_integrity_error(exc, "ORG_CONFLICT", "同年级下班级名已存在") from exc
         await sync_class_scope_rows(session, tenant_id)
         await _audit(
-            session, principal, tenant_id,
-            action="org.class.created", resource_type="org_class",
+            session,
+            principal,
+            tenant_id,
+            action="org.class.created",
+            resource_type="org_class",
             resource_id=str(org_class.id),
-            metadata={"grade": grade, "name": name,
-                      "head_teacher_id": str(head_teacher_id) if head_teacher_id else None,
-                      "counselor_id": str(counselor_id) if counselor_id else None},
+            metadata={
+                "grade": grade,
+                "name": name,
+                "head_teacher_id": str(head_teacher_id) if head_teacher_id else None,
+                "counselor_id": str(counselor_id) if counselor_id else None,
+            },
         )
         return await _class_item(session, tenant_id, org_class)
 
@@ -384,9 +399,7 @@ async def update_class(
             resolved = await _resolve_teacher_user_ids(session, tenant_id, pending)
             by_teacher = dict(zip(pending, resolved, strict=True))
             for field_name, teacher_profile_id in desired.items():
-                new_user_id = (
-                    None if teacher_profile_id is None else by_teacher[teacher_profile_id]
-                )
+                new_user_id = None if teacher_profile_id is None else by_teacher[teacher_profile_id]
                 if new_user_id != getattr(org_class, field_name):
                     setattr(org_class, field_name, new_user_id)
                     changed.append(field_name)
@@ -403,28 +416,41 @@ async def update_class(
         # before/after 的班主任/辅导员统一用**教师档案 id**（与 created 审计及 API 同口径）
         after_item = await _class_item(session, tenant_id, org_class)
         before_mapping = await _teacher_profile_ids_for_users(
-            session, tenant_id,
+            session,
+            tenant_id,
             [u for u in (before_head, before_counselor) if u is not None],
         )
         await _audit(
-            session, principal, tenant_id,
-            action="org.class.updated", resource_type="org_class",
+            session,
+            principal,
+            tenant_id,
+            action="org.class.updated",
+            resource_type="org_class",
             resource_id=str(class_id),
             metadata={
                 "changed": changed,
                 "before": {
-                    "grade": before_grade, "name": before_name,
+                    "grade": before_grade,
+                    "name": before_name,
                     "head_teacher_id": str(before_mapping[before_head])
-                    if before_head is not None else None,
+                    if before_head is not None
+                    else None,
                     "counselor_id": str(before_mapping[before_counselor])
-                    if before_counselor is not None else None,
+                    if before_counselor is not None
+                    else None,
                 },
-                "after": {"grade": after_item.grade, "name": after_item.name,
-                          "head_teacher_id": str(after_item.head_teacher_id)
-                          if after_item.head_teacher_id else None,
-                          "counselor_id": str(after_item.counselor_id)
-                          if after_item.counselor_id else None},
-                "scope_added": sync.added, "scope_removed": sync.removed,
+                "after": {
+                    "grade": after_item.grade,
+                    "name": after_item.name,
+                    "head_teacher_id": str(after_item.head_teacher_id)
+                    if after_item.head_teacher_id
+                    else None,
+                    "counselor_id": str(after_item.counselor_id)
+                    if after_item.counselor_id
+                    else None,
+                },
+                "scope_added": sync.added,
+                "scope_removed": sync.removed,
             },
         )
         return await _class_item(session, tenant_id, org_class)
@@ -440,7 +466,9 @@ async def delete_class(principal: OrgActor, class_id: UUID) -> None:
         if org_class is None:
             raise OrgError("ORG_NOT_FOUND", "班级不存在", 404)
         student_repository: TenantScopedRepository[Student] = _repository(
-            session, Student, tenant_id,
+            session,
+            Student,
+            tenant_id,
             ScopeBypass(reason="删除班级前核验是否仍有在读学生（跨范围安全检查）"),
         )
         remaining = (
@@ -454,15 +482,17 @@ async def delete_class(principal: OrgActor, class_id: UUID) -> None:
         await repository.delete(org_class)
         await sync_class_scope_rows(session, tenant_id)
         await _audit(
-            session, principal, tenant_id,
-            action="org.class.deleted", resource_type="org_class", resource_id=str(class_id),
+            session,
+            principal,
+            tenant_id,
+            action="org.class.deleted",
+            resource_type="org_class",
+            resource_id=str(class_id),
             metadata={"grade": org_class.grade, "name": org_class.name},
         )
 
 
-async def list_classes(
-    principal: OrgActor, *, limit: int = 50, cursor: str | None = None
-) -> Page:
+async def list_classes(principal: OrgActor, *, limit: int = 50, cursor: str | None = None) -> Page:
     tenant_id = _require_school_scope(principal)
     async with db_session(tenant_id=tenant_id) as session:
         repository: TenantScopedRepository[OrgClass] = _repository(
@@ -479,6 +509,7 @@ async def list_classes(
 # 课程（目录数据，非个人数据）
 # ---------------------------------------------------------------------------
 
+
 async def create_course(principal: OrgActor, *, code: str, name: str) -> CourseItem:
     tenant_id = _require_tenant(principal)
     async with db_session(tenant_id=tenant_id) as session:
@@ -491,9 +522,13 @@ async def create_course(principal: OrgActor, *, code: str, name: str) -> CourseI
         except Exception as exc:
             raise _map_integrity_error(exc, "ORG_CONFLICT", "课程编码已存在") from exc
         await _audit(
-            session, principal, tenant_id,
-            action="org.course.created", resource_type="org_course",
-            resource_id=str(course.id), metadata={"code": code, "name": name},
+            session,
+            principal,
+            tenant_id,
+            action="org.course.created",
+            resource_type="org_course",
+            resource_id=str(course.id),
+            metadata={"code": code, "name": name},
         )
         return CourseItem(id=course.id, code=code, name=name)
 
@@ -515,6 +550,7 @@ async def list_courses(principal: OrgActor, *, limit: int = 50, cursor: str | No
 # 教师 / 学生档案（D4：与账号 1:1 同建）
 # ---------------------------------------------------------------------------
 
+
 async def _bind_builtin_role(
     session: AsyncSession, tenant_id: UUID, user_id: UUID, *, role_code: str
 ) -> None:
@@ -524,10 +560,14 @@ async def _bind_builtin_role(
         session, Role, tenant_id, ScopeBypass(reason="建档绑定内置角色：角色目录非个人数据")
     )
     role = (
-        await session.execute(
-            role_repository.base_query().where(Role.code == role_code, Role.is_system.is_(True))
+        (
+            await session.execute(
+                role_repository.base_query().where(Role.code == role_code, Role.is_system.is_(True))
+            )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
     if role is None:
         raise RuntimeError(f"内置角色 {role_code!r} 缺失（开通流程未播种），拒绝建档")
     session.add(UserRole(tenant_id=tenant_id, user_id=user_id, role_id=role.id))
@@ -539,7 +579,9 @@ async def _first_by(
     """按谓词取首行（仓储直查；谓词由调用方用模型属性构造）。"""
 
     repository: TenantScopedRepository[Any] = _repository(
-        session, model, tenant_id,
+        session,
+        model,
+        tenant_id,
         ScopeBypass(reason="唯一性占用探针：只读登录名/编号，不读档案内容"),
     )
     return (await session.execute(repository.base_query().where(predicate))).scalars().first()
@@ -550,7 +592,9 @@ async def _assert_login_free(session: AsyncSession, tenant_id: UUID, login_id: s
         raise OrgError("ORG_LOGIN_TAKEN", "登录名（学号/工号）已被占用", 409, field="login_id")
 
 
-async def _assert_employee_no_free(session: AsyncSession, tenant_id: UUID, employee_no: str) -> None:
+async def _assert_employee_no_free(
+    session: AsyncSession, tenant_id: UUID, employee_no: str
+) -> None:
     if await _first_by(session, Teacher, tenant_id, Teacher.employee_no == employee_no) is not None:
         raise OrgError("ORG_NO_TAKEN", "工号已被占用", 409, field="employee_no")
 
@@ -571,57 +615,113 @@ async def create_teacher(
     position: str | None,
     email: str | None,
     department_id: UUID | None = None,
+    id_card_number: str | None = None,
 ) -> CreatedProfile:
     tenant_id = _require_tenant(principal)
     initial_password = generate_initial_password()
     password_hash = await anyio.to_thread.run_sync(hash_password, initial_password)
 
-    async with db_session(tenant_id=tenant_id) as session:
-        await _assert_login_free(session, tenant_id, login_id)
-        await _assert_employee_no_free(session, tenant_id, employee_no)
+    from app.org.id_card_service import (
+        IdCardDuplicateError,
+        _check_hmac_unique,
+        _is_idcard_hmac_violation,
+        _set_id_card,
+        validate_or_422,
+    )
 
-        repository = _repository(session, User, tenant_id, principal.scope_context)
-        user = User(
-            tenant_id=tenant_id,
-            user_type="teacher",
-            login_id=login_id,
-            display_name=name,
-            email=email,
-            password_hash=password_hash,
-            status="active",
-            must_change_password=True,
-        )
-        await repository.add(user)
-        if department_id is not None:
-            # 存在性 + 在用状态（M1 复审：停用部门不得获得新归属）
-            from app.db.models.org import Department
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            await _assert_login_free(session, tenant_id, login_id)
+            await _assert_employee_no_free(session, tenant_id, employee_no)
 
-            dept_repository: TenantScopedRepository[Department] = TenantScopedRepository(
-                session, Department, tenant_id, scope=ScopeBypass(reason=_PROBE_REASON),
+            repository = _repository(session, User, tenant_id, principal.scope_context)
+            user = User(
+                tenant_id=tenant_id,
+                user_type="teacher",
+                login_id=login_id,
+                display_name=name,
+                email=email,
+                password_hash=password_hash,
+                status="active",
+                must_change_password=True,
             )
-            dept = await dept_repository.get(department_id)
-            if dept is None:
-                raise OrgError("DEPARTMENT_NOT_FOUND", "目标部门不存在", 422)
-            if dept.status != "active":
-                raise OrgError("DEPARTMENT_DISABLED", "目标部门已停用", 422)
-        teacher = Teacher(
-            tenant_id=tenant_id, user_id=user.id,
-            employee_no=employee_no, name=name, age=age, gender=gender, position=position,
-            department_id=department_id,
-        )
-        await repository.add(teacher)
-        await _bind_builtin_role(session, tenant_id, user.id, role_code="teacher")
-        await _audit(
-            session, principal, tenant_id,
-            action="org.teacher.created", resource_type="org_teacher",
-            resource_id=str(teacher.id),
-            metadata={"employee_no": employee_no, "name": name, "login_id": login_id},
-        )
-        item = TeacherItem(
-            id=teacher.id, user_id=user.id, login_id=login_id, employee_no=employee_no,
-            name=name, age=age, gender=gender, position=position,
-            department_id=teacher.department_id,
-        )
+            await repository.add(user)
+            if department_id is not None:
+                # 存在性 + 在用状态（M1 复审：停用部门不得获得新归属）
+                from app.db.models.org import Department
+
+                dept_repository: TenantScopedRepository[Department] = TenantScopedRepository(
+                    session,
+                    Department,
+                    tenant_id,
+                    scope=ScopeBypass(reason=_PROBE_REASON),
+                )
+                dept = await dept_repository.get(department_id)
+                if dept is None:
+                    raise OrgError("DEPARTMENT_NOT_FOUND", "目标部门不存在", 422)
+                if dept.status != "active":
+                    raise OrgError("DEPARTMENT_DISABLED", "目标部门已停用", 422)
+            # 档案 id 预生成（复审 B1）：AAD 绑定 Teacher.id，与受控查看/更新同一身份
+            teacher = Teacher(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                user_id=user.id,
+                employee_no=employee_no,
+                name=name,
+                age=age,
+                gender=gender,
+                position=position,
+                department_id=department_id,
+            )
+            id_card_mask: str | None = None
+            if id_card_number is not None:
+                # 先在未入库对象上写三件套，再查重、最后 add：
+                # 若先 add，SELECT 查重会自动 flush 出本行，查重命中自己恒 409
+                normalized = validate_or_422(id_card_number)
+                _set_id_card(
+                    teacher,
+                    number=normalized,
+                    tenant_id=tenant_id,
+                    personnel_id=teacher.id,
+                )
+                await _check_hmac_unique(session, tenant_id, teacher.id_card_hmac or "")
+                id_card_mask = teacher.id_card_mask
+            await repository.add(teacher)
+            await _bind_builtin_role(session, tenant_id, user.id, role_code="teacher")
+            await _audit(
+                session,
+                principal,
+                tenant_id,
+                action="org.teacher.created",
+                resource_type="org_teacher",
+                resource_id=str(teacher.id),
+                metadata={"employee_no": employee_no, "name": name, "login_id": login_id},
+            )
+            if id_card_mask is not None:
+                await _audit(
+                    session,
+                    principal,
+                    tenant_id,
+                    action="org.id_card.created",
+                    resource_type="org_teacher",
+                    resource_id=str(teacher.id),
+                    metadata={"mask": id_card_mask, "employee_no": employee_no},
+                )
+            item = TeacherItem(
+                id=teacher.id,
+                user_id=user.id,
+                login_id=login_id,
+                employee_no=employee_no,
+                name=name,
+                age=age,
+                gender=gender,
+                position=position,
+                department_id=teacher.department_id,
+            )
+    except IntegrityError as exc:
+        if _is_idcard_hmac_violation(exc):
+            raise IdCardDuplicateError() from exc
+        raise
     return CreatedProfile(item=item, initial_password=initial_password)
 
 
@@ -634,46 +734,100 @@ async def create_student(
     gender: str | None,
     class_id: UUID | None,
     email: str | None,
+    id_card_number: str | None = None,
 ) -> CreatedProfile:
     tenant_id = _require_tenant(principal)
     initial_password = generate_initial_password()
     password_hash = await anyio.to_thread.run_sync(hash_password, initial_password)
 
-    async with db_session(tenant_id=tenant_id) as session:
-        if class_id is not None and not await _exists(session, OrgClass, class_id, tenant_id):
-            raise OrgError("ORG_NOT_FOUND", "目标班级不存在", 422)
-        await _assert_login_free(session, tenant_id, login_id)
-        await _assert_student_no_free(session, tenant_id, student_no)
+    from app.org.id_card_service import (
+        IdCardDuplicateError,
+        _check_hmac_unique,
+        _is_idcard_hmac_violation,
+        _set_id_card,
+        validate_or_422,
+    )
 
-        repository = _repository(session, User, tenant_id, principal.scope_context)
-        user = User(
-            tenant_id=tenant_id,
-            user_type="student",
-            login_id=login_id,
-            display_name=name,
-            email=email,
-            password_hash=password_hash,
-            status="active",
-            must_change_password=True,
-        )
-        await repository.add(user)
-        student = Student(
-            tenant_id=tenant_id, user_id=user.id,
-            student_no=student_no, name=name, gender=gender, class_id=class_id,
-        )
-        await repository.add(student)
-        await _bind_builtin_role(session, tenant_id, user.id, role_code="student")
-        await _audit(
-            session, principal, tenant_id,
-            action="org.student.created", resource_type="org_student",
-            resource_id=str(student.id),
-            metadata={"student_no": student_no, "name": name, "login_id": login_id,
-                      "class_id": str(class_id) if class_id else None},
-        )
-        item = StudentItem(
-            id=student.id, user_id=user.id, login_id=login_id, student_no=student_no,
-            name=name, gender=gender, class_id=class_id,
-        )
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            if class_id is not None and not await _exists(session, OrgClass, class_id, tenant_id):
+                raise OrgError("ORG_NOT_FOUND", "目标班级不存在", 422)
+            await _assert_login_free(session, tenant_id, login_id)
+            await _assert_student_no_free(session, tenant_id, student_no)
+
+            repository = _repository(session, User, tenant_id, principal.scope_context)
+            user = User(
+                tenant_id=tenant_id,
+                user_type="student",
+                login_id=login_id,
+                display_name=name,
+                email=email,
+                password_hash=password_hash,
+                status="active",
+                must_change_password=True,
+            )
+            await repository.add(user)
+            # 档案 id 预生成（复审 B1）：AAD 绑定 Student.id，与受控查看/更新同一身份
+            student = Student(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                user_id=user.id,
+                student_no=student_no,
+                name=name,
+                gender=gender,
+                class_id=class_id,
+            )
+            id_card_mask: str | None = None
+            if id_card_number is not None:
+                # 先写三件套再查重后 add：先 add 会被 SELECT 自动 flush 出本行，查重命中自己
+                normalized = validate_or_422(id_card_number)
+                _set_id_card(
+                    student,
+                    number=normalized,
+                    tenant_id=tenant_id,
+                    personnel_id=student.id,
+                )
+                await _check_hmac_unique(session, tenant_id, student.id_card_hmac or "")
+                id_card_mask = student.id_card_mask
+            await repository.add(student)
+            await _bind_builtin_role(session, tenant_id, user.id, role_code="student")
+            await _audit(
+                session,
+                principal,
+                tenant_id,
+                action="org.student.created",
+                resource_type="org_student",
+                resource_id=str(student.id),
+                metadata={
+                    "student_no": student_no,
+                    "name": name,
+                    "login_id": login_id,
+                    "class_id": str(class_id) if class_id else None,
+                },
+            )
+            if id_card_mask is not None:
+                await _audit(
+                    session,
+                    principal,
+                    tenant_id,
+                    action="org.id_card.created",
+                    resource_type="org_student",
+                    resource_id=str(student.id),
+                    metadata={"mask": id_card_mask, "student_no": student_no},
+                )
+            item = StudentItem(
+                id=student.id,
+                user_id=user.id,
+                login_id=login_id,
+                student_no=student_no,
+                name=name,
+                gender=gender,
+                class_id=class_id,
+            )
+    except IntegrityError as exc:
+        if _is_idcard_hmac_violation(exc):
+            raise IdCardDuplicateError() from exc
+        raise
     return CreatedProfile(item=item, initial_password=initial_password)
 
 
@@ -685,13 +839,16 @@ async def _login_ids_for(
     if not user_ids:
         return {}
     repository: TenantScopedRepository[User] = _repository(
-        session, User, tenant_id, ScopeBypass(reason="档案列表回填登录名（学号/工号），仅限已可见行")
+        session,
+        User,
+        tenant_id,
+        ScopeBypass(reason="档案列表回填登录名（学号/工号），仅限已可见行"),
     )
     users = (
-        await session.execute(
-            repository.base_query().where(User.id.in_(user_ids))
-        )
-    ).scalars().all()
+        (await session.execute(repository.base_query().where(User.id.in_(user_ids))))
+        .scalars()
+        .all()
+    )
     return {user.id: user.login_id for user in users}
 
 
@@ -706,7 +863,10 @@ async def list_students(
     tenant_id = _require_tenant(principal)
     async with db_session(tenant_id=tenant_id) as session:
         repository: TenantScopedRepository[Student] = TenantScopedRepository(
-            session, Student, tenant_id, scope=principal.scope_context,
+            session,
+            Student,
+            tenant_id,
+            scope=principal.scope_context,
             owner_attr="user_id",
             class_scope_factory=build_user_class_member_factory(tenant_id),
         )
@@ -715,8 +875,12 @@ async def list_students(
         return Page(
             items=[
                 StudentItem(
-                    id=row.id, user_id=row.user_id, login_id=logins.get(row.user_id, ""),
-                    student_no=row.student_no, name=row.name, gender=row.gender,
+                    id=row.id,
+                    user_id=row.user_id,
+                    login_id=logins.get(row.user_id, ""),
+                    student_no=row.student_no,
+                    name=row.name,
+                    gender=row.gender,
                     class_id=row.class_id,
                 )
                 for row in rows
@@ -725,9 +889,7 @@ async def list_students(
         )
 
 
-async def list_teachers(
-    principal: OrgActor, *, limit: int = 50, cursor: str | None = None
-) -> Page:
+async def list_teachers(principal: OrgActor, *, limit: int = 50, cursor: str | None = None) -> Page:
     """教师目录（仅全校范围；条目不含初始密码与身份证列）。"""
 
     tenant_id = _require_school_scope(principal)
@@ -740,9 +902,14 @@ async def list_teachers(
         return Page(
             items=[
                 TeacherItem(
-                    id=row.id, user_id=row.user_id, login_id=logins.get(row.user_id, ""),
-                    employee_no=row.employee_no, name=row.name, age=row.age,
-                    gender=row.gender, position=row.position,
+                    id=row.id,
+                    user_id=row.user_id,
+                    login_id=logins.get(row.user_id, ""),
+                    employee_no=row.employee_no,
+                    name=row.name,
+                    age=row.age,
+                    gender=row.gender,
+                    position=row.position,
                 )
                 for row in rows
             ],
@@ -753,6 +920,7 @@ async def list_teachers(
 # ---------------------------------------------------------------------------
 # 任教关系（class 范围行的事实来源之一）
 # ---------------------------------------------------------------------------
+
 
 async def create_assignment(
     principal: OrgActor,
@@ -777,8 +945,11 @@ async def create_assignment(
             session, TeacherClassCourse, tenant_id, principal.scope_context
         )
         assignment = TeacherClassCourse(
-            tenant_id=tenant_id, teacher_id=teacher_id,
-            class_id=class_id, course_id=course_id, term=term,
+            tenant_id=tenant_id,
+            teacher_id=teacher_id,
+            class_id=class_id,
+            course_id=course_id,
+            term=term,
         )
         try:
             await repository.add(assignment)
@@ -786,16 +957,27 @@ async def create_assignment(
             raise _map_integrity_error(exc, "ORG_CONFLICT", "该任教关系已存在") from exc
         sync = await sync_class_scope_rows(session, tenant_id)
         await _audit(
-            session, principal, tenant_id,
-            action="org.assignment.created", resource_type="org_assignment",
+            session,
+            principal,
+            tenant_id,
+            action="org.assignment.created",
+            resource_type="org_assignment",
             resource_id=str(assignment.id),
-            metadata={"teacher_id": str(teacher_id), "class_id": str(class_id),
-                      "course_id": str(course_id), "term": term,
-                      "scope_added": sync.added, "scope_removed": sync.removed},
+            metadata={
+                "teacher_id": str(teacher_id),
+                "class_id": str(class_id),
+                "course_id": str(course_id),
+                "term": term,
+                "scope_added": sync.added,
+                "scope_removed": sync.removed,
+            },
         )
         return AssignmentItem(
-            id=assignment.id, teacher_id=teacher_id, class_id=class_id,
-            course_id=course_id, term=term,
+            id=assignment.id,
+            teacher_id=teacher_id,
+            class_id=class_id,
+            course_id=course_id,
+            term=term,
         )
 
 
@@ -811,13 +993,20 @@ async def delete_assignment(principal: OrgActor, assignment_id: UUID) -> None:
         await repository.delete(assignment)
         sync = await sync_class_scope_rows(session, tenant_id)
         await _audit(
-            session, principal, tenant_id,
-            action="org.assignment.deleted", resource_type="org_assignment",
+            session,
+            principal,
+            tenant_id,
+            action="org.assignment.deleted",
+            resource_type="org_assignment",
             resource_id=str(assignment_id),
-            metadata={"teacher_id": str(assignment.teacher_id),
-                      "class_id": str(assignment.class_id),
-                      "course_id": str(assignment.course_id), "term": assignment.term,
-                      "scope_added": sync.added, "scope_removed": sync.removed},
+            metadata={
+                "teacher_id": str(assignment.teacher_id),
+                "class_id": str(assignment.class_id),
+                "course_id": str(assignment.course_id),
+                "term": assignment.term,
+                "scope_added": sync.added,
+                "scope_removed": sync.removed,
+            },
         )
 
 
@@ -834,14 +1023,18 @@ async def list_assignments(
             session, TeacherClassCourse, tenant_id, principal.scope_context
         )
         rows, next_cursor = await repository.list_cursor(
-            limit=limit, cursor=cursor,
+            limit=limit,
+            cursor=cursor,
             extra=TeacherClassCourse.teacher_id == teacher_id if teacher_id is not None else None,
         )
         return Page(
             items=[
                 AssignmentItem(
-                    id=row.id, teacher_id=row.teacher_id, class_id=row.class_id,
-                    course_id=row.course_id, term=row.term,
+                    id=row.id,
+                    teacher_id=row.teacher_id,
+                    class_id=row.class_id,
+                    course_id=row.course_id,
+                    term=row.term,
                 )
                 for row in rows
             ],

@@ -51,6 +51,8 @@ HEADER_ALIASES: dict[str, str] = {
     "部门": "department",
     "department": "department",
     "部门路径": "department",
+    "身份证号": "id_card_number",
+    "id_card_number": "id_card_number",
 }
 
 REQUIRED_HEADERS: dict[str, set[str]] = {

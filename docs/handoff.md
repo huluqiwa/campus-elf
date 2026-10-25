@@ -24,16 +24,17 @@
 | M1 | M1 验收报告（含 TD-110 全栈 E2E） | ✅ 完成（`docs/m1-acceptance.md`；12 例全栈 E2E 全绿 + 28 mock 回归 + 后端 572 passed；边界 TD 台账 171 条全处置） |
 | M2 | M2-ORG01-03 人员档案与组织关系（ORG-01/03 + TD-151 class 数据范围 + TD-070 cursor 分页） | ✅ 完成（三轮独立审查通过 0B/0M；迁移 `c9d5f1e3a7b9` 五表 + RLS；简报 `docs/design-briefs/M2-ORG01-03.md`） |
 | M2 | M2-ORG02 CSV/XLSX 异步导入（ORG-02 + TD-069 收口 + TD-174 对账验证） | ✅ 完成（三轮独立审查通过 0B/0M；迁移 `e2a6c8d4b0f2`；看门狗 cron 收口 stale running；简报 `docs/design-briefs/M2-ORG02-import.md`） |
-| M2 | M2-ORG05 部门/科室树（A30：departments + 教师归属 + 导入扩展 + 调岗审计） | ✅ 完成（复审确认中；迁移 `a4c8e2f6b1d3`；简报 `docs/design-briefs/M2-ORG05-departments.md`） |
-| M2 | M2-ORG04 身份证 / B 端页面 | ⏳ 未开始（M2 剩余功能点；TD-126/137/141/143 随对应点收口） |
+| M2 | M2-ORG05 部门/科室树（A30：departments + 教师归属 + 导入扩展 + 调岗审计） | ✅ 完成（独立审查通过，review-log 已补录——findings 明细因会话轮替不可考，按补录口径登记；迁移 `a4c8e2f6b1d3`；简报 `docs/design-briefs/M2-ORG05-departments.md`） |
+| M2 | M2-ORG04 身份证加密采集与受控查看（AES-GCM + HMAC 查重 + 掩码 + sensitive.read） | ✅ 完成（独立审查两轮：第一轮 2B/6M 全部修复、第二轮 0B/0M PASS；迁移 `f8b2d6a0c4e8` 指纹唯一索引；简报 `docs/design-briefs/M2-ORG04-id-card.md`） |
+| M2 | M2-ORG04 B 端页面 | ⏳ 未开始（M2 剩余功能点；TD-126/137/141/143 随对应点收口） |
 | M3/M4 | 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M2 剩余功能点（ORG-02 导入 → ORG-05 部门树 → ORG-04 身份证 → B 端页面）→ M3 → M4。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6。
-- **数据库迁移 head**：`e2a6c8d4b0f2`（M2 导入任务两表）；`alembic check` 应无漂移。
+- **建议的下一步顺序**：M2 剩余功能点（B 端页面）→ M3 → M4。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6。
+- **数据库迁移 head**：`f8b2d6a0c4e8`（M2-ORG04 身份证指纹唯一索引）；`alembic check` 应无漂移。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
-- 数据库迁移 head：`a8c3e9f1b5d7`（M1-F 审计哈希链触发器/密钥 GUC）；`alembic check` 应无漂移（2026-10-24 实测无漂移）。
+- 数据库迁移 head：`f8b2d6a0c4e8`（见上，本行替代旧 a8c3e9f1b5d7 记录）；`alembic check` 应无漂移。
 
 ---
 
@@ -52,7 +53,7 @@ cd backend
 uv sync --frozen
 uv run ruff check app tests
 uv run mypy --no-incremental app tests
-REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 616 passed）
+REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 637 passed）
 uv run alembic -x db_url="$TEST_DATABASE_URL" check   # 迁移漂移检查
 
 # 3) 前端

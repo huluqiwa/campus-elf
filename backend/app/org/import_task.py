@@ -27,6 +27,7 @@ from app.db.models.imports import ImportJob, ImportRowError
 from app.db.models.org import OrgClass, Student, Teacher
 from app.db.repository import ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
+from app.org.id_card_service import IdCardNotConfigured
 from app.org.import_parser import parse_import_file
 from app.org.scopes_sync import actual_class_scope_pairs, expected_class_scope_pairs
 from app.org.service import (
@@ -34,6 +35,7 @@ from app.org.service import (
     create_student,
     create_teacher,
 )
+from app.security.id_card import mask_id_card
 from app.storage.objects import build_object_store
 
 logger = logging.getLogger(__name__)
@@ -75,7 +77,9 @@ class ImportOutcome:
 
 async def _load_job(session: Any, tenant_id: UUID, job_id: UUID) -> ImportJob | None:
     repository: TenantScopedRepository[ImportJob] = TenantScopedRepository(
-        session, ImportJob, tenant_id,
+        session,
+        ImportJob,
+        tenant_id,
         scope=ScopeBypass(reason="导入任务读自身 job 行：系统执行者，按 job_id 幂等执行"),
     )
     return await repository.get(job_id)
@@ -95,8 +99,9 @@ async def _update_progress(
         result: Any = await session.execute(
             sa_update(ImportJob)
             .where(ImportJob.id == job_id, ImportJob.status == "running")
-            .values(total_rows=total, success_rows=success,
-                    failed_rows=failed, skipped_rows=skipped)
+            .values(
+                total_rows=total, success_rows=success, failed_rows=failed, skipped_rows=skipped
+            )
         )
         if result.rowcount == 0:
             logger.warning("导入进度回写跳过：job=%s 已被看门狗收口", job_id)
@@ -121,12 +126,34 @@ async def _finish(
         result: Any = await session.execute(
             sa_update(ImportJob)
             .where(ImportJob.id == job_id, ImportJob.status == "running")
-            .values(status=status, total_rows=total, success_rows=success,
-                    failed_rows=failed, skipped_rows=skipped,
-                    finished_at=func.now(), message=message)
+            .values(
+                status=status,
+                total_rows=total,
+                success_rows=success,
+                failed_rows=failed,
+                skipped_rows=skipped,
+                finished_at=func.now(),
+                message=message,
+            )
         )
         if result.rowcount == 0:
             logger.warning("导入终态回写跳过：job=%s 已被看门狗收口", job_id)
+
+
+def _redact_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    """错误行留痕脱敏（复审 B2）：身份证明文不得落 `import_row_errors.raw_json`，只留掩码。"""
+
+    redacted = {k: v for k, v in raw.items() if k != row_no_key}
+    number = redacted.get("id_card_number")
+    if number is not None:
+        if isinstance(number, str) and len(number.strip()) == 18:
+            try:
+                redacted["id_card_number"] = mask_id_card(number.strip().upper())
+            except ValueError:
+                redacted["id_card_number"] = "***"
+        else:
+            redacted["id_card_number"] = "***"
+    return redacted
 
 
 async def _record_row_error(
@@ -141,7 +168,9 @@ async def _record_row_error(
 ) -> None:
     async with db_session(tenant_id=tenant_id) as session:
         repository: TenantScopedRepository[ImportRowError] = TenantScopedRepository(
-            session, ImportRowError, tenant_id,
+            session,
+            ImportRowError,
+            tenant_id,
             scope=ScopeBypass(reason="导入任务落错误行：系统执行者，按 job 归属写入"),
         )
         await repository.add(
@@ -152,51 +181,51 @@ async def _record_row_error(
                 field=field,
                 error_code=error_code,
                 message=message,
-                raw_json={k: v for k, v in raw.items() if k != row_no_key},
+                raw_json=_redact_raw(raw),
             )
         )
 
 
-async def _locate_class(
-    session: Any, tenant_id: UUID, grade: str, name: str
-) -> UUID | None:
+async def _locate_class(session: Any, tenant_id: UUID, grade: str, name: str) -> UUID | None:
     """按（年级, 班名）定位已建班级；不存在返回 None（行错误 CLASS_NOT_FOUND）。"""
 
     repository: TenantScopedRepository[OrgClass] = TenantScopedRepository(
-        session, OrgClass, tenant_id,
+        session,
+        OrgClass,
+        tenant_id,
         scope=ScopeBypass(reason="导入定位目标班级：班级目录非个人数据"),
     )
     org_class = (
-        await session.execute(
-            repository.base_query().where(
-                OrgClass.grade == grade, OrgClass.name == name
+        (
+            await session.execute(
+                repository.base_query().where(OrgClass.grade == grade, OrgClass.name == name)
             )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
     return org_class.id if org_class is not None else None
 
 
-async def _existing_login(
-    session: Any, tenant_id: UUID, login_id: str
-) -> bool:
+async def _existing_login(session: Any, tenant_id: UUID, login_id: str) -> bool:
     user_repository: TenantScopedRepository[User] = TenantScopedRepository(
-        session, User, tenant_id,
+        session,
+        User,
+        tenant_id,
         scope=ScopeBypass(reason="导入冲突探测：只读登录名存在性，不读档案内容"),
     )
     return (
-        await session.execute(
-            user_repository.base_query().where(User.login_id == login_id)
-        )
+        await session.execute(user_repository.base_query().where(User.login_id == login_id))
     ).scalars().first() is not None
 
 
-async def _existing_no(
-    session: Any, tenant_id: UUID, import_type: str, no_value: str
-) -> bool:
+async def _existing_no(session: Any, tenant_id: UUID, import_type: str, no_value: str) -> bool:
     model = Teacher if import_type == "teachers" else Student
     no_attr = Teacher.employee_no if import_type == "teachers" else Student.student_no
     repository: TenantScopedRepository[Any] = TenantScopedRepository(
-        session, model, tenant_id,
+        session,
+        model,
+        tenant_id,
         scope=ScopeBypass(reason="导入冲突探测：只读学号/工号存在性"),
     )
     return (
@@ -218,8 +247,10 @@ def _validate_row(
     if not row.get("name"):
         return "name", "VALUE_REQUIRED", "姓名不能为空"
     age = row.get("age") or None
-    if age is not None and import_type == "teachers" and (
-        not age.isdigit() or not 16 <= int(age) <= 80
+    if (
+        age is not None
+        and import_type == "teachers"
+        and (not age.isdigit() or not 16 <= int(age) <= 80)
     ):
         return "age", "VALUE_INVALID", "年龄须为 16~80 的整数"
     gender = row.get("gender") or None
@@ -228,9 +259,7 @@ def _validate_row(
     email = row.get("email") or None
     if email is not None and "@" not in email:
         return "email", "VALUE_INVALID", "邮箱格式不正确"
-    if import_type == "students" and (
-        bool(row.get("class_grade")) != bool(row.get("class_name"))
-    ):
+    if import_type == "students" and (bool(row.get("class_grade")) != bool(row.get("class_name"))):
         return "class_grade", "VALUE_INVALID", "年级与班级须同时提供"
     return None, None, None
 
@@ -263,8 +292,11 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
             return {"job_id": job_id, "status": "not_found"}
         if job.status != "pending":
             outcome = ImportOutcome(
-                job_id=job_id, status=job.status, total_rows=job.total_rows,
-                success_rows=job.success_rows, failed_rows=job.failed_rows,
+                job_id=job_id,
+                status=job.status,
+                total_rows=job.total_rows,
+                success_rows=job.success_rows,
+                failed_rows=job.failed_rows,
                 skipped_rows=job.skipped_rows,
             )
             return asdict(outcome)
@@ -290,7 +322,13 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
         failure_message = f"导入文件读取/解析失败：{type(exc).__name__}: {exc}"
         logger.warning("%s（job=%s）", failure_message, job_id)
         await _finish(
-            tenant_uuid, job_uuid, status="failed", total=0, success=0, failed=0, skipped=0,
+            tenant_uuid,
+            job_uuid,
+            status="failed",
+            total=0,
+            success=0,
+            failed=0,
+            skipped=0,
             message=failure_message,
         )
         return {"job_id": job_id, "status": "failed"}
@@ -313,9 +351,11 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                 field = row_field
                 raise OrgError(row_code or "VALUE_INVALID", row_message or "行数据不合法", 422)
 
-            login_id = row.get("login_id") or row.get(
-                "employee_no" if import_type == "teachers" else "student_no"
-            ) or ""
+            login_id = (
+                row.get("login_id")
+                or row.get("employee_no" if import_type == "teachers" else "student_no")
+                or ""
+            )
             no_value = row.get("employee_no" if import_type == "teachers" else "student_no") or ""
 
             # 文件内重复（D3）：与库内重复无关，矛盾行一律报错
@@ -338,9 +378,13 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                 if conflict_hit:
                     skipped += 1
                     await _record_row_error(
-                        tenant_uuid, job_uuid, row_no=row_no,
-                        field="login_id", error_code="SKIPPED_DUPLICATE",
-                        message="学号/工号已存在，按 skip 策略跳过", raw=row,
+                        tenant_uuid,
+                        job_uuid,
+                        row_no=row_no,
+                        field="login_id",
+                        error_code="SKIPPED_DUPLICATE",
+                        message="学号/工号已存在，按 skip 策略跳过",
+                        raw=row,
                     )
 
             if conflict_hit:
@@ -360,7 +404,8 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                         field = "department"
                         raise OrgError(
                             "DEPARTMENT_NOT_FOUND",
-                            "部门不存在（按名称全路径逐级匹配失败）", 422,
+                            "部门不存在（按名称全路径逐级匹配失败）",
+                            422,
                         )
                 await create_teacher(
                     actor,
@@ -372,6 +417,7 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                     position=row.get("position") or None,
                     email=row.get("email") or None,
                     department_id=department_id,
+                    id_card_number=row.get("id_card_number") or None,
                 )
             else:
                 class_grade = row.get("class_grade", "")
@@ -380,13 +426,14 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                 if class_grade and class_name:
                     async with db_session(tenant_id=tenant_uuid) as session:
                         class_id = await _locate_class(
-                            session, tenant_uuid, class_grade, class_name,
+                            session,
+                            tenant_uuid,
+                            class_grade,
+                            class_name,
                         )
                     if class_id is None:
                         field = "class_grade"
-                        raise OrgError(
-                            "CLASS_NOT_FOUND", "目标班级不存在（年级/班名不匹配）", 422
-                        )
+                        raise OrgError("CLASS_NOT_FOUND", "目标班级不存在（年级/班名不匹配）", 422)
                 # 未提供年级/班名 = 未分班学生（spec ORG-05 验收口径），class_id 置空
                 await create_student(
                     actor,
@@ -396,25 +443,49 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                     gender=row.get("gender") or None,
                     class_id=class_id,
                     email=row.get("email") or None,
+                    id_card_number=row.get("id_card_number") or None,
                 )
             success += 1
         except OrgError as exc:
             failed += 1
             await _record_row_error(
-                tenant_uuid, job_uuid, row_no=row_no,
-                field=exc.field or field or "row", error_code=exc.code,
-                message=exc.message, raw=row,
+                tenant_uuid,
+                job_uuid,
+                row_no=row_no,
+                field=exc.field or field or "row",
+                error_code=exc.code,
+                message=exc.message,
+                raw=row,
+            )
+        except IdCardNotConfigured as exc:
+            # KEK 未配置：该行身份证无法加密（复审 M2），落结构化行错误而非 INTERNAL_ERROR
+            failed += 1
+            await _record_row_error(
+                tenant_uuid,
+                job_uuid,
+                row_no=row_no,
+                field="id_card_number",
+                error_code="ID_CARD_NOT_CONFIGURED",
+                message=str(exc),
+                raw=row,
             )
         except Exception as exc:
             failed += 1
             logger.warning(
                 "导入行意外失败 job=%s row=%d：%s: %s",
-                job_id, row_no, type(exc).__module__, exc,
+                job_id,
+                row_no,
+                type(exc).__module__,
+                exc,
             )
             await _record_row_error(
-                tenant_uuid, job_uuid, row_no=row_no,
-                field="row", error_code="INTERNAL_ERROR",
-                message=f"行处理发生意外错误：{exc}", raw=row,
+                tenant_uuid,
+                job_uuid,
+                row_no=row_no,
+                field="row",
+                error_code="INTERNAL_ERROR",
+                message=f"行处理发生意外错误：{exc}",
+                raw=row,
             )
 
         if (success + failed + skipped) % PROGRESS_INTERVAL == 0:
@@ -436,19 +507,33 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
 
     final_status = "completed_with_errors" if failed else "completed"
     await _finish(
-        tenant_uuid, job_uuid, status=final_status, total=total, success=success,
-        failed=failed, skipped=skipped, message=reconciliation_note,
+        tenant_uuid,
+        job_uuid,
+        status=final_status,
+        total=total,
+        success=success,
+        failed=failed,
+        skipped=skipped,
+        message=reconciliation_note,
     )
     logger.info(
         "导入结束：job=%s status=%s total=%d success=%d failed=%d skipped=%d",
-        job_id, final_status, total, success, failed, skipped,
+        job_id,
+        final_status,
+        total,
+        success,
+        failed,
+        skipped,
     )
     outcome = ImportOutcome(
-        job_id=job_id, status=final_status, total_rows=total,
-        success_rows=success, failed_rows=failed, skipped_rows=skipped,
+        job_id=job_id,
+        status=final_status,
+        total_rows=total,
+        success_rows=success,
+        failed_rows=failed,
+        skipped_rows=skipped,
     )
     return asdict(outcome)
-
 
 
 # running 状态的看门狗阈值（分钟）：超过即认为 worker 中断，收口为 failed（M2-ORG02 复审 M6）
@@ -475,8 +560,10 @@ async def fail_stale_import_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     total = 0
     async with db_session(platform=True) as session:
         tenant_ids = (
-            await session.execute(select(Tenant.id).where(Tenant.status == "active"))
-        ).scalars().all()
+            (await session.execute(select(Tenant.id).where(Tenant.status == "active")))
+            .scalars()
+            .all()
+        )
 
     for tenant_id in tenant_ids:
         async with db_session(tenant_id=tenant_id) as session:
@@ -487,8 +574,11 @@ async def fail_stale_import_jobs(ctx: dict[str, Any]) -> dict[str, int]:
                     ImportJob.started_at.is_not(None),
                     ImportJob.started_at < cutoff,
                 )
-                .values(status="failed", finished_at=func.now(),
-                        message="任务执行中断（worker 异常或超时）；请对该任务重试（整文件重跑，已导入行将以冲突报错）")
+                .values(
+                    status="failed",
+                    finished_at=func.now(),
+                    message="任务执行中断（worker 异常或超时）；请对该任务重试（整文件重跑，已导入行将以冲突报错）",
+                )
             )
             total += int(result.rowcount or 0)
     if total:
