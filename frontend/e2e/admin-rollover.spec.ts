@@ -54,7 +54,7 @@ test("归档年级与升级起点冲突时预检报错", async ({ page }) => {
 
 test("执行失败重试：幂等键跨重试稳定；重放返回 409 提示已执行过", async ({ page }) => {
   await mockAuth(page, { authenticated: true, user: { permissions: MANAGE_PERMISSIONS } });
-  const { captures } = await mockOrgApi(page);
+  await mockOrgApi(page);
 
   // 有状态覆盖：第一次 dry_run=false 返回 500（模拟响应丢失），第二次成功，第三次 409
   let executeCalls = 0;
