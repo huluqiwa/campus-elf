@@ -393,6 +393,29 @@
 - 更好做法与 TD 处置：TD-175（新，导入文件对象无生命周期，M6）；TD-174 对账在本点实测恒一致（导入不产生教师范围行）。
 - 结论：**可提交**（0 Blocker / 0 Major）。
 
+### M2-ORG04 身份证加密采集与受控查看（2026-10-25）
+
+- 设计简报：docs/design-briefs/M2-ORG04-id-card.md（D1/D3/校验/D4 方案 A 已确认；§9 实现结果含复审修复记录）
+- commit/diff：staged diff（初版 20 文件 +1948 → 修复后 22 文件）
+- 审查人/agent：独立审查子 agent（与实现者独立上下文），两轮
+- Findings：
+  - 第一轮：**Blocker 2**（B1 AAD 身份绑定错位——建档路径绑 `User.id`、受控查看绑 `Teacher.id/Student.id`，导入写入的密文永久不可解；B2 `import_row_errors.raw_json` 落身份证明文）；
+    **Major 6**（M1 受控查看 404 路径 UnboundLocalError→500；M2 422/501 异常映射缺失+导入吞成 INTERNAL_ERROR；M3 无 `(tenant_id, id_card_hmac)` 唯一约束且 create 路径零查重；M4 列表 `id_card_mask` 恒 NULL（死代码掩盖）；M5 未登记偏离已确认简报——D2 写入路径建成被否方案 B 的专用端点、D3 reason 走 Query 泄 URL、design.md 记载不存在的能力；M6 测试缺口——422/501/跨租/明文不泄漏/导入回读均无断言）；Minor 5（死代码 `_check_hmac_unique`/占位变量、config 注释失实、.env.example 缺 ID_CARD_KEK、审计缺 created|updated 区分、`IdCardWriteRequest.reason` 未审计）。
+  - 修复：B1 建档预生成档案 id、AAD 统一绑 `Teacher.id/Student.id`；B2 `_redact_raw`（掩码化）在 `_record_row_error` 单点收口；M1 `view=None` 前置 + last_error 文案；M2 `validate_or_422` 统一译 422 `ID_CARD_INVALID`、路由/导入补 501 与 `ID_CARD_NOT_CONFIGURED` 结构化行错误；M3 迁移 `f8b2d6a0c4e8`（两表部分唯一索引）+ 模型镜像 + create 内 `_check_hmac_unique` + IntegrityError→409；M4 `_id_card_masks_for` 批量回填（掩码列只读、行已过范围过滤）；M5 移除专用端点、create/edit 增 `id_card_number`、reason 改请求体、design.md 路由表校正；M6 BS 重写（同号 409/422/404/403/501/跨表查重/导入回读/raw_json 脱敏/审计明文不泄漏/KEK 缺省 501）；Minor 全部落地。
+  - 第二轮（复审）：**PASS，0 Blocker / 0 Major**；Minor 3 项处置——① 受控查看未捕获 `IdCardDecryptError`（密文损坏→裸 500）：已采纳随密钥轮换 TD（简报 §6）落地结构化 `ID_CARD_DECRYPT_FAILED`，当前 fail-closed 不泄漏明文；② `validate_or_422` 先于 `_kek()`：接受现序（入参合法性校验与功能可用性独立，KEK 缺省+非法号返回 422），登记为既定口径；③ 提交卫生（ORG-05 复审测试混入本批）：按 AGENTS §1.8 拆分提交——`test_org_structure.py` 复审测试（经 ruff format 清理补丁脚本遗留空行）与 ORG-05 review-log 补录条目单独先行提交，ORG-04 功能点单独提交。
+- 复测：受影响用例 92 passed（BS 3 + 集成 73 + 单元 19 初验）；全量 **637 passed**（1117s）；ruff/mypy 173 文件全绿；alembic check 无漂移（head `f8b2d6a0c4e8`）；bandit（app + alembic，CI 同命令）exit 0。
+- 更好做法与 TD 处置：TD-179（PUT 调岗+身份证两步提交非原子，M2 末评审）；TD-180（跨表查重竞窗，M6）；TD-178（核查适配器，M5/M6）。
+- 结论：**可提交**（第二轮复审 0 Blocker / 0 Major）。
+
+### M2-ORG05 部门/科室树 复审补录（2026-10-25）
+
+- 设计简报：docs/design-briefs/M2-ORG05-departments.md（§9 交付物与 10 条偏差要点在档）。
+- 说明：独立审查在 M2-ORG04 之前的会话完成，逐条 findings 清单未随会话上下文存续，本条目为**补录**——只登记有据可查的产出：
+  - 复审落地的回归测试（`backend/tests/integration/test_org_structure.py`，7 passed）：`test_class_unique_constraint`（(tenant_id, grade, name) 唯一约束）、`test_teacher_student_one_to_one`（(tenant_id, user_id) 1:1 约束）、`test_class_scope_partial_unique_index`（class 范围行部分唯一索引）、RLS 隔离/同步/对账用例重写收紧；
+  - 简报 §9 补记两条复审修正（部门列别名归一、POST teachers 增 department_id 与 design §5.4 对齐）。
+- 门禁：随 M2-ORG04 批次复测（见上：637 passed / ruff / mypy / alembic check / bandit 全绿，迁移链 `a4c8e2f6b1d3` → `f8b2d6a0c4e8`）。
+- 结论：**复审通过（补录口径）**； findings 明细不可考，后续功能点审查记录当轮落盘（本条为流程教训）。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |
