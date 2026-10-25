@@ -205,7 +205,7 @@ LLM-05-CampusCompanionElf/
 | `data_scopes` | id, tenant_id, role_id/user_id, scope_type(school/class/course/self), scope_id | 数据范围 |
 | `teachers` | id, tenant_id, user_id, employee_no, name, age, gender, position, **department_id**, id_card_enc, id_card_hmac, id_card_mask | 身份证加密/掩码（同租指纹部分唯一索引 `uq_teachers_idcard_hmac` 兜底查重）；部门归属供文档人群判定（A30） |
 | `students` | id, tenant_id, user_id, student_no, name, class_id, gender, id_card_enc, id_card_hmac, id_card_mask | 档案（同租指纹部分唯一索引 `uq_students_idcard_hmac`）；班主任/辅导员权威在 `classes`（M2-ORG01-03 D2，读路径 join 聚合，不冗余落列） |
-| `classes` | id, tenant_id, **entry_grade**, grade, name, status, head_teacher_id, counselor_id | 班级（ORG-06：`entry_grade` 入学年级=届身份、建档后不可改；`grade`=当前年级，学年流转批量刷新；唯一 `(tenant_id, entry_grade, name)`；`status`=active/archived 行永不删除） |
+| `classes` | id, tenant_id, **entry_year**, grade, name, status, head_teacher_id, counselor_id | 班级（ORG-06：`entry_year` 入学年份=届身份、建档后不可改；`grade`=当前年级，学年流转批量刷新；唯一 `(tenant_id, entry_year, name)`；`status`=active/archived 行永不删除） |
 | `departments` | id, tenant_id, parent_id, name, code, path, status | 部门/科室树（A30）；复合外键 `(parent_id, tenant_id)`；唯一 `(tenant_id, parent_id, name)` |
 | `courses` | id, tenant_id, code, name | 课程 |
 | `teacher_class_courses` | teacher_id, class_id, course_id, term | 任教关系 |
