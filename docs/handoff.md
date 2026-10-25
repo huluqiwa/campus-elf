@@ -26,10 +26,11 @@
 | M2 | M2-ORG02 CSV/XLSX 异步导入（ORG-02 + TD-069 收口 + TD-174 对账验证） | ✅ 完成（三轮独立审查通过 0B/0M；迁移 `e2a6c8d4b0f2`；看门狗 cron 收口 stale running；简报 `docs/design-briefs/M2-ORG02-import.md`） |
 | M2 | M2-ORG05 部门/科室树（A30：departments + 教师归属 + 导入扩展 + 调岗审计） | ✅ 完成（独立审查通过，review-log 已补录——findings 明细因会话轮替不可考，按补录口径登记；迁移 `a4c8e2f6b1d3`；简报 `docs/design-briefs/M2-ORG05-departments.md`） |
 | M2 | M2-ORG04 身份证加密采集与受控查看（AES-GCM + HMAC 查重 + 掩码 + sensitive.read） | ✅ 完成（独立审查两轮：第一轮 2B/6M 全部修复、第二轮 0B/0M PASS；迁移 `f8b2d6a0c4e8` 指纹唯一索引；简报 `docs/design-briefs/M2-ORG04-id-card.md`） |
-| M2 | M2-ORG04 B 端页面 | ⏳ 未开始（M2 剩余功能点；TD-126/137/141/143 随对应点收口） |
+| M2 | M2-ORG06 班级编号与学年流转（升年级/毕业归档，用户 2026-10-25 确认新增） | 📝 简报待确认（`docs/design-briefs/M2-ORG06-class-code-academic-year.md`，D1~D4 待点头；spec/milestone/design 已回写；**B 端页面前落地**） |
+| M2 | M2-ORG04 B 端页面 | ⏳ 未开始（M2 剩余功能点；TD-126/137/141/143 随对应点收口；排在 ORG-06 之后） |
 | M3/M4 | 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M2 剩余功能点（B 端页面）→ M3 → M4。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6。
+- **建议的下一步顺序**：M2 剩余功能点（ORG-06 学年流转 → B 端页面）→ M3 → M4。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6。
 - **数据库迁移 head**：`f8b2d6a0c4e8`（M2-ORG04 身份证指纹唯一索引）；`alembic check` 应无漂移。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。

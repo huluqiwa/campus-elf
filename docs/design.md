@@ -205,7 +205,7 @@ LLM-05-CampusCompanionElf/
 | `data_scopes` | id, tenant_id, role_id/user_id, scope_type(school/class/course/self), scope_id | 数据范围 |
 | `teachers` | id, tenant_id, user_id, employee_no, name, age, gender, position, **department_id**, id_card_enc, id_card_hmac, id_card_mask | 身份证加密/掩码（同租指纹部分唯一索引 `uq_teachers_idcard_hmac` 兜底查重）；部门归属供文档人群判定（A30） |
 | `students` | id, tenant_id, user_id, student_no, name, class_id, gender, id_card_enc, id_card_hmac, id_card_mask | 档案（同租指纹部分唯一索引 `uq_students_idcard_hmac`）；班主任/辅导员权威在 `classes`（M2-ORG01-03 D2，读路径 join 聚合，不冗余落列） |
-| `classes` | id, tenant_id, grade, name, head_teacher_id, counselor_id | 班级（grade 供"年级"人群使用） |
+| `classes` | id, tenant_id, **code**, grade, name, head_teacher_id, counselor_id | 班级（ORG-06 修订：`code` 租户内唯一=跨学年稳定身份；年级是当前态，由学年流转批量刷新，供"年级"人群使用；`(grade,name)` 不再唯一） |
 | `departments` | id, tenant_id, parent_id, name, code, path, status | 部门/科室树（A30）；复合外键 `(parent_id, tenant_id)`；唯一 `(tenant_id, parent_id, name)` |
 | `courses` | id, tenant_id, code, name | 课程 |
 | `teacher_class_courses` | teacher_id, class_id, course_id, term | 任教关系 |
@@ -434,6 +434,7 @@ audit_logs: 仅追加，prev_hash/hash 链
 | GET | `/school/imports/{job_id}/errors` | 错误行报告 |
 | PUT | `/school/teachers/{id}` | 教师编辑（调岗 department_id 必填可空；可选 id_card_number，D2-A） |
 | PUT | `/school/students/{id}` | 学生编辑（可选 id_card_number，返回掩码；D2-A） |
+| POST | `/school/academic-year/rollover` | 学年流转（ORG-06）：中间年级+1 / 毕业归档 / 可选重分班；幂等键防重复执行；全量审计 |
 | GET | `/school/personnel/{id}/id-card` | 身份证完整查看（sensitive.read + 请求体理由 ≥10 字符 → 明文 + 审计 + no-store；D3-A） |
 | POST | `/school/imports/{job_id}/retry` | 失败行重试（派生任务） |
 | POST | `/school/permission-accounts` | 权限账号 |
