@@ -416,6 +416,20 @@
 - 门禁：随 M2-ORG04 批次复测（见上：637 passed / ruff / mypy / alembic check / bandit 全绿，迁移链 `a4c8e2f6b1d3` → `f8b2d6a0c4e8`）。
 - 结论：**复审通过（补录口径）**； findings 明细不可考，后续功能点审查记录当轮落盘（本条为流程教训）。
 
+### M2-UI1 B 端管理页面（2026-10-26）
+
+- 设计简报：docs/design-briefs/M2-UI1-b-end-pages.md（D1 纯 UI+TD-141 / D5 弹窗理由 / D6 三步向导 / D7 mock 主+全栈，均选 A 已确认）
+- commit/diff：staged diff（35 文件 +3347/−26 修复后）
+- 审查人/agent：第一轮独立审查子 agent；**第二轮因子智能体配额耗尽（exceed quota limit）改主上下文执行**（与 M1-E2 先例同口径，如实登记）
+- Findings：
+  - 第一轮：Blocker 0；**Major 6**（① 导入重试响应形状错——前端/mock/单测都按 job 本体编码，真后端返回 {source_job_id, job_id}，点击后轮询 /imports/undefined；② 受控查看弹窗在途请求迟到响应可越过关闭动作残留明文且串人；③ 学年流转幂等键每次点击重新生成，响应丢失后重试击穿后端唯一防线；④ 班主任/辅导员指派漏实现（简报 §1.3 验收项）；⑤ 教师/学生列表掩码列为死列（后端响应无该字段）；⑥ 全栈 spec 缺 field import 无法运行——typecheck/lint 覆盖不到 e2e-fullstack 目录）；Minor 6（部门删除 409 文案、轮询中断无提示、删除无确认、列表截断上限、409 重放 UX 未测、mock classes DELETE 假 200）。
+  - 第一轮修复：① api-client retry 改 ImportRetryRef + ImportsView 按 ref.job_id 重新取进度 + mock/单测同步真实形状；② 弹窗 watch 打开/关闭都清空 + await 后 visible 守卫丢弃迟到响应；③ 幂等键预览成功时生成一次、跨重试稳定、reset 才重置 + E2E 断言两次执行体键恒等；④ 建班/编辑弹窗补班主任/辅导员下拉（与 API 字段一一对应）；⑤ **后端补真列**：TeacherItem/StudentItem + 响应模型增 email_masked/id_card_mask（列表批量回填邮箱掩码 + 档案掩码列，建档带证即回掩码）+ BS-M2-04 列表掩码断言 + 前端掩码列；⑥ 补 import。Minor：确认弹窗（班级/部门）、轮询中断一次性提示、org-mock DELETE 分支、TD-184 登记。
+  - 第二轮（主上下文）：逐项复核 6 项修复落盘与语义（retry 形状/晚到响应丢弃/键稳定性/指派下拉/掩码列端到端/import），另修一处自检发现的细节（建档响应的 email_masked 用实际入参而非 None）；未发现新 Blocker/Major。
+- 已登记偏差（简报 §9）：受控查看 GET→POST（浏览器 fetch 禁止 GET body，理由仍在请求体）；看板/权限账号移出范围（后端未实现：看板属 M6 DASH-01）；3 条全栈 E2E 未跑（TD-183 端口 8000 被本机另一项目容器占用）。
+- 复测：前端 mock E2E 47（含新增键稳定性用例）/单元 57/lint/typecheck/build 全绿；后端受影响 21 passed；全量见提交前门禁。
+- 更好做法与 TD 处置：TD-141 收口（本点）；TD-183/184 新增延后项；OpenAPI codegen 切换延后 M3（简报 §6）。
+- 结论：**可提交**（第一轮 6 Major 全修复，第二轮主上下文复核通过）。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

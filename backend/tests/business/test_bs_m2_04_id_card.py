@@ -226,15 +226,13 @@ async def test_bs_m2_04_id_card_lifecycle(client: AsyncClient) -> None:
         headers=admin,
     )
     assert plain_teacher.status_code == 201, plain_teacher.text
-    no_card = await client.request(
-        "GET",
+    no_card = await client.post(
         f"/api/v1/school/personnel/{plain_teacher.json()['id']}/id-card",
         json={"reason": REASON},
         headers=admin,
     )
     assert no_card.status_code == 404, no_card.text
-    unknown = await client.request(
-        "GET",
+    unknown = await client.post(
         f"/api/v1/school/personnel/{uuid4()}/id-card",
         json={"reason": REASON},
         headers=admin,
@@ -249,8 +247,7 @@ async def test_bs_m2_04_id_card_lifecycle(client: AsyncClient) -> None:
     assert all(VALID_ID not in str(u) for u in personnel.json())  # 明文不出现在任何列表项
 
     # ---- 无 sensitive.read → 403 ----
-    viewer_read = await client.request(
-        "GET",
+    viewer_read = await client.post(
         f"/api/v1/school/personnel/{teacher_id}/id-card",
         json={"reason": REASON},
         headers=viewer,
@@ -258,8 +255,7 @@ async def test_bs_m2_04_id_card_lifecycle(client: AsyncClient) -> None:
     assert viewer_read.status_code == 403, viewer_read.text
 
     # ---- 有权限 + 请求体理由（D3-A） → 明文 + no-store ----
-    full_read = await client.request(
-        "GET",
+    full_read = await client.post(
         f"/api/v1/school/personnel/{teacher_id}/id-card",
         json={"reason": REASON},
         headers=admin,
@@ -270,8 +266,7 @@ async def test_bs_m2_04_id_card_lifecycle(client: AsyncClient) -> None:
     assert full_read.headers.get("cache-control") == "no-store"
 
     # ---- 理由过短 → 422（D3 ≥10 字符） ----
-    short_reason = await client.request(
-        "GET",
+    short_reason = await client.post(
         f"/api/v1/school/personnel/{teacher_id}/id-card",
         json={"reason": "查一下"},
         headers=admin,
@@ -320,14 +315,21 @@ async def test_bs_m2_04_id_card_lifecycle(client: AsyncClient) -> None:
         headers=admin,
     )
     assert edit.status_code == 200, edit.text
-    reread = await client.request(
-        "GET",
+    reread = await client.post(
         f"/api/v1/school/personnel/{teacher_id}/id-card",
         json={"reason": REASON},
         headers=admin,
     )
     assert reread.status_code == 200
     assert reread.json()["number"] == VALID_ID_B  # 更新生效且可解密
+
+    # ---- 教师列表即掩码（M2-UI1 复审 M5）：teacher 目录回显掩码列而非 DB 直查 ----
+    teachers_list = await client.get("/api/v1/school/teachers?limit=100", headers=admin)
+    assert teachers_list.status_code == 200
+    zhang_in_list = next(
+        t for t in teachers_list.json()["items"] if t["employee_no"] == "E-6001"
+    )
+    assert zhang_in_list["id_card_mask"] == MASK_B
 
     # ---- 导入含身份证列（D2-A 导入列） ----
     imported = await _upload_and_run(
@@ -342,8 +344,7 @@ async def test_bs_m2_04_id_card_lifecycle(client: AsyncClient) -> None:
     teachers = await client.get("/api/v1/school/teachers?limit=100", headers=admin)
     assert teachers.status_code == 200
     wang = next(t for t in teachers.json()["items"] if t["employee_no"] == "E-6005")
-    wang_read = await client.request(
-        "GET",
+    wang_read = await client.post(
         f"/api/v1/school/personnel/{wang['id']}/id-card",
         json={"reason": REASON},
         headers=admin,
@@ -446,8 +447,7 @@ async def test_bs_m2_04_student_id_card(client: AsyncClient) -> None:
     assert update.json()["mask"] == MASK_B
 
     # 受控查看回读：更新后明文为新号（AAD 绑定 Student.id）
-    full_read = await client.request(
-        "GET",
+    full_read = await client.post(
         f"/api/v1/school/personnel/{student_id}/id-card",
         json={"reason": REASON},
         headers=admin,
@@ -494,8 +494,7 @@ async def test_bs_m2_04_id_card_not_configured(client_no_kek: AsyncClient) -> No
     assert normal.status_code == 201, normal.text
 
     # 受控查看：目标行无密文 → 404（不是 500/UnboundLocalError，复审 M1）
-    no_card = await client_no_kek.request(
-        "GET",
+    no_card = await client_no_kek.post(
         f"/api/v1/school/personnel/{normal.json()['id']}/id-card",
         json={"reason": REASON},
         headers=admin,

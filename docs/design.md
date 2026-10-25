@@ -436,7 +436,7 @@ audit_logs: 仅追加，prev_hash/hash 链
 | PUT | `/school/students/{id}` | 学生编辑（可选 id_card_number，返回掩码；D2-A） |
 | POST | `/school/classes/rollover` | 学年流转（ORG-06）：按年级映射批量刷新当前年级 + 毕业班级归档；幂等键防重、dry_run 预览、全量审计 |
 | POST | `/school/students/{id}/transfer` | 学生转班（ORG-06：留级/跳级/分班=重指派到目标年级的班；null=未分班；目标班须活跃；审计 `org.student.transferred`） |
-| GET | `/school/personnel/{id}/id-card` | 身份证完整查看（sensitive.read + 请求体理由 ≥10 字符 → 明文 + 审计 + no-store；D3-A） |
+| POST | `/school/personnel/{id}/id-card` | 身份证完整查看（sensitive.read + 请求体理由 ≥10 字符 → 明文 + 审计 + no-store；D3-A。M2-UI1 起 POST：浏览器 fetch 禁止 GET body） |
 | POST | `/school/imports/{job_id}/retry` | 失败行重试（派生任务） |
 | POST | `/school/permission-accounts` | 权限账号 |
 | GET | `/school/dashboard/overview` | 看板统计 |

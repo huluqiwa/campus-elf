@@ -111,3 +111,24 @@ D1-A（纯 UI + TD-141，角色/MFA 管理拆 M2-UI2）、D2-A（手写域模块
   3. **D6 学年流转三步向导**（预览人工核对 + 二次确认）；
   4. **D7 mock 为主 + 2 条全栈 E2E** 的测试策略。
 - 确认结论：**待确认**。
+
+
+## 9. 实现结果（含实现期偏差）
+
+**交付物**：api-client 域模块 `org.ts`/`imports.ts`（类型对齐后端响应，复用会话 401 刷新重放）；admin 布局 `AdminLayout.vue`（菜单按权限渲染）+ 403 页 + 5 个业务路由（people/classes/departments/imports/rollover，meta.permission 守卫）；页面组件：PeopleView（教师/学生双 tab + 建档 + 初始密码一次性弹窗 + 转班 + 受控查看）、IdCardViewDialog（理由弹窗）、ClassesView（班级/课程/任教三 tab + 归档届切换）、DepartmentsView（树 + 子部门 + 停用/删除）、ImportsView（上传/1s 轮询/错误行/重试）、RolloverView（三步向导 + crypto.randomUUID 幂等键）；纯逻辑 `logic.ts`（理由校验/流转映射预检/导入文件预检，与后端同口径）。
+
+**测试**：单元 57（api-client 46 + admin logic 11）；mock E2E 46（存量 28 + 新 18，含 TD-141 三条：无权限按钮不渲染/菜单过滤/直连 403 页）；全栈 E2E +3 已编写待补跑（本机 8000 端口被另一项目容器占用，TD-183；mock E2E 已覆盖同链路的接口语义）。
+
+**实现期偏差**：
+1. **受控查看 GET→POST**（后端 `school_org.py`）：浏览器 fetch 的 GET 不允许携带请求体——D3-A"理由放请求体不进 URL"的安全意图不变，动词改 POST 且该操作本带审计副作用；design.md 行、BS-M2-04 用例同步更新；
+2. **看板/权限账号移出本点**：实现前核实发现两者后端未实现（看板属 M6 DASH-01、权限账号接口未交付），简报初版基于 design.md 计划表误判，已修正范围（见状态行）；
+3. 人员列表 id（User.id）与档案 id（Teacher/Student.id）是两个 id 空间——受控查看入口放在教师/学生列表（档案 id），不放 /school/personnel 列表。
+
+
+## 10. 独立审查记录（2026-10-26）
+
+- **第一轮：FAIL——6 Major + 6 Minor**。Major：① retry 响应形状错（前端/mock/单测都按 job 本体编码，真后端返回 {source_job_id, job_id}，点击后轮询 /imports/undefined）；② 受控查看弹窗在途请求迟到响应可越过关闭动作残留明文（且串人）；③ 幂等键每次点击 crypto.randomUUID 重新生成——响应丢失后重试会击穿后端唯一防线；④ 班主任/辅导员指派漏实现（简报 §1.3 验收项）；⑤ 教师/学生列表掩码列是死列（后端响应无该字段）；⑥ 全栈 spec 缺 field import 无法运行（typecheck/lint 覆盖不到 e2e-fullstack 目录）。
+  修复：① api-client retry 改 ImportRetryRef + ImportsView 按 ref.job_id 重新取进度轮询 + mock/单测同步真实 201 形状；② 弹窗 watch 打开/关闭都清空 + await 后 visible 守卫丢弃迟到响应；③ 幂等键改为预览成功时生成一次、跨重试稳定、reset 才重置，并补 E2E（500→重试成功→键恒等断言）；④ 建班/编辑弹窗补班主任/辅导员两个下拉（与 API 字段一一对应）；⑤ 后端补真列：TeacherItem/StudentItem + 响应模型增 email_masked/id_card_mask（列表回填，建档带证即回掩码），BS-M2-04 加"教师列表即掩码"断言，前端补掩码邮箱列；⑥ 补 import。
+  Minor 处置：部门删除 409 改透出后端 detail；轮询中断一次性提示；班级/部门删除加确认弹窗；列表截断上限登记 TD-184；org-mock 补 classes DELETE 分支（防假 200）；E2E 确认框按钮按实际 locale（OK）定位。
+- 复测：前端 mock E2E 47（+1 稳定性用例）/单元 57/lint/typecheck/build 全绿；后端受影响 21 passed；全量见提交前门禁。
+- **第二轮（复审）：见 review-log。**

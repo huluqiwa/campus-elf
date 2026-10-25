@@ -95,6 +95,9 @@ class TeacherItem:
     gender: str | None
     position: str | None
     department_id: UUID | None = None
+    # M2-UI1（复审 M5）：列表即掩码——email/身份证只回掩码列，明文任何通道不出现
+    email_masked: str | None = None
+    id_card_mask: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +109,9 @@ class StudentItem:
     name: str
     gender: str | None
     class_id: UUID | None
+    # M2-UI1（复审 M5）：列表即掩码——email/身份证只回掩码列，明文任何通道不出现
+    email_masked: str | None = None
+    id_card_mask: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +218,32 @@ async def _audit(
 # 建档/建班路径的存在性核验探针：可能需要看到调用方范围之外的行（如目标班级是否在本校），
 # 显式绕过调用者范围——只读主键与状态位，不读档案内容。
 _PROBE_REASON = "建档/指派前的存在性核验：只读主键与状态位，不读档案内容"
+
+
+async def _emails_for(
+    session: AsyncSession, tenant_id: UUID, user_ids: list[UUID]
+) -> dict[UUID, str | None]:
+    """一次回填用户邮箱（M2-UI1 复审 M5：列表脱敏口径，仅限已可见行）。"""
+
+    if not user_ids:
+        return {}
+    repository: TenantScopedRepository[User] = _repository(
+        session, User, tenant_id, ScopeBypass(reason="教师/学生目录回填邮箱做掩码展示，仅限已可见行")
+    )
+    users = (
+        await session.execute(
+            repository.base_query().where(User.id.in_(user_ids)).with_only_columns(User.id, User.email)
+        )
+    ).all()
+    return {row.id: row.email for row in users}
+
+
+def _mask_email(email: str | None) -> str | None:
+    """邮箱脱敏（M2-UI1 复审 M5）：复用 personnel 的口径，保留首字符与域名。"""
+
+    from app.personnel.service import _mask_email as _mask
+
+    return _mask(email)
 
 
 async def _exists(
@@ -1014,6 +1046,7 @@ async def list_students(
         )
         rows, next_cursor = await repository.list_cursor(limit=limit, cursor=cursor)
         logins = await _login_ids_for(session, tenant_id, [row.user_id for row in rows])
+        emails = await _emails_for(session, tenant_id, [row.user_id for row in rows])
         return Page(
             items=[
                 StudentItem(
@@ -1024,6 +1057,8 @@ async def list_students(
                     name=row.name,
                     gender=row.gender,
                     class_id=row.class_id,
+                    email_masked=_mask_email(emails.get(row.user_id)),
+                    id_card_mask=row.id_card_mask,
                 )
                 for row in rows
             ],
@@ -1041,6 +1076,7 @@ async def list_teachers(principal: OrgActor, *, limit: int = 50, cursor: str | N
         )
         rows, next_cursor = await repository.list_cursor(limit=limit, cursor=cursor)
         logins = await _login_ids_for(session, tenant_id, [row.user_id for row in rows])
+        emails = await _emails_for(session, tenant_id, [row.user_id for row in rows])
         return Page(
             items=[
                 TeacherItem(
@@ -1052,6 +1088,8 @@ async def list_teachers(principal: OrgActor, *, limit: int = 50, cursor: str | N
                     age=row.age,
                     gender=row.gender,
                     position=row.position,
+                    email_masked=_mask_email(emails.get(row.user_id)),
+                    id_card_mask=row.id_card_mask,
                 )
                 for row in rows
             ],

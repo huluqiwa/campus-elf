@@ -21,9 +21,9 @@
 - **M1-E2 数据范围与职责分离（RBAC-02/03）**：`school`/`self` 数据范围出厂默认落库（`rbac_builtin_role_scope_defaults`），`Principal` 每请求解析、仓储基类统一注入谓词，解析不到范围 = 空集（fail-closed），显式 id 越权 → 404 + `data_scope.denied` 审计；新增 `GET /api/v1/school/personnel`(+详情)（`school.personnel.view`，响应不含 `login_id`）；提交人不能自批的三道锁（应用层 403/422、数据库函数、同表三条款 CHECK）+ `system_settings` 例外开关（`platform.config.edit`、必填理由、审计、热生效）；平台跨租只读最小通道（只读事务 + 单租户 + 必填理由 + 审计失败即拒绝，工单化延后 TD-153）；`role_permissions_realm_guard` 收紧到 `TENANT_MODULES`；迁移 `f7a9b1c3d5e8`。
 - **M1-F 审计哈希链（AUD-01）**：审计仅追加升级为跨表单链（触发器计算 `prev_hash`/`hash`，密钥经 GUC 注入不入日志）、哈希链查询接口与 `backend/scripts/verify_audit_chain.py` 校验脚本、应用启动自检；TD-068/091 收口。
 - **M1 验收报告（含 TD-110 收口）**：`docs/m1-acceptance.md`。专用 compose 栈（`deploy/backend/Dockerfile` + `deploy/docker-compose.e2e.yml` + `scripts/e2e-stack.sh`）跑真实后端全栈 E2E：`frontend/e2e-fullstack/` **12 例全绿**（三端真实登录、首登强制改密、MailHog 真实邮件重置、平台 tenants/audit 业务接口、数据范围、越权 403、会话设备被踢 401）；边界技术债台账 171 条全部有处置（169 既有 + 本次新增 TD-170/171），TD-147 部署注意已写入 handoff §5.1。
-- **M2 组织与人员（后端）**：人员档案与组织关系（教师/学生建档、班级/课程/任教、`class` 数据范围 + cursor 分页，迁移 `c9d5f1e3a7b9`）；CSV/XLSX 异步导入（Arq 任务、行级错误报告、失败行重试 + 看门狗，迁移 `e2a6c8d4b0f2`）；部门/科室树（id 物化路径、子树移动、教师归属 + 调岗审计，迁移 `a4c8e2f6b1d3`）；身份证加密采集与受控查看（AES-256-GCM 三件套 + 同租 HMAC 查重唯一索引 + 掩码列表 + `sensitive.read` 理由查看，迁移 `f8b2d6a0c4e8`）；入学年份与学年流转（班级届身份唯一键、当前年级批量刷新、毕业归档、幂等键+dry_run，迁移 `b9d3f7c1e5a9`）。B 端页面待做。
+- **M2 组织与人员（后端）**：人员档案与组织关系（教师/学生建档、班级/课程/任教、`class` 数据范围 + cursor 分页，迁移 `c9d5f1e3a7b9`）；CSV/XLSX 异步导入（Arq 任务、行级错误报告、失败行重试 + 看门狗，迁移 `e2a6c8d4b0f2`）；部门/科室树（id 物化路径、子树移动、教师归属 + 调岗审计，迁移 `a4c8e2f6b1d3`）；身份证加密采集与受控查看（AES-256-GCM 三件套 + 同租 HMAC 查重唯一索引 + 掩码列表 + `sensitive.read` 理由查看，迁移 `f8b2d6a0c4e8`）；入学年份与学年流转（班级届身份唯一键、当前年级批量刷新、毕业归档、幂等键+dry_run，迁移 `b9d3f7c1e5a9`）；B 端管理页面（Element Plus 校管后台：人员/受控查看/班级课程任教/部门树/导入/学年流转，菜单按权限渲染）。
 
-当前门禁（M2-ORG06 时点，2026-10-25）：后端 **651 passed**、前端 **32 单测 + 28 mock E2E + 12 全栈 E2E（TD-110）**、`ruff`/`mypy`/`alembic check`/`bandit` 本地全绿、迁移 head `b9d3f7c1e5a9`（无漂移）；M1 全部功能点与 M2-ORG01/03、ORG-02、ORG-05、ORG-04、ORG-06 均已交付并通过独立审查（远端 CI backend / security）。
+当前门禁（M2-UI1 时点，2026-10-26）：后端 **651 passed**、前端 **32 单测 + 28 mock E2E + 12 全栈 E2E（TD-110）**、`ruff`/`mypy`/`alembic check`/`bandit` 本地全绿、迁移 head `b9d3f7c1e5a9`（无漂移）；M1 全部功能点与 M2-ORG01/03、ORG-02、ORG-05、ORG-04、ORG-06 均已交付并通过独立审查（远端 CI backend / security）。
 
 进行中/待做：
 

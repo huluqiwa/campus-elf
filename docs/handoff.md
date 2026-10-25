@@ -30,7 +30,7 @@
 | M2 | M2-ORG04 B 端页面 | ⏳ 未开始（M2 剩余功能点；TD-126/137/141/143 随对应点收口；排在 ORG-06 之后） |
 | M3/M4 | 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 KB-09/KB-10、AI-10） |
 
-- **建议的下一步顺序**：M2 剩余功能点（B 端页面）→ M3 → M4。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6。
+- **建议的下一步顺序**：M2 收尾（M2-UI2 权限后台，TD-126/137/143/150）→ M3 → M4。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6。
 - **数据库迁移 head**：`b9d3f7c1e5a9`（M2-ORG06 入学年份/状态列 + 流转批次表）；`alembic check` 应无漂移。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。

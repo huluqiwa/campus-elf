@@ -87,6 +87,9 @@ class TeacherResponse(BaseModel):
     position: str | None
     department_id: UUID | None = None
     initial_password: str | None = None
+    # M2-UI1（复审 M5）：列表即掩码——email/身份证仅掩码列，明文任何通道不出现
+    email_masked: str | None = None
+    id_card_mask: str | None = None
 
 
 class StudentResponse(BaseModel):
@@ -98,6 +101,9 @@ class StudentResponse(BaseModel):
     gender: str | None
     class_id: UUID | None
     initial_password: str | None = None
+    # M2-UI1（复审 M5）：同上，列表即掩码
+    email_masked: str | None = None
+    id_card_mask: str | None = None
 
 
 class AssignmentResponse(BaseModel):
@@ -736,7 +742,7 @@ async def transfer_student(
 SensitiveDep = require_permission("school.personnel.sensitive.read", realm="tenant")
 
 
-@router.get(
+@router.post(
     "/personnel/{personnel_id}/id-card",
     response_model=IdCardFullResponse,
 )
@@ -749,6 +755,8 @@ async def read_id_card(
     """受控完整查看（M2-ORG04 D3）：sensitive.read + 请求体理由 → 解密明文 + 审计。
 
     reason 放请求体（D3-A）：避免自由文本进 URL/访问日志。
+    动词 POST（M2-UI1 实现期偏差，简报 §9 登记）：浏览器 fetch 的 GET 不允许携带
+    请求体，且本操作带审计副作用；D3-A 的安全意图（理由不进 URL）不变。
     """
 
     if viewer.tenant_id is None or viewer.realm != "tenant":
