@@ -124,7 +124,7 @@ async def test_bs_m2_01_teacher_scope_follows_assignments(client: AsyncClient) -
     for name in ("甲班", "乙班", "丙班"):
         response = await client.post(
             "/api/v1/school/classes",
-            json={"grade": "2026级", "name": name},
+            json={"entry_year": 2026, "grade": "2026级", "name": name},
             headers=admin,
         )
         assert response.status_code == 201, response.text

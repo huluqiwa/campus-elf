@@ -17,12 +17,12 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.auth.principal import Principal, require_permission
 from app.db.repository import CursorError
+from app.org import academic_year, id_card_service, service
 from app.org import departments as departments_service
-from app.org import id_card_service, service
 from app.org.departments import DepartmentError
 from app.org.id_card_service import IdCardNotConfigured
 from app.org.service import OrgError, Page
@@ -45,10 +45,29 @@ def _http_error(exc: OrgError) -> HTTPException:
 
 class ClassResponse(BaseModel):
     id: UUID
+    entry_year: int
     grade: str
     name: str
+    status: str
     head_teacher_id: UUID | None
     counselor_id: UUID | None
+
+
+class GradeChangeItem(BaseModel):
+    id: UUID
+    entry_year: int
+    name: str
+    from_grade: str
+    to_grade: str
+
+
+class RolloverResponse(BaseModel):
+    dry_run: bool
+    advanced: list[GradeChangeItem]
+    archived: list[GradeChangeItem]
+    advanced_count: int
+    archived_count: int
+    rollover_id: UUID | None = None
 
 
 class CourseResponse(BaseModel):
@@ -102,7 +121,8 @@ class PageResponse[ItemT](BaseModel):
 
 
 class ClassCreateRequest(BaseModel):
-    grade: str = Field(min_length=1, max_length=16)
+    entry_year: int = Field(ge=1970, le=2100, description="入学年份（届身份，建档后不可改）")
+    grade: str = Field(min_length=1, max_length=16, description="当前年级")
     name: str = Field(min_length=1, max_length=64)
     head_teacher_id: UUID | None = None
     counselor_id: UUID | None = None
@@ -115,6 +135,27 @@ class ClassUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     head_teacher_id: UUID | None = None
     counselor_id: UUID | None = None
+    # 仅为拦截：入学年份是届身份不可改（出现即 422，见路由守卫）
+    entry_year: int | None = Field(default=None, ge=1970, le=2100)
+
+
+class RolloverAdvanceRequest(BaseModel):
+    """一条升年级映射（可选按入学年份过滤，防误伤新届班）。"""
+
+    from_grade: str = Field(min_length=1, max_length=16)
+    to_grade: str = Field(min_length=1, max_length=16)
+    entry_year: int | None = Field(default=None, ge=1970, le=2100)
+
+
+class ClassRolloverRequest(BaseModel):
+    """学年流转请求（ORG-06 D4）：dry_run 缺省 True（fail-safe，先预览再执行）。"""
+
+    advances: list[RolloverAdvanceRequest] = Field(default_factory=list)
+    archive_grades: list[Annotated[str, StringConstraints(min_length=1, max_length=16)]] = Field(
+        default_factory=list
+    )
+    idempotency_key: str = Field(min_length=8, max_length=64)
+    dry_run: bool = True
 
 
 class CourseCreateRequest(BaseModel):
@@ -152,6 +193,18 @@ class AssignmentCreateRequest(BaseModel):
     term: str = Field(min_length=1, max_length=16)
 
 
+def _class_response(item: Any) -> ClassResponse:
+    return ClassResponse(
+        id=item.id,
+        entry_year=item.entry_year,
+        grade=item.grade,
+        name=item.name,
+        status=item.status,
+        head_teacher_id=item.head_teacher_id,
+        counselor_id=item.counselor_id,
+    )
+
+
 async def _paged[ItemT](
     coro: Any,
     item_model: type[ItemT],
@@ -187,6 +240,7 @@ async def create_class(
     try:
         item = await service.create_class(
             viewer,
+            entry_year=payload.entry_year,
             grade=payload.grade,
             name=payload.name,
             head_teacher_id=payload.head_teacher_id,
@@ -194,13 +248,7 @@ async def create_class(
         )
     except OrgError as exc:
         raise _http_error(exc) from exc
-    return ClassResponse(
-        id=item.id,
-        grade=item.grade,
-        name=item.name,
-        head_teacher_id=item.head_teacher_id,
-        counselor_id=item.counselor_id,
-    )
+    return _class_response(item)
 
 
 @router.get("/classes", response_model=PageResponse[ClassResponse])
@@ -208,8 +256,21 @@ async def list_classes(
     viewer: Annotated[Principal, ViewerDep],
     limit: Annotated[int, Query(ge=1, le=service.MAX_PAGE_SIZE)] = 50,
     cursor: Annotated[str | None, Query(max_length=256)] = None,
+    entry_year: Annotated[int | None, Query(ge=1970, le=2100)] = None,
+    include_archived: Annotated[bool, Query()] = False,
 ) -> PageResponse[ClassResponse]:
-    return await _paged(service.list_classes(viewer, limit=limit, cursor=cursor), ClassResponse)
+    """班级目录（ORG-06）：默认只回活跃班级，归档届显式包含才可见。"""
+
+    return await _paged(
+        service.list_classes(
+            viewer,
+            limit=limit,
+            cursor=cursor,
+            entry_year=entry_year,
+            include_archived=include_archived,
+        ),
+        ClassResponse,
+    )
 
 
 @router.put("/classes/{class_id}", response_model=ClassResponse)
@@ -222,6 +283,8 @@ async def update_class(
 
     kwargs: dict[str, Any] = {}
     provided = payload.model_fields_set
+    if "entry_year" in provided:
+        raise HTTPException(status_code=422, detail="入学年份是届身份，建档后不可修改")
     for field_name in ("grade", "name", "head_teacher_id", "counselor_id"):
         if field_name in provided:
             kwargs[field_name] = getattr(payload, field_name)
@@ -229,13 +292,7 @@ async def update_class(
         item = await service.update_class(viewer, class_id, **kwargs)
     except OrgError as exc:
         raise _http_error(exc) from exc
-    return ClassResponse(
-        id=item.id,
-        grade=item.grade,
-        name=item.name,
-        head_teacher_id=item.head_teacher_id,
-        counselor_id=item.counselor_id,
-    )
+    return _class_response(item)
 
 
 @router.delete("/classes/{class_id}", status_code=204)
@@ -244,6 +301,38 @@ async def delete_class(class_id: UUID, viewer: Annotated[Principal, OrgManageDep
         await service.delete_class(viewer, class_id)
     except OrgError as exc:
         raise _http_error(exc) from exc
+
+
+@router.post("/classes/rollover", response_model=RolloverResponse)
+async def rollover_classes(
+    payload: ClassRolloverRequest, viewer: Annotated[Principal, OrgManageDep]
+) -> RolloverResponse:
+    """学年流转（ORG-06）：先 dry_run 预览，确认后 dry_run=false 执行；幂等键防重复。"""
+
+    advances = tuple(
+        academic_year.RolloverAdvance(
+            from_grade=a.from_grade, to_grade=a.to_grade, entry_year=a.entry_year
+        )
+        for a in payload.advances
+    )
+    try:
+        result = await academic_year.execute_rollover(
+            viewer,
+            advances=advances,
+            archive_grades=tuple(payload.archive_grades),
+            idempotency_key=payload.idempotency_key,
+            dry_run=payload.dry_run,
+        )
+    except OrgError as exc:
+        raise _http_error(exc) from exc
+    return RolloverResponse(
+        dry_run=result.dry_run,
+        advanced=[GradeChangeItem(**asdict(c)) for c in result.advances],
+        archived=[GradeChangeItem(**asdict(c)) for c in result.archives],
+        advanced_count=len(result.advances),
+        archived_count=len(result.archives),
+        rollover_id=result.rollover_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +564,12 @@ class StudentUpdateRequest(BaseModel):
     id_card_number: str | None = Field(default=None, max_length=20)
 
 
+class StudentTransferRequest(BaseModel):
+    """学生转班（ORG-06）：class_id=null 转为未分班。"""
+
+    class_id: UUID | None
+
+
 class IdCardMaskResponse(BaseModel):
     mask: str
 
@@ -612,6 +707,30 @@ async def update_student(
     except IdCardNotConfigured as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     return IdCardMaskResponse(mask=mask)
+
+
+@router.post("/students/{student_id}/transfer", response_model=StudentResponse)
+async def transfer_student(
+    student_id: UUID,
+    payload: StudentTransferRequest,
+    viewer: Annotated[Principal, OrgManageDep],
+) -> StudentResponse:
+    """学生转班（ORG-06）：留级/跳级/分班=重指派到目标年级的班；null=转为未分班。"""
+
+    try:
+        item = await service.update_student_class(viewer, student_id, class_id=payload.class_id)
+    except OrgError as exc:
+        raise _http_error(exc) from exc
+    return StudentResponse(
+        id=item.id,
+        user_id=item.user_id,
+        login_id=item.login_id,
+        student_no=item.student_no,
+        name=item.name,
+        gender=item.gender,
+        class_id=item.class_id,
+        initial_password=None,
+    )
 
 
 SensitiveDep = require_permission("school.personnel.sensitive.read", realm="tenant")

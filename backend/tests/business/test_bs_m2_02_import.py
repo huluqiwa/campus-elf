@@ -114,7 +114,7 @@ async def test_bs_m2_02_import_errors_and_retry(client: AsyncClient) -> None:
 
     # ---- Given：预先建一个班（2026级/1班）供导入定位 ----
     class_create = await client.post(
-        "/api/v1/school/classes", json={"grade": "2026级", "name": "1班"}, headers=admin
+        "/api/v1/school/classes", json={"entry_year": 2026, "grade": "2026级", "name": "1班"}, headers=admin
     )
     assert class_create.status_code == 201, class_create.text
 
@@ -252,7 +252,7 @@ async def test_bs_m2_02_import_thousand_rows(client: AsyncClient) -> None:
         client, school_code=school_code, login_id="m2-principal", password="M2-Principal-Pass-1"
     )
     class_create = await client.post(
-        "/api/v1/school/classes", json={"grade": "2026级", "name": "大班"}, headers=admin
+        "/api/v1/school/classes", json={"entry_year": 2026, "grade": "2026级", "name": "大班"}, headers=admin
     )
     assert class_create.status_code == 201
 

@@ -63,10 +63,16 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
             "受控查看需读密文列；写入走仓储。明文不落日志/审计。"
         )
     },
+    "app/org/academic_year.py": {
+        "*": (
+            "学年流转（M2-ORG06）：按年级匹配整批活跃班级的集合 UPDATE（无仓储行原语）；"
+            "规划为纯函数、执行按 id 集合应用；单班 CRUD 仍走仓储；行级影响全部进审计"
+        )
+    },
 }
 
 # 豁免条目上限：超过就说明"直连"正在变成常态，必须回头收敛到仓储。
-MAX_EXEMPT_MODULES = 10
+MAX_EXEMPT_MODULES = 11
 
 # 已知命名盲区（M2-ORG02 复审登记）：`sa_update(Model)` 形态不匹配下方 update 正则。
 # 当前两处使用（retry CAS / 看门狗收口）均为「行经仓储取得 + 条件更新」的正当路径且 RLS 生效；

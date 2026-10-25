@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import anyio
+import sqlalchemy as sa
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.writer import append_audit
 from app.auth.passwords import generate_initial_password, hash_password
 from app.db.models.identity import User
-from app.db.models.org import Course, OrgClass, Student, Teacher, TeacherClassCourse
+from app.db.models.org import (
+    Course,
+    OrgClass,
+    Student,
+    Teacher,
+    TeacherClassCourse,
+)
 from app.db.models.rbac import Role, UserRole
 from app.db.repository import ScopeBypass, ScopeDecision, TenantScopedRepository
 from app.db.session import db_session
@@ -62,8 +69,10 @@ class OrgError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ClassItem:
     id: UUID
+    entry_year: int
     grade: str
     name: str
+    status: str
     head_teacher_id: UUID | None
     counselor_id: UUID | None
 
@@ -214,6 +223,22 @@ async def _exists(
     return await repository.get(object_id) is not None
 
 
+async def _require_active_class(session: AsyncSession, tenant_id: UUID, class_id: UUID) -> None:
+    """写入路径的班级状态守卫（ORG-06 复审 Major 1）：归档（毕业届）班封闭。
+
+    建学生/排课/转班同口径：不存在 → ORG_NOT_FOUND；已归档 → CLASS_ARCHIVED。
+    """
+
+    repository: TenantScopedRepository[OrgClass] = _repository(
+        session, OrgClass, tenant_id, ScopeBypass(reason=_PROBE_REASON)
+    )
+    org_class = await repository.get(class_id)
+    if org_class is None:
+        raise OrgError("ORG_NOT_FOUND", "目标班级不存在", 422)
+    if org_class.status != "active":
+        raise OrgError("CLASS_ARCHIVED", "目标班级已归档（毕业届），不可写入", 422)
+
+
 # ---------------------------------------------------------------------------
 # 班级（班主任/辅导员权威源，D2）
 # ---------------------------------------------------------------------------
@@ -285,8 +310,10 @@ async def _class_item(session: AsyncSession, tenant_id: UUID, org_class: OrgClas
     )
     return ClassItem(
         id=org_class.id,
+        entry_year=org_class.entry_year,
         grade=org_class.grade,
         name=org_class.name,
+        status=org_class.status,
         head_teacher_id=mapping.get(org_class.head_teacher_id)
         if org_class.head_teacher_id is not None
         else None,
@@ -299,12 +326,18 @@ async def _class_item(session: AsyncSession, tenant_id: UUID, org_class: OrgClas
 async def create_class(
     principal: OrgActor,
     *,
+    entry_year: int,
     grade: str,
     name: str,
     head_teacher_id: UUID | None,
     counselor_id: UUID | None,
 ) -> ClassItem:
     tenant_id = _require_tenant(principal)
+    # 入学年份=届身份（ORG-06）：建档后不可改，范围与 CHECK 约束同口径（提前给出干净 422）
+    if not 1970 <= entry_year <= 2100:
+        raise OrgError(
+            "ENTRY_YEAR_INVALID", "入学年份须为 1970~2100 的整数", 422, field="entry_year"
+        )
     if head_teacher_id is not None and head_teacher_id == counselor_id:
         raise OrgError("CLASS_SAME_TEACHER", "班主任与辅导员不能是同一位教师", 422)
 
@@ -323,6 +356,7 @@ async def create_class(
         )
         org_class = OrgClass(
             tenant_id=tenant_id,
+            entry_year=entry_year,
             grade=grade,
             name=name,
             head_teacher_id=head_user_id,
@@ -331,7 +365,9 @@ async def create_class(
         try:
             await repository.add(org_class)
         except Exception as exc:
-            raise _map_integrity_error(exc, "ORG_CONFLICT", "同年级下班级名已存在") from exc
+            raise _map_integrity_error(
+                exc, "ORG_CONFLICT", "同入学年份下班级名已存在（同届班名唯一）"
+            ) from exc
         await sync_class_scope_rows(session, tenant_id)
         await _audit(
             session,
@@ -341,6 +377,7 @@ async def create_class(
             resource_type="org_class",
             resource_id=str(org_class.id),
             metadata={
+                "entry_year": entry_year,
                 "grade": grade,
                 "name": name,
                 "head_teacher_id": str(head_teacher_id) if head_teacher_id else None,
@@ -369,6 +406,17 @@ async def update_class(
         org_class = await repository.get(class_id)
         if org_class is None:
             raise OrgError("ORG_NOT_FOUND", "班级不存在", 404)
+        if org_class.status == "archived" and (
+            (grade is not UNSET and grade != org_class.grade)
+            or (name is not UNSET and name != org_class.name)
+        ):
+            # ORG-06 复审 Major 1：归档行的历史年级/班名是沿革记录，禁改写；
+            # 班主任/辅导员指派的档案纠错仍允许（走下方常规路径并留审计）
+            raise OrgError(
+                "ORG_CLASS_ARCHIVED_READONLY",
+                "已归档班级的历史年级/班名不可修改（班主任/辅导员更正仍可）",
+                422,
+            )
 
         before_grade: str = org_class.grade
         before_name: str = org_class.name
@@ -465,6 +513,9 @@ async def delete_class(principal: OrgActor, class_id: UUID) -> None:
         org_class = await repository.get(class_id)
         if org_class is None:
             raise OrgError("ORG_NOT_FOUND", "班级不存在", 404)
+        if org_class.status == "archived":
+            # ORG-06 复审 Major 1：归档（毕业届）行是历史沿革，永不删除
+            raise OrgError("ORG_CLASS_ARCHIVED", "已归档班级是历史沿革记录，不可删除", 409)
         student_repository: TenantScopedRepository[Student] = _repository(
             session,
             Student,
@@ -492,13 +543,28 @@ async def delete_class(principal: OrgActor, class_id: UUID) -> None:
         )
 
 
-async def list_classes(principal: OrgActor, *, limit: int = 50, cursor: str | None = None) -> Page:
+async def list_classes(
+    principal: OrgActor,
+    *,
+    limit: int = 50,
+    cursor: str | None = None,
+    entry_year: int | None = None,
+    include_archived: bool = False,
+) -> Page:
+    """班级目录（ORG-06）：默认只回活跃班级（归档届退出在用列表，显式包含才可见）。"""
+
     tenant_id = _require_school_scope(principal)
     async with db_session(tenant_id=tenant_id) as session:
         repository: TenantScopedRepository[OrgClass] = _repository(
             session, OrgClass, tenant_id, principal.scope_context
         )
-        rows, next_cursor = await repository.list_cursor(limit=limit, cursor=cursor)
+        conditions = []
+        if not include_archived:
+            conditions.append(OrgClass.status == "active")
+        if entry_year is not None:
+            conditions.append(OrgClass.entry_year == entry_year)
+        extra = sa.and_(*conditions) if conditions else None
+        rows, next_cursor = await repository.list_cursor(limit=limit, cursor=cursor, extra=extra)
         return Page(
             items=[await _class_item(session, tenant_id, row) for row in rows],
             next_cursor=next_cursor,
@@ -750,8 +816,9 @@ async def create_student(
 
     try:
         async with db_session(tenant_id=tenant_id) as session:
-            if class_id is not None and not await _exists(session, OrgClass, class_id, tenant_id):
-                raise OrgError("ORG_NOT_FOUND", "目标班级不存在", 422)
+            if class_id is not None:
+                # ORG-06 复审 Major 1：归档（毕业届）班封闭，不接受新学生
+                await _require_active_class(session, tenant_id, class_id)
             await _assert_login_free(session, tenant_id, login_id)
             await _assert_student_no_free(session, tenant_id, student_no)
 
@@ -829,6 +896,81 @@ async def create_student(
             raise IdCardDuplicateError() from exc
         raise
     return CreatedProfile(item=item, initial_password=initial_password)
+
+
+async def update_student_class(
+    principal: OrgActor,
+    student_id: UUID,
+    *,
+    class_id: UUID | None,
+) -> StudentItem:
+    """学生转班（ORG-06 留级/跳级/分班口径）：重指派到目标年级的班或转为未分班。
+
+    校验：目标班须存在且**活跃**（归档届不可转入）；指派/范围行不受影响
+    （class 范围行来自教师侧任教与班主任指派，学生归属变更由可见性查询即时反映）。
+    """
+
+    tenant_id = _require_tenant(principal)
+    async with db_session(tenant_id=tenant_id) as session:
+        repository: TenantScopedRepository[Student] = TenantScopedRepository(
+            session,
+            Student,
+            tenant_id,
+            scope=principal.scope_context,
+            owner_attr="user_id",
+            class_scope_factory=build_user_class_member_factory(tenant_id),
+        )
+        student = await repository.get(student_id)
+        if student is None:
+            raise OrgError("STUDENT_NOT_FOUND", "学生不存在", 404)
+        before_class_id: UUID | None = student.class_id
+        if class_id is not None:
+            class_repository: TenantScopedRepository[OrgClass] = TenantScopedRepository(
+                session,
+                OrgClass,
+                tenant_id,
+                scope=ScopeBypass(reason="转班核验目标班级存在且在用（班级目录非个人数据）"),
+            )
+            target = await class_repository.get(class_id)
+            if target is None:
+                raise OrgError("ORG_NOT_FOUND", "目标班级不存在", 422)
+            if target.status != "active":
+                raise OrgError("CLASS_ARCHIVED", "目标班级已归档（毕业届），不可转入", 422)
+        if class_id == before_class_id:
+            logins = await _login_ids_for(session, tenant_id, [student.user_id])
+            return StudentItem(
+                id=student.id,
+                user_id=student.user_id,
+                login_id=logins.get(student.user_id, ""),
+                student_no=student.student_no,
+                name=student.name,
+                gender=student.gender,
+                class_id=student.class_id,
+            )
+        student.class_id = class_id
+        logins = await _login_ids_for(session, tenant_id, [student.user_id])
+        await _audit(
+            session,
+            principal,
+            tenant_id,
+            action="org.student.transferred",
+            resource_type="org_student",
+            resource_id=str(student.id),
+            metadata={
+                "student_no": student.student_no,
+                "before_class_id": str(before_class_id) if before_class_id else None,
+                "after_class_id": str(class_id) if class_id else None,
+            },
+        )
+        return StudentItem(
+            id=student.id,
+            user_id=student.user_id,
+            login_id=logins.get(student.user_id, ""),
+            student_no=student.student_no,
+            name=student.name,
+            gender=student.gender,
+            class_id=student.class_id,
+        )
 
 
 async def _login_ids_for(
@@ -934,11 +1076,12 @@ async def create_assignment(
     async with db_session(tenant_id=tenant_id) as session:
         for label, model, object_id in (
             ("教师", Teacher, teacher_id),
-            ("班级", OrgClass, class_id),
             ("课程", Course, course_id),
         ):
             if not await _exists(session, model, object_id, tenant_id):
                 raise OrgError("ORG_NOT_FOUND", f"{label}不存在", 422)
+        # ORG-06 复审 Major 1：归档（毕业届）班封闭，不再新排课
+        await _require_active_class(session, tenant_id, class_id)
         # 与班主任指派同一口径：停用教师不得被排课（登录侧另有拦截，这里是写路径防线）
         await _resolve_teacher_user_ids(session, tenant_id, [teacher_id])
         repository: TenantScopedRepository[TeacherClassCourse] = _repository(

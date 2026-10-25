@@ -427,3 +427,17 @@
 | M5 账号删除状态机 | 用户 | 待定 | 待定 |
 | M6 配置双人确认 | 用户 | 待定 | 待定 |
 | M6 Langfuse 外送/脱敏 | 用户 | 待定 | 待定 |
+
+### M2-ORG06 入学年份与学年流转（2026-10-25）
+
+- 设计简报：docs/design-briefs/M2-ORG06-academic-year.md（用户确认三项决策：唯一键=入学年份+班名 / 归档=行保留+审计 / 毕业学生账号本点不动；TD-181 精简采纳版）
+- commit/diff：staged diff（17 文件 +1470/−56 → 修复后含文档批）
+- 审查人/agent：独立审查子 agent（与实现者独立上下文），两轮
+- Findings：
+  - 第一轮：Blocker 0；**Major 1**（归档态未回头收口既有写路径：create_student/create_assignment 可写归档班、delete_class 可硬删归档行、update_class 可改写历史 grade/name——与「行永不删除/沿革保留」的既定语义自相矛盾）；Minor 5（不同幂等键并发无串行化、rollover 缺 school 范围要求与 list_classes 不对称、transfer 端点/审计动作未回写 design.md 且 handoff/README 未更新、"中途失败全回滚"测试未交付、archive_grades 元素无长度约束）。
+  - 第一轮修复：Major——新增 `_require_active_class` 统一探针（create_student/create_assignment 归档封闭 422 `CLASS_ARCHIVED`）；delete_class 归档拒删 409 `ORG_CLASS_ARCHIVED`；update_class 归档行禁改 grade/name（422 `ORG_CLASS_ARCHIVED_READONLY`），班主任/辅导员纠错仍可；BS 断言四路径 + 纠错放行。Minor——执行前取租户级 `pg_advisory_xact_lock` 串行化（残余登记 TD-182）；`_require_school_scope` 对称收口；transfer 回写 design.md；补回滚原子性测试（注入审计故障 → 班级与批次行零残留）；archive_grades 元素 1~16 约束。
+  - 第二轮：**PASS，0 Blocker / 0 Major**；提交前文档项（handoff/README/review-log 随本提交 stage、简报补"重放错误码不采纳"处置）——均已落。
+- 实现期偏差（登记于简报 §9）：学生转班能力缺口补建 `POST /school/students/{id}/transfer`（简报假设的"沿用学生编辑"实际不存在）；ClassUpdateRequest 增 entry_year 仅作拦截（Pydantic 静默丢弃未知字段的坑）；导入定位加活跃过滤 + CLASS_AMBIGUOUS；grade 列名不改语义改当前年级；规划/执行分离（纯函数按原年级同时匹配，链式映射无级联）。
+- 复测：单元 12 + BS-M2-06 两用例（含归档封闭与回滚零残留断言）+ 受影响套件 96 passed；ruff/mypy 176 文件全绿；迁移回滚用例修复后单独复测 11 passed；全量见提交前门禁记录。
+- 更好做法与 TD 处置：TD-181（已采纳，本点精简版）；TD-182（流转并发分歧残余，M2 末评审）。
+- 结论：**可提交**（第二轮复审 0 Blocker / 0 Major）。

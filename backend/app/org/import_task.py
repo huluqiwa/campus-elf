@@ -186,8 +186,14 @@ async def _record_row_error(
         )
 
 
-async def _locate_class(session: Any, tenant_id: UUID, grade: str, name: str) -> UUID | None:
-    """按（年级, 班名）定位已建班级；不存在返回 None（行错误 CLASS_NOT_FOUND）。"""
+async def _locate_class(
+    session: Any, tenant_id: UUID, grade: str, name: str
+) -> tuple[UUID | None, bool]:
+    """按（当前年级, 班名）定位活跃班级（ORG-06：归档届不参与定位）。
+
+    返回 (class_id, ambiguous)；不存在 → (None, False)；
+    同年级+班名命中多个活跃班（留届等罕见形态）→ (None, True)（行错误 CLASS_AMBIGUOUS）。
+    """
 
     repository: TenantScopedRepository[OrgClass] = TenantScopedRepository(
         session,
@@ -195,16 +201,24 @@ async def _locate_class(session: Any, tenant_id: UUID, grade: str, name: str) ->
         tenant_id,
         scope=ScopeBypass(reason="导入定位目标班级：班级目录非个人数据"),
     )
-    org_class = (
+    hits = (
         (
             await session.execute(
-                repository.base_query().where(OrgClass.grade == grade, OrgClass.name == name)
+                repository.base_query().where(
+                    OrgClass.grade == grade,
+                    OrgClass.name == name,
+                    OrgClass.status == "active",
+                )
             )
         )
         .scalars()
-        .first()
+        .all()
     )
-    return org_class.id if org_class is not None else None
+    if not hits:
+        return None, False
+    if len(hits) > 1:
+        return None, True
+    return hits[0].id, False
 
 
 async def _existing_login(session: Any, tenant_id: UUID, login_id: str) -> bool:
@@ -425,11 +439,18 @@ async def run_import_job(ctx: dict[str, Any], job_id: str, tenant_id: str | UUID
                 class_id: UUID | None = None
                 if class_grade and class_name:
                     async with db_session(tenant_id=tenant_uuid) as session:
-                        class_id = await _locate_class(
+                        class_id, ambiguous = await _locate_class(
                             session,
                             tenant_uuid,
                             class_grade,
                             class_name,
+                        )
+                    if ambiguous:
+                        field = "class_name"
+                        raise OrgError(
+                            "CLASS_AMBIGUOUS",
+                            "班级定位歧义：同年级同班名命中多个活跃班级",
+                            422,
                         )
                     if class_id is None:
                         field = "class_grade"

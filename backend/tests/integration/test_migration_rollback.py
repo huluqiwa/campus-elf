@@ -740,7 +740,8 @@ def test_m2_org_downgrade_drops_tables_then_upgrade_restores() -> None:
                 "insert into tenants (name, status) values ('M2 回滚中学', 'active') returning id"
             )
             await connection.execute(
-                "insert into classes (tenant_id, grade, name) values ($1, '2026级', '回滚班')",
+                "insert into classes (tenant_id, entry_year, grade, name, status) "
+                "values ($1, 2026, '2026级', '回滚班', 'active')",
                 tenant_id,
             )
             return cast(UUID, tenant_id)
@@ -751,7 +752,8 @@ def test_m2_org_downgrade_drops_tables_then_upgrade_restores() -> None:
         connection = await asyncpg.connect(temp_dsn)
         try:
             await connection.execute(
-                "insert into classes (tenant_id, grade, name) values ($1, '2026级', '重建班')",
+                "insert into classes (tenant_id, entry_year, grade, name, status) "
+                "values ($1, 2026, '2026级', '重建班', 'active')",
                 tenant_id,
             )
         finally:

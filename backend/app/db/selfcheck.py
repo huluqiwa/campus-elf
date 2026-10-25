@@ -41,6 +41,8 @@ REQUIRED_RLS_TABLES: tuple[str, ...] = (
     # M2-ORG02：导入任务（含上传者与原始行数据）
     "import_jobs",
     "import_row_errors",
+    # M2-ORG06：学年流转批次（含幂等键与操作者）
+    "academic_year_rollovers",
 )
 
 
@@ -48,9 +50,10 @@ async def _check_audit_hash_chain_trigger(session: AsyncSession) -> None:
     """审计哈希链触发器必须存在且 owner 可绕过 FORCE RLS（M1-F / TD-091）。"""
 
     row = (
-        await session.execute(
-            text(
-                """
+        (
+            await session.execute(
+                text(
+                    """
                 SELECT r.rolname, r.rolsuper, r.rolbypassrls
                 FROM pg_trigger t
                 JOIN pg_proc p ON p.oid = t.tgfoid
@@ -59,9 +62,12 @@ async def _check_audit_hash_chain_trigger(session: AsyncSession) -> None:
                   AND t.tgrelid = 'audit_logs'::regclass
                 LIMIT 1
                 """
+                )
             )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
 
     if row is None:
         raise DatabaseSelfCheckError(

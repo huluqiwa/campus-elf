@@ -10,6 +10,7 @@
   （`uq_data_scopes_user_class`，见 `rbac.DataScope`），本模块的同步函数负责增删。
 """
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -22,6 +23,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,13 +34,24 @@ Gender = str  # 'male' / 'female' / 'other'，由 CHECK 约束收口
 
 
 class OrgClass(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
-    """班级（年级 + 名称租户内唯一；班主任/辅导员的权威源）。"""
+    """班级（ORG-06：入学年份=届身份 + 当前年级可流转；班主任/辅导员的权威源）。
+
+    - `entry_year` 入学年份：届身份，建档后不可改（改=换届，删了重建）；
+    - `grade` 当前年级：学年流转批量刷新的当前态标签；
+    - 唯一 `(tenant_id, entry_year, name)`：同届班名唯一，跨届同名共存；
+      `(当前年级, 班名)` 不设唯一（简报 D1：先建新届再流转不得撞名）；
+    - `status`：active/archived——归档行永不删除（毕业届保留可查）。
+    """
 
     __tablename__ = "classes"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "grade", "name", name="uq_classes_tenant_id_grade_name"),
+        UniqueConstraint(
+            "tenant_id", "entry_year", "name", name="uq_classes_tenant_entry_year_name"
+        ),
         # 供 students / teacher_class_courses 做复合外键 (class_id, tenant_id)
         UniqueConstraint("id", "tenant_id", name="uq_classes_id_tenant_id"),
+        CheckConstraint("status IN ('active', 'archived')", name="ck_classes_status_valid"),
+        CheckConstraint("entry_year BETWEEN 1970 AND 2100", name="ck_classes_entry_year_range"),
         ForeignKeyConstraint(
             ["head_teacher_id", "tenant_id"],
             ["users.id", "users.tenant_id"],
@@ -53,8 +66,10 @@ class OrgClass(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
         ),
     )
 
+    entry_year: Mapped[int] = mapped_column(nullable=False)
     grade: Mapped[str] = mapped_column(String(16), nullable=False)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     head_teacher_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     counselor_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
 
@@ -97,7 +112,9 @@ class Department(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.id"], name="fk_departments_tenant_id_tenants",
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_departments_tenant_id_tenants",
             ondelete="RESTRICT",
         ),
     )
@@ -222,7 +239,10 @@ class TeacherClassCourse(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin,
     __tablename__ = "teacher_class_courses"
     __table_args__ = (
         UniqueConstraint(
-            "teacher_id", "class_id", "course_id", "term",
+            "teacher_id",
+            "class_id",
+            "course_id",
+            "term",
             name="uq_teacher_class_courses_teacher_id_class_id_course_id_term",
         ),
         ForeignKeyConstraint(
@@ -250,3 +270,37 @@ class TeacherClassCourse(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin,
     course_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     term: Mapped[str] = mapped_column(String(16), nullable=False)
 
+
+class AcademicYearRollover(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """学年流转批次（ORG-06）：幂等键唯一 = 防重复执行的数据库防线。
+
+    若校方「先建新届（高一）再流转」，二次执行会把新届班也升上去——
+    `(tenant_id, idempotency_key)` 唯一拦截重复提交（服务层译 409）。
+    mapping_json/archive_grades_json 留执行时映射快照（追溯口径与审计一致）。
+    """
+
+    __tablename__ = "academic_year_rollovers"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key",
+            name="uq_academic_year_rollovers_tenant_id_idempotency_key",
+        ),
+        CheckConstraint(
+            "advanced_count >= 0 AND archived_count >= 0",
+            name="ck_academic_year_rollovers_counters_nonnegative",
+        ),
+        ForeignKeyConstraint(
+            ["operator_user_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_academic_year_rollovers_operator_user_id_users",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    mapping_json: Mapped[dict[str, Any]] = mapped_column(JSONB(), nullable=False)
+    archive_grades_json: Mapped[list[Any]] = mapped_column(JSONB(), nullable=False)
+    advanced_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    archived_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    operator_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)

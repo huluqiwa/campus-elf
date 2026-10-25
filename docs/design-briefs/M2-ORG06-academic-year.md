@@ -53,3 +53,31 @@
 ## 6. 高风险确认
 
 中风险：批量写 + 唯一键迁移，无认证/租户/加密红线。三项用户决策 2026-10-25 已确认（见状态行）；D4 防重表为安全件随简报落定。
+
+## 9. 实现结果
+
+**交付物**：
+- 迁移 `b9d3f7c1e5a9`：classes 增 `entry_year`（NOT NULL，存量回填 2024）+ `status`（active/archived）+ CHECK×2，唯一键 `(tenant_id, grade, name)` → `(tenant_id, entry_year, name)`；新表 `academic_year_rollovers`（`(tenant_id, idempotency_key)` 唯一 + RLS ENABLE/FORCE/policy/grant）；
+- 模型：`OrgClass` 增列换约束；新增 `AcademicYearRollover`；启动自检 `REQUIRED_RLS_TABLES` 纳入批次表；
+- 班级 CRUD：`create_class` 增 entry_year（必填、1970~2100 服务层预检）、`update_class` 不收 entry_year（路由对出现即 422）、`list_classes` 默认过滤归档 + entry_year 筛选；ClassResponse 增 entry_year/status；
+- 流转服务 `app/org/academic_year.py`：`plan_rollover` 纯函数（校验 + 按原年级同时匹配，链式映射无级联）+ `execute_rollover`（dry_run / 幂等键批次行先行 / 按 id 集合应用 / 单条全量审计）；
+- 端点：`POST /school/classes/rollover`（dry_run 缺省 True fail-safe）；**学生转班端点 `POST /school/students/{id}/transfer`**（见偏差 1）；
+- 导入定位：`_locate_class` 加 `status='active'` 过滤 + 多命中 `CLASS_AMBIGUOUS` 行错误；
+- 裸 SQL 守卫：`app/org/academic_year.py` 豁免登记（上限 10→11）。
+
+**测试**：单元 12（规划分支全覆盖：正常升级/归档/先归档后升级/链式无级联/年份过滤/7 条拒绝路径）；BS-M2-06 全链路（三届建班→同届重名 409→entry_year 不可改 422→无权限 403→dry_run 预览不写库→执行→学生/任教/范围行**逐项不变量**→归档默认列表退出+显式可见→重复幂等键 409→流转审计→新届建班→留级转班→转入归档班 422）；存量用例更新（org_structure 造班补 entry_year/status、唯一约束用例改跨届语义、BS-M2-01/02 造班补 entry_year）。
+
+**实现期偏差/要点**：
+1. **学生转班能力缺口**：简报假设"沿用学生编辑"重指派——实现时发现 M2-ORG01 未交付学生编辑的分类能力（PUT students 仅身份证）。补建 `POST /school/students/{id}/transfer`（service.update_student_class：目标班存在且活跃校验、同班 no-op、审计 `org.student.transferred`），与"转班=个体操作不混批量流转"的确认口径一致；
+2. **Pydantic 未知字段陷阱**：ClassUpdateRequest 原无 entry_year 字段时 PUT 携带该键被静默丢弃、守卫不触发——模型显式增字段（仅拦截用）+ 路由 422，并有 BS 用例钉住；
+3. **导入定位歧义防线**：留届场景下两个活跃班可同（当前年级，班名）——定位加活跃过滤 + 多命中 CLASS_AMBIGUOUS 结构化行错误；
+4. `grade` 列名不改、语义改当前年级（避免无谓的重命名迁移面）；迁移 entry_year 存量回填 2024（测试库无生产语义）；
+5. 规划/执行分离与 dry_run 缺省 True：预览清单带入学年份是防"先建新届再流转误伤"的主防线，幂等键是数据库兜底。
+
+## 10. 独立审查记录（2026-10-25）
+
+- **第一轮：FAIL——Major 1 + Minor 5**。Major：归档态未回头收口既有班级写路径（建学生/排课可写归档班、归档班可硬删、历史 grade/name 可改写）。
+  修复：新增 `_require_active_class` 统一探针（create_student / create_assignment 归档封闭 422 `CLASS_ARCHIVED`）；`delete_class` 归档拒删 409 `ORG_CLASS_ARCHIVED`；`update_class` 对归档行禁改 grade/name（422），班主任/辅导员档案纠错仍可（BS 断言钉住）。
+- Minor 处置：① 不同幂等键并发分歧——加租户级 `pg_advisory_xact_lock` 串行化，残余风险登记 **TD-182**；② rollover 补 `_require_school_scope`（与 list_classes 对称，class 范围角色不得执行全校流转）；③ transfer 端点与审计动作回写 design.md、handoff/README 随提交更新；④ "中途失败全回滚"补测试（注入审计故障 → 班级与批次行零残留）；⑤ archive_grades 元素加 1~16 长度约束；⑥ 重放区分性错误码**不采纳**（幂等键 409 语义已足，避免错误码面膨胀）。
+- 复测：BS-M2-06 两用例 14 passed（含新增归档封闭与回滚断言）；受影响集成/全量见提交前门禁。
+- **第二轮（复审）：见 review-log**。

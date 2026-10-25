@@ -93,8 +93,9 @@ async def _insert(engine: AsyncEngine, sql: str, params: dict[str, Any]) -> tupl
 
 
 _CLASS_SQL = (
-    "insert into classes (tenant_id, grade, name, head_teacher_id, counselor_id) "
-    "values (:tenant_id, :grade, :name, :head_teacher_id, :counselor_id) returning id::text"
+    "insert into classes (tenant_id, entry_year, grade, name, status, head_teacher_id, counselor_id) "
+    "values (:tenant_id, :entry_year, :grade, :name, 'active', :head_teacher_id, :counselor_id) "
+    "returning id::text"
 )
 
 
@@ -122,7 +123,7 @@ _USER_SQL = (
 
 
 async def test_class_unique_constraint(clean_db: AsyncEngine) -> None:
-    """同租户同年级同名班级唯一（服务层 409 语义的数据库兜底）。"""
+    """同租户同届（入学年份）同名班级唯一；跨届同名共存（ORG-06 唯一键切换）。"""
 
     _tenant, head_user = await _insert(
         clean_db, _USER_SQL, {"user_type": "teacher", "login_id": "it-head", "name": "班主任"}
@@ -131,15 +132,42 @@ async def test_class_unique_constraint(clean_db: AsyncEngine) -> None:
     await _insert(
         clean_db,
         _CLASS_SQL,
-        {"grade": "2026级", "name": "1班", "head_teacher_id": head_user, "counselor_id": None},
+        {
+            "entry_year": 2026,
+            "grade": "2026级",
+            "name": "1班",
+            "head_teacher_id": head_user,
+            "counselor_id": None,
+        },
     )
 
+    # 同届同名 → IntegrityError（uq_classes_tenant_entry_year_name 兜底）
     with pytest.raises(IntegrityError):
         await _insert(
             clean_db,
             _CLASS_SQL,
-            {"grade": "2026级", "name": "1班", "head_teacher_id": None, "counselor_id": None},
+            {
+                "entry_year": 2026,
+                "grade": "2026级",
+                "name": "1班",
+                "head_teacher_id": None,
+                "counselor_id": None,
+            },
         )
+
+    # 跨届同名（次年新高一也叫 1班）→ 可建；当前年级允许同名（不设唯一，简报 D1）
+    _, cross_cohort = await _insert(
+        clean_db,
+        _CLASS_SQL,
+        {
+            "entry_year": 2027,
+            "grade": "2026级",
+            "name": "1班",
+            "head_teacher_id": None,
+            "counselor_id": None,
+        },
+    )
+    assert cross_cohort
 
 
 async def test_teacher_student_one_to_one(clean_db: AsyncEngine) -> None:
@@ -169,7 +197,13 @@ async def test_class_scope_partial_unique_index(clean_db: AsyncEngine) -> None:
     _, class_id = await _insert(
         clean_db,
         _CLASS_SQL,
-        {"grade": "2026级", "name": "唯一班", "head_teacher_id": None, "counselor_id": None},
+        {
+            "entry_year": 2026,
+            "grade": "2026级",
+            "name": "唯一班",
+            "head_teacher_id": None,
+            "counselor_id": None,
+        },
     )
 
     row_sql = (
@@ -198,6 +232,7 @@ async def test_class_scope_sync_follows_relations(clean_db: AsyncEngine) -> None
         clean_db,
         _CLASS_SQL,
         {
+            "entry_year": 2026,
             "grade": "2026级",
             "name": "同步班",
             "head_teacher_id": teacher_user,
@@ -208,7 +243,13 @@ async def test_class_scope_sync_follows_relations(clean_db: AsyncEngine) -> None
     _, class2_id = await _insert(
         clean_db,
         _CLASS_SQL,
-        {"grade": "2026级", "name": "二班", "head_teacher_id": None, "counselor_id": other_user},
+        {
+            "entry_year": 2026,
+            "grade": "2026级",
+            "name": "二班",
+            "head_teacher_id": None,
+            "counselor_id": other_user,
+        },
     )
 
     _, course_id = await _insert(clean_db, _COURSE_SQL, {"code": "MATH", "name": "数学"})
@@ -310,8 +351,8 @@ async def test_new_tables_rls_isolation(clean_db: AsyncEngine) -> None:
 
         await session.execute(
             text(
-                "insert into classes (tenant_id, grade, name) "
-                "values (:tenant_id, '2026级', 'A校班级')"
+                "insert into classes (tenant_id, entry_year, grade, name, status) "
+                "values (:tenant_id, 2026, '2026级', 'A校班级', 'active')"
             ),
             {"tenant_id": tenant_a},
         )
@@ -355,7 +396,11 @@ async def test_cursor_pagination(clean_db: AsyncEngine) -> None:
 
     for i in range(total):
         async with factory() as session, session.begin():
-            session.add(OrgClass(tenant_id=tenant_id, grade="2026级", name=f"分页班{i:02d}"))
+            session.add(
+                OrgClass(
+                    tenant_id=tenant_id, entry_year=2026, grade="2026级", name=f"分页班{i:02d}"
+                )
+            )
 
     async with factory() as session, session.begin():
         repository: TenantScopedRepository[OrgClass] = TenantScopedRepository(
