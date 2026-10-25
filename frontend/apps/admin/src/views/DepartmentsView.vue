@@ -82,7 +82,9 @@ async function save(): Promise<void> {
 
 async function toggleStatus(row: DepartmentView): Promise<void> {
   try {
-    await orgApi.updateDepartment(row.id, { status: row.status === "active" ? "disabled" : "active" });
+    await orgApi.updateDepartment(row.id, {
+      status: row.status === "active" ? "disabled" : "active",
+    });
     await load();
   } catch (error) {
     ElMessage.error(toUserMessage(error, "操作失败"));
@@ -90,11 +92,9 @@ async function toggleStatus(row: DepartmentView): Promise<void> {
 }
 
 async function remove(row: DepartmentView): Promise<void> {
-  const confirmed = await ElMessageBox.confirm(
-    `确认删除部门「${row.name}」？`,
-    "删除确认",
-    { type: "warning" },
-  ).catch(() => false);
+  const confirmed = await ElMessageBox.confirm(`确认删除部门「${row.name}」？`, "删除确认", {
+    type: "warning",
+  }).catch(() => false);
   if (!confirmed) return;
   try {
     await orgApi.deleteDepartment(row.id);
@@ -112,7 +112,9 @@ onMounted(() => {
 
 <template>
   <div class="toolbar">
-    <el-button type="primary" data-testid="dept-create" @click="openCreate(null)">新建根部门</el-button>
+    <el-button type="primary" data-testid="dept-create" @click="openCreate(null)"
+      >新建根部门</el-button
+    >
   </div>
   <el-tree
     v-loading="loading"
@@ -126,11 +128,19 @@ onMounted(() => {
       <div class="node">
         <span>{{ data.label }}</span>
         <span class="actions">
-          <el-button link type="primary" @click.stop="openCreate(data.raw as DepartmentView)">+ 子部门</el-button>
-          <el-button link :type="data.status === 'active' ? 'warning' : 'success'" @click.stop="toggleStatus(data.raw as DepartmentView)">
+          <el-button link type="primary" @click.stop="openCreate(data.raw as DepartmentView)"
+            >+ 子部门</el-button
+          >
+          <el-button
+            link
+            :type="data.status === 'active' ? 'warning' : 'success'"
+            @click.stop="toggleStatus(data.raw as DepartmentView)"
+          >
             {{ data.status === "active" ? "停用" : "启用" }}
           </el-button>
-          <el-button link type="danger" @click.stop="remove(data.raw as DepartmentView)">删除</el-button>
+          <el-button link type="danger" @click.stop="remove(data.raw as DepartmentView)"
+            >删除</el-button
+          >
         </span>
       </div>
     </template>
@@ -151,7 +161,9 @@ onMounted(() => {
     </el-form>
     <template #footer>
       <el-button @click="dialogVisible = false">取消</el-button>
-      <el-button type="primary" data-testid="dept-submit" :loading="saving" @click="save">创建</el-button>
+      <el-button type="primary" data-testid="dept-submit" :loading="saving" @click="save"
+        >创建</el-button
+      >
     </template>
   </el-dialog>
 </template>

@@ -4,9 +4,12 @@ import { createImportsApi } from "./imports";
 
 function sessionStub(
   handler: (path: string, init?: RequestInit) => { status?: number; body?: unknown } | undefined,
-): { session: { request: <T>(path: string, init?: RequestInit) => Promise<T> }; calls: { path: string; init?: RequestInit }[] } {
+): {
+  session: { request: <T>(path: string, init?: RequestInit) => Promise<T> };
+  calls: { path: string; init?: RequestInit }[];
+} {
   const calls: { path: string; init?: RequestInit }[] = [];
-  const request = vi.fn(async <T,>(path: string, init?: RequestInit): Promise<T> => {
+  const request = vi.fn(async <T>(path: string, init?: RequestInit): Promise<T> => {
     calls.push({ path, init });
     const scripted = handler(path, init);
     if (scripted?.status !== undefined && scripted.status >= 400) {
@@ -14,7 +17,10 @@ function sessionStub(
     }
     return (scripted?.body ?? {}) as T;
   });
-  return { session: { request: request as <T>(path: string, init?: RequestInit) => Promise<T> }, calls };
+  return {
+    session: { request: request as <T>(path: string, init?: RequestInit) => Promise<T> },
+    calls,
+  };
 }
 
 const JOB = {
@@ -62,7 +68,9 @@ describe("createImportsApi", () => {
   });
 
   it("retry 返回派生引用（source_job_id/job_id，非 job 本体——与后端 ImportRetryResponse 一致）", async () => {
-    const { session, calls } = sessionStub(() => ({ body: { source_job_id: "j-1", job_id: "j-2" } }));
+    const { session, calls } = sessionStub(() => ({
+      body: { source_job_id: "j-1", job_id: "j-2" },
+    }));
     const ref = await createImportsApi(session).retry("j-1");
     expect(calls[0].path).toBe("/api/v1/school/imports/j-1/retry");
     expect(calls[0].init?.method).toBe("POST");

@@ -77,7 +77,13 @@ async function onView(): Promise<void> {
     </el-form>
     <template #footer>
       <el-button @click="visible = false">关闭</el-button>
-      <el-button type="primary" data-testid="id-card-submit" :disabled="!reasonValid" :loading="loading" @click="onView">
+      <el-button
+        type="primary"
+        data-testid="id-card-submit"
+        :disabled="!reasonValid"
+        :loading="loading"
+        @click="onView"
+      >
         查看明文
       </el-button>
     </template>

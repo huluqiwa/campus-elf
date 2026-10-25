@@ -169,7 +169,9 @@ export interface IdCardFull {
 }
 
 /** 查询参数：跳过 undefined/null，保持 URL 干净（利于 mock 断言与缓存）。 */
-export function buildQuery(params: Record<string, string | number | boolean | undefined | null>): string {
+export function buildQuery(
+  params: Record<string, string | number | boolean | undefined | null>,
+): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null) continue;
@@ -271,7 +273,11 @@ export function createOrgApi(session: { request: AuthSessionRequest }): OrgApi {
     },
 
     async listAssignments(query = {}) {
-      const qs = buildQuery({ limit: query.limit, cursor: query.cursor, teacher_id: query.teacherId });
+      const qs = buildQuery({
+        limit: query.limit,
+        cursor: query.cursor,
+        teacher_id: query.teacherId,
+      });
       return request<Page<AssignmentView>>(`/api/v1/school/teacher-assignments${qs}`);
     },
     async createAssignment(input) {
@@ -321,7 +327,11 @@ export function createOrgApi(session: { request: AuthSessionRequest }): OrgApi {
     },
 
     async listPersonnel(query = {}) {
-      const qs = buildQuery({ limit: query.limit, offset: query.offset, user_type: query.userType });
+      const qs = buildQuery({
+        limit: query.limit,
+        offset: query.offset,
+        user_type: query.userType,
+      });
       return request<PersonnelView[]>(`/api/v1/school/personnel${qs}`);
     },
   };

@@ -67,7 +67,11 @@ async function refresh(jobId: string): Promise<void> {
   try {
     const current = await importsApi.get(jobId);
     job.value = current;
-    if (current.status === "completed" || current.status === "completed_with_errors" || current.status === "failed") {
+    if (
+      current.status === "completed" ||
+      current.status === "completed_with_errors" ||
+      current.status === "failed"
+    ) {
       stopPolling();
       if (current.status !== "completed") {
         await loadErrors(jobId);
@@ -150,7 +154,9 @@ onBeforeUnmount(() => {
         </el-upload>
       </el-form-item>
       <el-form-item>
-        <el-button type="primary" data-testid="import-submit" :loading="uploading" @click="submit">上传并开始导入</el-button>
+        <el-button type="primary" data-testid="import-submit" :loading="uploading" @click="submit"
+          >上传并开始导入</el-button
+        >
       </el-form-item>
     </el-form>
   </el-card>
@@ -159,14 +165,19 @@ onBeforeUnmount(() => {
     <template #header>
       导入任务 {{ job.id }}（{{ job.type === "teachers" ? "教师" : "学生" }}）
     </template>
-    <el-progress :percentage="progressPercent()" :status="job.status === 'failed' ? 'exception' : undefined" />
+    <el-progress
+      :percentage="progressPercent()"
+      :status="job.status === 'failed' ? 'exception' : undefined"
+    />
     <el-descriptions :column="4" class="counters">
       <el-descriptions-item label="状态">
         <el-tag>{{ job.status }}</el-tag>
       </el-descriptions-item>
       <el-descriptions-item label="总数">{{ job.total_rows }}</el-descriptions-item>
       <el-descriptions-item label="成功">{{ job.success_rows }}</el-descriptions-item>
-      <el-descriptions-item label="失败/跳过">{{ job.failed_rows }} / {{ job.skipped_rows }}</el-descriptions-item>
+      <el-descriptions-item label="失败/跳过"
+        >{{ job.failed_rows }} / {{ job.skipped_rows }}</el-descriptions-item
+      >
     </el-descriptions>
     <p v-if="job.message" class="job-message">{{ job.message }}</p>
     <el-button v-if="canRetry()" type="warning" @click="retry">对失败行发起重试</el-button>

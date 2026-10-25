@@ -67,7 +67,9 @@ test("执行失败重试：幂等键跨重试稳定；重放返回 409 提示已
         contentType: "application/json",
         body: JSON.stringify({
           dry_run: true,
-          advanced: [{ id: "x", entry_year: 2025, name: "1班", from_grade: "高一", to_grade: "高二" }],
+          advanced: [
+            { id: "x", entry_year: 2025, name: "1班", from_grade: "高一", to_grade: "高二" },
+          ],
           archived: [],
           advanced_count: 1,
           archived_count: 0,
@@ -78,7 +80,11 @@ test("执行失败重试：幂等键跨重试稳定；重放返回 409 提示已
     executeCalls += 1;
     executedBodies.push(body);
     if (executeCalls === 1) {
-      return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ detail: "响应丢失" }) });
+      return route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "响应丢失" }),
+      });
     }
     if (executeCalls === 2) {
       return route.fulfill({

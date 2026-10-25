@@ -14,7 +14,9 @@ import IdCardViewDialog from "./IdCardViewDialog.vue";
 
 const auth = useAuthStore();
 /** TD-141：受控查看按钮仅对持有 sensitive.read 的角色渲染（真正的边界是后端 403）。 */
-const canViewIdCard = computed(() => auth.user?.permissions.includes("school.personnel.sensitive.read") ?? false);
+const canViewIdCard = computed(
+  () => auth.user?.permissions.includes("school.personnel.sensitive.read") ?? false,
+);
 
 const activeTab = ref<"teachers" | "students">("teachers");
 
@@ -41,7 +43,12 @@ const initialPassword = ref<string | null>(null);
 
 // ---- 学生建档 / 转班 ----
 const studentDialogVisible = ref(false);
-const studentForm = ref({ student_no: "", name: "", class_id: null as string | null, id_card_number: "" });
+const studentForm = ref({
+  student_no: "",
+  name: "",
+  class_id: null as string | null,
+  id_card_number: "",
+});
 const studentSaving = ref(false);
 const transferTarget = ref<StudentView | null>(null);
 const transferDialogVisible = ref(false);
@@ -201,9 +208,15 @@ onMounted(() => {
   <el-tabs v-model="activeTab">
     <el-tab-pane label="教师" name="teachers">
       <div class="toolbar">
-        <el-button type="primary" data-testid="teacher-create" @click="openTeacherDialog">教师建档</el-button>
-        <el-button :disabled="teacherPage() === 0" @click="loadTeachers(teacherPage() - 1)">上一页</el-button>
-        <el-button :disabled="teacherNextCursor === null" @click="loadTeachers(teacherPage() + 1)">下一页</el-button>
+        <el-button type="primary" data-testid="teacher-create" @click="openTeacherDialog"
+          >教师建档</el-button
+        >
+        <el-button :disabled="teacherPage() === 0" @click="loadTeachers(teacherPage() - 1)"
+          >上一页</el-button
+        >
+        <el-button :disabled="teacherNextCursor === null" @click="loadTeachers(teacherPage() + 1)"
+          >下一页</el-button
+        >
       </div>
       <el-table v-loading="teachersLoading" :data="teachers" data-testid="teacher-table">
         <el-table-column prop="employee_no" label="工号" width="120" />
@@ -214,7 +227,13 @@ onMounted(() => {
         <el-table-column prop="id_card_mask" label="身份证（掩码）" min-width="160" />
         <el-table-column label="操作" width="180">
           <template #default="{ row }">
-            <el-button v-if="canViewIdCard" link type="primary" @click="openIdCard(row as TeacherView)">查看身份证</el-button>
+            <el-button
+              v-if="canViewIdCard"
+              link
+              type="primary"
+              @click="openIdCard(row as TeacherView)"
+              >查看身份证</el-button
+            >
           </template>
         </el-table-column>
       </el-table>
@@ -222,9 +241,15 @@ onMounted(() => {
 
     <el-tab-pane label="学生" name="students">
       <div class="toolbar">
-        <el-button type="primary" data-testid="student-create" @click="openStudentDialog">学生建档</el-button>
-        <el-button :disabled="studentPage() === 0" @click="loadStudents(studentPage() - 1)">上一页</el-button>
-        <el-button :disabled="studentNextCursor === null" @click="loadStudents(studentPage() + 1)">下一页</el-button>
+        <el-button type="primary" data-testid="student-create" @click="openStudentDialog"
+          >学生建档</el-button
+        >
+        <el-button :disabled="studentPage() === 0" @click="loadStudents(studentPage() - 1)"
+          >上一页</el-button
+        >
+        <el-button :disabled="studentNextCursor === null" @click="loadStudents(studentPage() + 1)"
+          >下一页</el-button
+        >
       </div>
       <el-table v-loading="studentsLoading" :data="students" data-testid="student-table">
         <el-table-column prop="student_no" label="学号" width="120" />
@@ -237,8 +262,16 @@ onMounted(() => {
         <el-table-column prop="id_card_mask" label="身份证（掩码）" min-width="160" />
         <el-table-column label="操作" width="200">
           <template #default="{ row }">
-            <el-button v-if="canViewIdCard" link type="primary" @click="openIdCard(row as StudentView)">查看身份证</el-button>
-            <el-button link type="warning" @click="openTransfer(row as StudentView)">转班</el-button>
+            <el-button
+              v-if="canViewIdCard"
+              link
+              type="primary"
+              @click="openIdCard(row as StudentView)"
+              >查看身份证</el-button
+            >
+            <el-button link type="warning" @click="openTransfer(row as StudentView)"
+              >转班</el-button
+            >
           </template>
         </el-table-column>
       </el-table>
@@ -249,18 +282,33 @@ onMounted(() => {
   <el-dialog v-model="teacherDialogVisible" title="教师建档" width="440px">
     <el-form label-width="90px">
       <el-form-item label="工号" required>
-        <el-input v-model="teacherForm.employee_no" data-testid="teacher-employee-no" maxlength="32" placeholder="同时作为登录名" />
+        <el-input
+          v-model="teacherForm.employee_no"
+          data-testid="teacher-employee-no"
+          maxlength="32"
+          placeholder="同时作为登录名"
+        />
       </el-form-item>
       <el-form-item label="姓名" required>
         <el-input v-model="teacherForm.name" data-testid="teacher-name" maxlength="64" />
       </el-form-item>
       <el-form-item label="身份证号">
-        <el-input v-model="teacherForm.id_card_number" maxlength="20" placeholder="可选；18 位，落库即加密" />
+        <el-input
+          v-model="teacherForm.id_card_number"
+          maxlength="20"
+          placeholder="可选；18 位，落库即加密"
+        />
       </el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="teacherDialogVisible = false">取消</el-button>
-      <el-button type="primary" data-testid="teacher-submit" :loading="teacherSaving" @click="saveTeacher">创建</el-button>
+      <el-button
+        type="primary"
+        data-testid="teacher-submit"
+        :loading="teacherSaving"
+        @click="saveTeacher"
+        >创建</el-button
+      >
     </template>
   </el-dialog>
 
@@ -268,7 +316,12 @@ onMounted(() => {
   <el-dialog v-model="studentDialogVisible" title="学生建档" width="440px">
     <el-form label-width="90px">
       <el-form-item label="学号" required>
-        <el-input v-model="studentForm.student_no" data-testid="student-no" maxlength="32" placeholder="同时作为登录名" />
+        <el-input
+          v-model="studentForm.student_no"
+          data-testid="student-no"
+          maxlength="32"
+          placeholder="同时作为登录名"
+        />
       </el-form-item>
       <el-form-item label="姓名" required>
         <el-input v-model="studentForm.name" data-testid="student-name" maxlength="64" />
@@ -284,12 +337,22 @@ onMounted(() => {
         </el-select>
       </el-form-item>
       <el-form-item label="身份证号">
-        <el-input v-model="studentForm.id_card_number" maxlength="20" placeholder="可选；18 位，落库即加密" />
+        <el-input
+          v-model="studentForm.id_card_number"
+          maxlength="20"
+          placeholder="可选；18 位，落库即加密"
+        />
       </el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="studentDialogVisible = false">取消</el-button>
-      <el-button type="primary" data-testid="student-submit" :loading="studentSaving" @click="saveStudent">创建</el-button>
+      <el-button
+        type="primary"
+        data-testid="student-submit"
+        :loading="studentSaving"
+        @click="saveStudent"
+        >创建</el-button
+      >
     </template>
   </el-dialog>
 
@@ -312,7 +375,13 @@ onMounted(() => {
     </el-form>
     <template #footer>
       <el-button @click="transferDialogVisible = false">取消</el-button>
-      <el-button type="primary" data-testid="transfer-submit" :loading="transferSaving" @click="saveTransfer">确认转班</el-button>
+      <el-button
+        type="primary"
+        data-testid="transfer-submit"
+        :loading="transferSaving"
+        @click="saveTransfer"
+        >确认转班</el-button
+      >
     </template>
   </el-dialog>
 

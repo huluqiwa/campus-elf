@@ -80,7 +80,9 @@ export function createImportsApi(session: { request: AuthSessionRequest }): Impo
       if (query.limit !== undefined) search.set("limit", String(query.limit));
       if (query.cursor !== undefined) search.set("cursor", String(query.cursor));
       const qs = search.toString();
-      return request<ImportErrorsPage>(`/api/v1/school/imports/${jobId}/errors${qs ? `?${qs}` : ""}`);
+      return request<ImportErrorsPage>(
+        `/api/v1/school/imports/${jobId}/errors${qs ? `?${qs}` : ""}`,
+      );
     },
     async retry(jobId) {
       return request<ImportRetryRef>(`/api/v1/school/imports/${jobId}/retry`, jsonInit("POST", {}));

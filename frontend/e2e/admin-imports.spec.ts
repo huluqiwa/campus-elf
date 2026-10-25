@@ -48,7 +48,14 @@ test("上传成功：轮询到 completed 展示计数；失败行展示错误码
       "**/api/v1/school/imports/j-1/errors*": {
         status: 200,
         body: {
-          items: [{ row_no: 2, field: "employee_no", error_code: "ORG_LOGIN_TAKEN", message: "登录名已被占用" }],
+          items: [
+            {
+              row_no: 2,
+              field: "employee_no",
+              error_code: "ORG_LOGIN_TAKEN",
+              message: "登录名已被占用",
+            },
+          ],
           next_cursor: null,
         },
       },

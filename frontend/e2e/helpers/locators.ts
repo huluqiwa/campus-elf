@@ -7,7 +7,9 @@ import type { Locator, Page } from "@playwright/test";
  * 因此用 "容器内的 input" 或 "input 自身" 两种选择器并联。
  */
 export function field(page: Page, testId: string): Locator {
-  return page.locator(
-    `[data-testid="${testId}"] input, [data-testid="${testId}"] textarea, input[data-testid="${testId}"], textarea[data-testid="${testId}"]`,
-  ).first();
+  return page
+    .locator(
+      `[data-testid="${testId}"] input, [data-testid="${testId}"] textarea, input[data-testid="${testId}"], textarea[data-testid="${testId}"]`,
+    )
+    .first();
 }

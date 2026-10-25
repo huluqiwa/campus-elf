@@ -1,12 +1,7 @@
 <script setup lang="ts">
 /** 班级与课程（M2-UI1）：建班（入学年份+当前年级）、指派班主任/辅导员、排课；归档届显式可见。 */
 import { toUserMessage } from "@campus-elf/api-client";
-import type {
-  AssignmentView,
-  ClassView,
-  CourseView,
-  TeacherView,
-} from "@campus-elf/api-client";
+import type { AssignmentView, ClassView, CourseView, TeacherView } from "@campus-elf/api-client";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { onMounted, ref } from "vue";
 
@@ -183,7 +178,9 @@ onMounted(() => {
   <el-tabs v-model="activeTab">
     <el-tab-pane label="班级" name="classes">
       <div class="toolbar">
-        <el-button type="primary" data-testid="class-create" @click="openCreateClass">新建班级</el-button>
+        <el-button type="primary" data-testid="class-create" @click="openCreateClass"
+          >新建班级</el-button
+        >
         <el-switch v-model="includeArchived" active-text="显示归档届" @change="loadAll" />
       </div>
       <el-table v-loading="classesLoading" :data="classes" data-testid="class-table">
@@ -206,7 +203,13 @@ onMounted(() => {
         <el-table-column label="操作" width="140">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEditClass(row as ClassView)">编辑</el-button>
-            <el-button v-if="row.status === 'active'" link type="danger" @click="removeClass(row as ClassView)">删除</el-button>
+            <el-button
+              v-if="row.status === 'active'"
+              link
+              type="danger"
+              @click="removeClass(row as ClassView)"
+              >删除</el-button
+            >
           </template>
         </el-table-column>
       </el-table>
@@ -232,7 +235,8 @@ onMounted(() => {
         </el-table-column>
         <el-table-column label="班级" min-width="140">
           <template #default="{ row }">
-            {{ classes.find((c) => c.id === row.class_id)?.grade }} {{ classes.find((c) => c.id === row.class_id)?.name }}
+            {{ classes.find((c) => c.id === row.class_id)?.grade }}
+            {{ classes.find((c) => c.id === row.class_id)?.name }}
           </template>
         </el-table-column>
         <el-table-column label="课程" width="140">
@@ -260,25 +264,47 @@ onMounted(() => {
         <span v-if="classEditingId !== null" class="hint">届身份，建档后不可改</span>
       </el-form-item>
       <el-form-item label="当前年级" required>
-        <el-input v-model="classForm.grade" data-testid="class-grade" maxlength="16" placeholder="如：高一 / 2024级 / 大一" />
+        <el-input
+          v-model="classForm.grade"
+          data-testid="class-grade"
+          maxlength="16"
+          placeholder="如：高一 / 2024级 / 大一"
+        />
       </el-form-item>
       <el-form-item label="班名" required>
-        <el-input v-model="classForm.name" data-testid="class-name" maxlength="64" placeholder="同届内唯一" />
+        <el-input
+          v-model="classForm.name"
+          data-testid="class-name"
+          maxlength="64"
+          placeholder="同届内唯一"
+        />
       </el-form-item>
       <el-form-item label="班主任">
         <el-select v-model="classForm.head_teacher_id" clearable placeholder="可选">
-          <el-option v-for="t in teachers" :key="t.id" :value="t.id" :label="`${t.name}（${t.employee_no}）`" />
+          <el-option
+            v-for="t in teachers"
+            :key="t.id"
+            :value="t.id"
+            :label="`${t.name}（${t.employee_no}）`"
+          />
         </el-select>
       </el-form-item>
       <el-form-item label="辅导员">
         <el-select v-model="classForm.counselor_id" clearable placeholder="可选">
-          <el-option v-for="t in teachers" :key="t.id" :value="t.id" :label="`${t.name}（${t.employee_no}）`" />
+          <el-option
+            v-for="t in teachers"
+            :key="t.id"
+            :value="t.id"
+            :label="`${t.name}（${t.employee_no}）`"
+          />
         </el-select>
       </el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="classDialogVisible = false">取消</el-button>
-      <el-button type="primary" data-testid="class-submit" :loading="classSaving" @click="saveClass">保存</el-button>
+      <el-button type="primary" data-testid="class-submit" :loading="classSaving" @click="saveClass"
+        >保存</el-button
+      >
     </template>
   </el-dialog>
 
@@ -303,7 +329,12 @@ onMounted(() => {
     <el-form label-width="90px">
       <el-form-item label="教师" required>
         <el-select v-model="assignmentForm.teacher_id">
-          <el-option v-for="t in teachers" :key="t.id" :value="t.id" :label="`${t.name}（${t.employee_no}）`" />
+          <el-option
+            v-for="t in teachers"
+            :key="t.id"
+            :value="t.id"
+            :label="`${t.name}（${t.employee_no}）`"
+          />
         </el-select>
       </el-form-item>
       <el-form-item label="班级" required>
@@ -327,7 +358,9 @@ onMounted(() => {
     </el-form>
     <template #footer>
       <el-button @click="assignmentDialogVisible = false">取消</el-button>
-      <el-button type="primary" :loading="assignmentSaving" @click="saveAssignment">确认排课</el-button>
+      <el-button type="primary" :loading="assignmentSaving" @click="saveAssignment"
+        >确认排课</el-button
+      >
     </template>
   </el-dialog>
 </template>

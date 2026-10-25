@@ -5,9 +5,12 @@ import { buildQuery, createOrgApi } from "./org";
 /** 会话请求替身：记录调用并按路径/方法返回脚本化结果。 */
 function sessionStub(
   handler: (path: string, init?: RequestInit) => { status?: number; body?: unknown } | undefined,
-): { session: { request: <T>(path: string, init?: RequestInit) => Promise<T> }; calls: { path: string; init?: RequestInit }[] } {
+): {
+  session: { request: <T>(path: string, init?: RequestInit) => Promise<T> };
+  calls: { path: string; init?: RequestInit }[];
+} {
   const calls: { path: string; init?: RequestInit }[] = [];
-  const request = vi.fn(async <T,>(path: string, init?: RequestInit): Promise<T> => {
+  const request = vi.fn(async <T>(path: string, init?: RequestInit): Promise<T> => {
     calls.push({ path, init });
     const scripted = handler(path, init);
     if (scripted?.status !== undefined && scripted.status >= 400) {
@@ -15,7 +18,10 @@ function sessionStub(
     }
     return (scripted?.body ?? {}) as T;
   });
-  return { session: { request: request as <T>(path: string, init?: RequestInit) => Promise<T> }, calls };
+  return {
+    session: { request: request as <T>(path: string, init?: RequestInit) => Promise<T> },
+    calls,
+  };
 }
 
 const CLASS_VIEW = {
@@ -37,9 +43,18 @@ describe("buildQuery", () => {
 
 describe("createOrgApi", () => {
   it("listClasses 透传 cursor/limit/entry_year/include_archived 查询参数", async () => {
-    const { session, calls } = sessionStub(() => ({ body: { items: [CLASS_VIEW], next_cursor: null } }));
-    await createOrgApi(session).listClasses({ limit: 20, cursor: "cur-1", entryYear: 2025, includeArchived: true });
-    expect(calls[0].path).toBe("/api/v1/school/classes?limit=20&cursor=cur-1&entry_year=2025&include_archived=true");
+    const { session, calls } = sessionStub(() => ({
+      body: { items: [CLASS_VIEW], next_cursor: null },
+    }));
+    await createOrgApi(session).listClasses({
+      limit: 20,
+      cursor: "cur-1",
+      entryYear: 2025,
+      includeArchived: true,
+    });
+    expect(calls[0].path).toBe(
+      "/api/v1/school/classes?limit=20&cursor=cur-1&entry_year=2025&include_archived=true",
+    );
   });
 
   it("createClass 以 JSON POST 提交并携带 Content-Type", async () => {
@@ -58,12 +73,22 @@ describe("createOrgApi", () => {
     await createOrgApi(session).updateClass("c-1", { grade: "高二" });
     await createOrgApi(session).deleteClass("c-1");
     expect(calls[0]).toMatchObject({ path: "/api/v1/school/classes/c-1", init: { method: "PUT" } });
-    expect(calls[1]).toMatchObject({ path: "/api/v1/school/classes/c-1", init: { method: "DELETE" } });
+    expect(calls[1]).toMatchObject({
+      path: "/api/v1/school/classes/c-1",
+      init: { method: "DELETE" },
+    });
   });
 
   it("rollover 原样提交映射与幂等键，返回影响清单", async () => {
     const { session, calls } = sessionStub(() => ({
-      body: { dry_run: false, advanced: [], archived: [], advanced_count: 0, archived_count: 0, rollover_id: "r-1" },
+      body: {
+        dry_run: false,
+        advanced: [],
+        archived: [],
+        advanced_count: 0,
+        archived_count: 0,
+        rollover_id: "r-1",
+      },
     }));
     const input = {
       advances: [{ from_grade: "高一", to_grade: "高二", entry_year: 2025 }],
@@ -85,7 +110,9 @@ describe("createOrgApi", () => {
   });
 
   it("readIdCard 走 POST 且理由在请求体（不进 URL）", async () => {
-    const { session, calls } = sessionStub(() => ({ body: { number: "110101199003077758", mask: "110***********7758" } }));
+    const { session, calls } = sessionStub(() => ({
+      body: { number: "110101199003077758", mask: "110***********7758" },
+    }));
     await createOrgApi(session).readIdCard("p-1", "医保办理需要查看完整号码");
     expect(calls[0].path).toBe("/api/v1/school/personnel/p-1/id-card");
     expect(calls[0].init?.method).toBe("POST");
@@ -100,7 +127,11 @@ describe("createOrgApi", () => {
   });
 
   it("listDepartments 返回数组（整树扁平结构）", async () => {
-    const { session } = sessionStub(() => ({ body: [{ id: "d-1", parent_id: null, name: "教务处", code: null, path: "/d-1", status: "active" }] }));
+    const { session } = sessionStub(() => ({
+      body: [
+        { id: "d-1", parent_id: null, name: "教务处", code: null, path: "/d-1", status: "active" },
+      ],
+    }));
     const tree = await createOrgApi(session).listDepartments();
     expect(tree).toHaveLength(1);
     expect(tree[0].name).toBe("教务处");
@@ -111,7 +142,11 @@ describe("createOrgApi", () => {
     const request = vi.fn(async () => {
       throw failure;
     });
-    const api = createOrgApi({ request: request as <T>(path: string, init?: RequestInit) => Promise<T> });
-    await expect(api.createClass({ entry_year: 2025, grade: "高一", name: "1班" })).rejects.toThrow("HTTP 409");
+    const api = createOrgApi({
+      request: request as <T>(path: string, init?: RequestInit) => Promise<T>,
+    });
+    await expect(api.createClass({ entry_year: 2025, grade: "高一", name: "1班" })).rejects.toThrow(
+      "HTTP 409",
+    );
   });
 });

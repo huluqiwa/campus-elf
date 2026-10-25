@@ -76,7 +76,12 @@ export const router = createRouter({
         },
       ],
     },
-    { path: "/forbidden", name: "forbidden", component: ForbiddenView, meta: { requiresAuth: true } },
+    {
+      path: "/forbidden",
+      name: "forbidden",
+      component: ForbiddenView,
+      meta: { requiresAuth: true },
+    },
   ],
 });
 

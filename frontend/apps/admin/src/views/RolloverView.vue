@@ -85,7 +85,10 @@ async function execute(): Promise<void> {
       idempotency_key: idempotencyKey.value,
       dry_run: false,
     });
-    executed.value = { advanced_count: result.advanced_count, archived_count: result.archived_count };
+    executed.value = {
+      advanced_count: result.advanced_count,
+      archived_count: result.archived_count,
+    };
     step.value = 2;
   } catch (error) {
     ElMessage.error(toUserMessage(error, "执行失败（重复提交会提示已执行过）"));
@@ -116,9 +119,21 @@ function reset(): void {
   <div v-if="step === 0">
     <h4>升年级映射</h4>
     <div v-for="(item, index) in advances" :key="index" class="mapping-row">
-      <el-input v-model="item.from_grade" data-testid="mapping-from-0" placeholder="当前年级（如：高一）" maxlength="16" style="width: 180px" />
+      <el-input
+        v-model="item.from_grade"
+        data-testid="mapping-from-0"
+        placeholder="当前年级（如：高一）"
+        maxlength="16"
+        style="width: 180px"
+      />
       <span class="arrow">→</span>
-      <el-input v-model="item.to_grade" data-testid="mapping-to-0" placeholder="新年级（如：高二）" maxlength="16" style="width: 180px" />
+      <el-input
+        v-model="item.to_grade"
+        data-testid="mapping-to-0"
+        placeholder="新年级（如：高二）"
+        maxlength="16"
+        style="width: 180px"
+      />
       <el-input-number
         v-model="item.entry_year"
         :min="1970"
@@ -126,7 +141,9 @@ function reset(): void {
         placeholder="仅升某届"
         style="width: 150px"
       />
-      <el-button link type="danger" :disabled="advances.length === 1" @click="removeAdvance(index)">移除</el-button>
+      <el-button link type="danger" :disabled="advances.length === 1" @click="removeAdvance(index)"
+        >移除</el-button
+      >
     </div>
     <el-button link type="primary" @click="addAdvance">+ 添加映射</el-button>
     <div v-if="mappingError" data-testid="mapping-error">
@@ -152,7 +169,13 @@ function reset(): void {
     />
 
     <div class="footer">
-      <el-button type="primary" data-testid="rollover-preview" :disabled="!mappingValid" :loading="previewLoading" @click="goPreview">
+      <el-button
+        type="primary"
+        data-testid="rollover-preview"
+        :disabled="!mappingValid"
+        :loading="previewLoading"
+        @click="goPreview"
+      >
         预览影响面
       </el-button>
     </div>
@@ -161,14 +184,22 @@ function reset(): void {
   <!-- 步骤 2：预览核对 -->
   <div v-else-if="step === 1">
     <h4>将升年级（{{ preview?.advanced.length ?? 0 }} 个班）</h4>
-    <el-table :data="preview?.advanced ?? []" data-testid="rollover-preview-advanced" max-height="300">
+    <el-table
+      :data="preview?.advanced ?? []"
+      data-testid="rollover-preview-advanced"
+      max-height="300"
+    >
       <el-table-column prop="entry_year" label="入学年份" width="110" />
       <el-table-column prop="name" label="班名" width="120" />
       <el-table-column prop="from_grade" label="当前年级" width="110" />
       <el-table-column prop="to_grade" label="将变为" width="110" />
     </el-table>
     <h4 class="section">将归档（{{ preview?.archived.length ?? 0 }} 个班）</h4>
-    <el-table :data="preview?.archived ?? []" data-testid="rollover-preview-archived" max-height="240">
+    <el-table
+      :data="preview?.archived ?? []"
+      data-testid="rollover-preview-archived"
+      max-height="240"
+    >
       <el-table-column prop="entry_year" label="入学年份" width="110" />
       <el-table-column prop="name" label="班名" width="120" />
       <el-table-column prop="from_grade" label="毕业时年级" width="110" />
@@ -178,7 +209,13 @@ function reset(): void {
     </el-checkbox>
     <div class="footer">
       <el-button @click="step = 0">上一步</el-button>
-      <el-button type="danger" data-testid="rollover-execute" :disabled="!confirmed" :loading="executing" @click="execute">
+      <el-button
+        type="danger"
+        data-testid="rollover-execute"
+        :disabled="!confirmed"
+        :loading="executing"
+        @click="execute"
+      >
         确认执行
       </el-button>
     </div>
@@ -188,7 +225,8 @@ function reset(): void {
   <div v-else>
     <el-result icon="success" title="学年流转完成">
       <template #sub-title>
-        已升级 {{ executed?.advanced_count ?? 0 }} 个班，归档 {{ executed?.archived_count ?? 0 }} 个班。
+        已升级 {{ executed?.advanced_count ?? 0 }} 个班，归档
+        {{ executed?.archived_count ?? 0 }} 个班。
         学生、任教关系与权限范围未受影响；操作已写入审计。
       </template>
       <template #extra>

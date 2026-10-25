@@ -201,7 +201,6 @@ export async function mockOrgApi(page: Page, options: OrgMockOptions = {}): Prom
     );
   });
 
-
   await page.route("**/api/v1/school/courses**", (route) =>
     route.fulfill(
       json(200, {
@@ -301,9 +300,7 @@ export async function mockOrgApi(page: Page, options: OrgMockOptions = {}): Prom
     route.fulfill(json(200, { items: [], next_cursor: null })),
   );
   // 任意 job id 的进度查询（j-1 被 spec 覆盖项优先；j-2 等走此默认）
-  await page.route("**/api/v1/school/imports/*", (route) =>
-    route.fulfill(json(200, pendingJob)),
-  );
+  await page.route("**/api/v1/school/imports/*", (route) => route.fulfill(json(200, pendingJob)));
   await page.route("**/api/v1/school/imports", (route) => {
     if (route.request().method() === "POST") {
       return route.fulfill(json(201, { ...pendingJob, status: "pending" }));
