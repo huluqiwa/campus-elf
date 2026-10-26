@@ -42,6 +42,7 @@ export const useAuthStore = defineStore("auth", () => {
     tokens.value = next;
   };
 
+  /** 重新拉取 /auth/me 的库值权限（角色权限变更后菜单/守卫要跟随）。 */
   async function loadUser(): Promise<void> {
     try {
       user.value = await session.me();
@@ -181,6 +182,7 @@ export const useAuthStore = defineStore("auth", () => {
     mustChangePassword,
     mustEnrollMfa,
     isPlatform,
+    loadUser,
     loginTenant,
     loginPlatform,
     verifyMfa,

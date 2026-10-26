@@ -22,6 +22,7 @@ const MENU: MenuItem[] = [
   { index: "/departments", title: "部门树", permission: "school.personnel.view" },
   { index: "/imports", title: "批量导入", permission: "school.personnel.import" },
   { index: "/rollover", title: "学年流转", permission: "school.org.manage" },
+  { index: "/settings/roles", title: "角色权限", permission: "school.role.manage" },
 ];
 
 const auth = useAuthStore();

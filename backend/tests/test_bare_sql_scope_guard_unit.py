@@ -69,10 +69,27 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
             "规划为纯函数、执行按 id 集合应用；单班 CRUD 仍走仓储；行级影响全部进审计"
         )
     },
+    "app/rbac/admin.py": {
+        "*": (
+            "角色权限配置（M2-UI2 TD-137/143）：RBAC 映射与角色版本本身就是授权判据，"
+            "不能反过来被数据范围限制（与 `app/auth/principal.py` 同类）；"
+            "全部语句在租户连接内 + 逐条显式 `tenant_id = :tid`，RLS 为第二道防线；"
+            "改锁定角色/非法转授在独立事务写 denied 审计"
+        )
+    },
+    "app/personnel/mfa_admin.py": {
+        "*": (
+            "管理员 MFA 重置（M2-UI2 TD-126）：按 user_id/login_id 精确定位单个目标账号的"
+            "凭证与安全状态行（users/refresh_tokens/mfa_recovery_codes/user_roles），"
+            "属凭证操作而非业务数据读取（与 `app/auth/service.py` 同类）；"
+            "每条语句显式 `tenant_id`，租户连接 + RLS 双重隔离"
+        )
+    },
 }
 
 # 豁免条目上限：超过就说明"直连"正在变成常态，必须回头收敛到仓储。
-MAX_EXEMPT_MODULES = 11
+# M2-UI2 +2（rbac/admin.py 与 personnel/mfa_admin.py 都是授权判据/凭证本身，无仓储原语）。
+MAX_EXEMPT_MODULES = 13
 
 # 已知命名盲区（M2-ORG02 复审登记）：`sa_update(Model)` 形态不匹配下方 update 正则。
 # 当前两处使用（retry CAS / 看门狗收口）均为「行经仓储取得 + 条件更新」的正当路径且 RLS 生效；

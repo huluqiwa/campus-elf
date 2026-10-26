@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { AuthTokens, LoginOutcome } from "./auth";
-import { createAuthSession, passwordPolicyError, toUserMessage } from "./auth";
+import { ApiError, createAuthSession, passwordPolicyError, toUserMessage } from "./auth";
 
 /** 构造可编排的 fetch 替身：按 URL 后缀匹配处理器，并记录调用顺序。 */
 function fetchStub(
@@ -316,6 +316,29 @@ describe("createAuthSession（审查修复回归）", () => {
       "some-translated-message",
     );
     expect(onPasswordChangeRequired).toHaveBeenCalledOnce();
+  });
+
+  it("业务错误 detail 为对象时取 message，并保留状态码与 detail（M2-UI2 版本冲突）", async () => {
+    const fetchImpl = (async () =>
+      jsonResponse(409, {
+        detail: {
+          code: "ROLE_VERSION_CONFLICT",
+          message: "角色配置已被他人修改，请刷新后重试",
+          latest: { version: 4 },
+        },
+      })) as typeof fetch;
+    const session = createAuthSession({ baseUrl: "http://api", fetchImpl });
+
+    const error = await session
+      .request("/api/v1/school/roles/r-1/permissions", { method: "PUT" })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({
+      status: 409,
+      message: "角色配置已被他人修改，请刷新后重试",
+      detail: { code: "ROLE_VERSION_CONFLICT", latest: { version: 4 } },
+    });
   });
 
   it("令牌更新触发 onTokensRefreshed（供 UI 同步）", async () => {

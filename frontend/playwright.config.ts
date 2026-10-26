@@ -6,6 +6,9 @@ export default defineConfig({
   fullyParallel: true,
   // Windows 高并发下 Chrome 偶发导航 ERR_ABORTED；固定 2 与 CI runner 对齐
   workers: 2,
+  // 2 worker 并发时页面首屏（655KB 包 + 会话恢复）偶发超过默认 5s；
+  // 断言内容不变，只放宽等待，避免把渲染慢误判成失败。
+  expect: { timeout: 15_000 },
   reporter: [["list"]],
   use: {
     trace: "off",

@@ -183,7 +183,7 @@ LLM-05-CampusCompanionElf/
 | `platform_users` | id, account, email, password_hash, status, mfa_secret_enc, must_change_password, failed_login_attempts, failed_login_window_started_at, locked_until | SaaS 账号；不开放注册；邮箱用于密码重置 |
 | `platform_password_history` | id, platform_user_id, password_hash, created_at | 最近 5 次旧密码哈希（重置/改密拒绝复用） |
 | `platform_password_reset_tokens` | id, platform_user_id, token_hash, expires_at, used_at, created_at, request_ip_hash | 平台重置令牌（SHA-256，30 分钟单次使用） |
-| `platform_roles` / `platform_user_roles` | id, code/name; user_id, role_id | 平台角色 |
+| `platform_roles` / `platform_user_roles` | id, code/name, is_system, defaults_applied; user_id, role_id | 平台角色；`defaults_applied` 同 `roles`（TD-150），无版本锁（平台侧本期不开放管理界面） |
 | `configs` | id, scope(global/tenant/user), tenant_id, user_id, key, value_json, is_secret, version, status | 配置中心 |
 | `config_change_requests` | id, config_id, before_json, after_json, requester, approver, reason, status | 变更审批/双人确认 |
 | `model_configs` | id, provider, model_type, base_url, api_key_enc, model_name, tenant_id, status | 密钥信封加密 |
@@ -198,7 +198,7 @@ LLM-05-CampusCompanionElf/
 | `users` | id, tenant_id, user_type(student/teacher/school_admin), login_id, email, password_hash, status, must_change_password, mfa_secret_enc, last_login_at, token_version, failed_login_attempts, failed_login_window_started_at, locked_until | C 端/B 端共用身份；login_id=学号/工号；token_version 用于权限/状态变更时使现有会话失效；锁定字段供 AUTH-05 |
 | `password_history` | id, tenant_id, user_id, password_hash, created_at | 最近 5 次旧密码哈希；复合外键保证与用户同租 |
 | `password_reset_tokens` | id, tenant_id, user_id, token_hash, expires_at, used_at, created_at, request_ip_hash | 租户员工/校管邮件重置；只存 secret 的 SHA-256，30 分钟单次使用 |
-| `roles` | id, tenant_id, code, name, is_system | 校方角色 |
+| `roles` | id, tenant_id, code, name, is_system, **defaults_applied**, **version** | 校方角色；`defaults_applied`=出厂权限+范围是否已初始化（TD-150，同步判据），`version`=权限/范围全量替换的乐观锁（TD-137，M2-UI2 管理接口据此拒绝并发覆盖） |
 | `permissions` | id, code, module, action | 权限点 |
 | `role_permissions` | role_id, permission_id, tenant_id（复合外键保证与父行同租） | 角色-权限 |
 | `user_roles` | user_id, role_id, tenant_id（复合外键保证与父行同租） | 多角色 |
@@ -635,6 +635,53 @@ GET  /api/v1/platform/tenants/{id}/review-records
 | POST | `/school/feedback/{id}/handle` | 标记已处理 |
 | POST | `/school/feedback/{id}/reply` | 站内信答复 |
 
+### 5.12 角色权限配置与 MFA 重置（M2-UI2：TD-137/TD-143/TD-126）
+
+前缀 `/school`，全部走租户 realm。角色配置要求 `school.role.manage`，MFA 重置要求专用码 `school.personnel.mfa.reset`（D4）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/school/roles` | 角色列表：`id/code/name/is_system/editable/lock_reason/version/defaults_applied/user_count/permission_codes` |
+| GET | `/school/permissions` | 权限目录（`code/module/action/description`），前端按 `module` 分组渲染 |
+| PUT | `/school/roles/{role_id}/permissions` | 全量替换权限：`{permission_codes[], version, reason?}` → 最新 `RoleResponse` |
+| POST | `/school/roles/{role_id}/reset/preview` | 重置出厂影响面（只读，不写库、不审计） |
+| POST | `/school/roles/{role_id}/reset` | 执行重置：`{confirm_role_code, reason, version}` → 影响面；权限与数据范围一并重种（D3） |
+| GET | `/school/users/lookup?login_id=` | 按登录名精确定位用户：`{id, display_name, user_type, status, mfa_enabled, roles[]}`，不回显登录名/邮箱/身份证/MFA 字段 |
+| POST | `/school/users/{user_id}/mfa/reset` | 管理员重置 MFA：`{reason}`（≥10 字）→ 204；清绑定+清锁定+清恢复码+撤刷新令牌家族+`token_version+1`+清 Redis 会话 |
+
+**错误契约**：`detail = {code, message}`；`409` 版本冲突额外带 `detail.latest`（完整角色快照），前端据此刷新草稿而不是静默覆盖。
+
+| code | HTTP | 触发 |
+|---|---|---|
+| `ROLE_NOT_FOUND` | 404 | 角色不存在或不属于本校（不存在与跨租同形，不区分「没有」与「不是你的」） |
+| `USER_NOT_FOUND` | 404 | 登录名未命中或用户不在本校 |
+| `ROLE_IMMUTABLE` | 409 | 目标角色不可编辑：内置锁定角色（`school_super_admin`/`student`/`teacher`）给出 `lock_reason`；自定义角色提示待 M2-UI3 |
+| `ROLE_VERSION_CONFLICT` | 409 | 提交的 `version` 与库内不一致，附 `latest` |
+| `PERMISSION_CATALOG_OUT_OF_SYNC` | 409 | 权限目录与库里对不上（代码已加新码、同步未跑），提示先执行 RBAC 同步：全量替换=提交的合法码在 `permissions` 查不全（写前探针 + 写后条数复核）；重置=按 `rbac_builtin_role_defaults` 重种的实际条数少于定义表应有的条数 |
+| `ROLE_DEFAULTS_UNAVAILABLE` | 409 | 重置目标没有可用的出厂定义（预览与执行同判据），或出厂数据范围重种条数与定义表不一致 |
+| `MFA_NOT_ENABLED` | 409 | 目标用户未绑定 MFA |
+| `UNKNOWN_PERMISSION_CODE` | 422 | 目录外的码 |
+| `PLATFORM_PERMISSION_FORBIDDEN` | 422 | 试图授予平台 realm 的码 |
+| `ROLE_CODE_NOT_DELEGABLE` | 422 | 非超管主体试图把 `school.role.manage` 写进任一角色（见下） |
+| `ROLE_CODE_MISMATCH` | 422 | 重置时二次确认的角色编码与目标不一致 |
+| `RESET_REASON_REQUIRED` | 422 | 重置理由 <10 字（角色重置与 MFA 重置同一码） |
+| `LOGIN_ID_REQUIRED` | 422 | 定位时登录名为空 |
+| `MFA_SUPER_ADMIN_FORBIDDEN` | 403 | 试图重置校方超管的 MFA（防止把唯一能改角色的账号锁死；由平台 CLI 兜底） |
+| `REALM_MISMATCH` | 403 | 非租户上下文调用（平台 realm 不能用这套接口） |
+| `MFA_SELF_RESET` | 409 | 管理员重置自己的 MFA（应走恢复码/自助关闭，避免绕过双人确认） |
+
+**可编辑范围**：只有 `EDITABLE_ROLE_CODES = {school_admin, teacher_b_end}` 可改；超管角色的权限由代码目录全量驱动，界面只读并透出原因，自定义角色待 M2-UI3。
+
+- **预览/执行一致性与出厂不变量**：重置的重种语句按 `rbac_builtin_role_defaults`（和 `..._scope_defaults`）join `permissions` 写库，**当前**不可能静默少种，因为 `fk_rbac_builtin_role_defaults_permission_code_permissions` 与 `fk_role_permissions_permission_id_permissions` 都是 `ON DELETE CASCADE`——删一个 `permissions` 行会连带删掉引用它的出厂定义与所有租户映射，所以"库里缺码但定义表还引用它"这个状态在库层不存在。该结论依赖外键而不是代码，因此执行路径仍做一次**条数复核**（重种返回的行数 vs 定义表应有的行数，不符 → 409 `PERMISSION_CATALOG_OUT_OF_SYNC` 整体回滚）：将来谁把 FK 改成 RESTRICT/NO ACTION 或允许软删，这里会报错而不是"预览承诺 N 项、实种 N-k 项、还顺手把 `defaults_applied` 置真让同步永不回填"。全量替换侧同理，写前探针 + 写后条数复核两道。
+
+- **`school.role.manage` 不可转授**：持有者能给自己所在角色补任意 `school.*`/`campus.*` 码，等于无审计的本校超管；因此只有 `school_super_admin` 主体能把该码写进权限集合（`_assert_delegable` → 422 `ROLE_CODE_NOT_DELEGABLE` + 拒绝审计）。这是接口层规则，不改权限矩阵（`school_admin` 那一格仍是「△=可由超管按需授予」）。
+  - **禁令的边界（有意识接受的残余风险，TD-191）**：本条只封住**这个码本身的扩散**，不封住"已被授予 `role.manage` 的管理员给自己所在角色补其它敏感码"（如 `school.personnel.sensitive.read`/`school.personnel.delete`/`school.personnel.mfa.reset`）——他仍可提交一份不含 `role.manage` 的权限集通过校验。收窄方案（"提交的码 ⊆ 自己已有的码"或"禁止编辑自己所在角色"）都会把运营的正常配置流一起挡掉，故本期不做；代价是**授予 `role.manage` 事实上等同授予本校全部权限**，必须视为超管级动作：只有校方超管能授、每次授予都留 `school.role.permissions.updated` 审计（added 里出现该码即应可被复盘）。真正的收口要么拆成"只能授自己已有的码"（需先有多角色/按人授权模型，M2-UI3），要么给敏感码单独再加一层二次确认。
+
+
+**审计**：成功与拒绝都留痕。`school.role.permissions.updated` / `school.role.reset` / `school.user.lookup` / `school.user.mfa_reset`；拒绝侧 `school.role.permissions.denied` / `school.role.reset_denied` / `school.user.mfa_reset_denied` 以及登录名未命中的 `school.user.lookup`。拒绝审计写在**独立事务**（服务层在写事务内 raise 会连同样事务的审计一起回滚），`result="denied"`、`metadata` 只放判据码，不放登录名等敏感明文；审计写入失败只降级为 warning 日志，不改变拒绝结果。
+
+- **哪些拒绝算安全事件（M2-UI2 审查 m3 的处置）**：写侧（改权限、执行重置、MFA 重置）的**全部拒绝**都留痕，包括 404 `ROLE_NOT_FOUND`/`USER_NOT_FOUND`——"拿着别人家的 id 来改"本身就是越权探测信号，与 MFA 侧 `USER_NOT_FOUND` 同口径；`metadata.reason` 只记判据码，响应仍是与"不存在"同形的 404，不暴露对方租户。反之 `ROLE_VERSION_CONFLICT`/`ROLE_CODE_MISMATCH`/`RESET_REASON_REQUIRED` 是**用错了**而非越权，不落安全审计（否则正常配置流会淹掉真实信号）。只读的 `reset/preview` 不审计：它不改任何状态，且调用者已具备 `school.role.manage`；`user/lookup` 虽也只读却审计，因为它的入参是**登录名**——枚举本校账号是 MFA 重置链路的前置探测面。
+
 ---
 
 ## 6. Loop + Harness
@@ -794,9 +841,9 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 - 15 分钟内 5 次失败锁定 15 分钟，对外统一凭证错误文案并审计真实原因；密码重置清锁。MFA TOTP 可选（M1-D2）。
 - 角色/权限/数据范围矩阵见 `docs/rbac-matrix.md`。
 - **RBAC 落地口径（M1-E1，2026-10-23）**：
-  - 权限项目录跟代码走 — `app/rbac/catalog.py`（59 码，`module`/`action` 由码前缀派生），迁移 `e5f7a9c1b3d5` 经 `sync_rbac_definitions()` upsert 到 `permissions`；库里出现目录外的码 = 界面能勾但后端没有校验点的假开关，因此**新增权限项必须发版**。
+  - 权限项目录跟代码走 — `app/rbac/catalog.py`（60 码，`module`/`action` 由码前缀派生），迁移 `e5f7a9c1b3d5` 经 `sync_rbac_definitions()` upsert 到 `permissions`；库里出现目录外的码 = 界面能勾但后端没有校验点的假开关，因此**新增权限项必须发版**。
   - 角色↔权限映射与数据范围是**数据**：内置角色与其出厂默认放在两张代码持有的定义表 `rbac_builtin_roles`/`rbac_builtin_role_defaults`，新租户由 `provision_tenant()` 与平台审核 `review_registration_request()` 共同调用 `public.seed_builtin_roles(tenant_id)`（SECURITY DEFINER）写入；存量租户由同步补齐。运营在库里的增删改（界面 M2）不被同步覆盖。
-  - 补写分两种口径：超管（`school_super_admin`/`platform_super_admin`）**只补不撤**（语义是跟着目录全量走）；其他内置角色仅在**该角色尚无任何映射**时写默认（否则会把运营撤销的码塞回去）。见 `app/rbac/seeds.py:FULL_SCOPE_ROLES`。
+  - 补写分两种口径：超管（`school_super_admin`/`platform_super_admin`）**只补不撤**（语义是跟着目录全量走）；其他内置角色仅在 `roles.defaults_applied = false`（出厂默认尚未初始化）时写一次默认，之后运营主动清空也不会被补回（TD-150，2026-10-26 起取代原“角色尚无任何映射”判据）。见 `app/rbac/seeds.py:FULL_SCOPE_ROLES`。
   - 每个接口都必须声明权限：`require_permission(码, realm=…)`（realm 必传，权限目录是全局的，码本身不构成跨 realm 边界）；免鉴权路由进显式白名单并写理由，由 `tests/test_route_permission_manifest_unit.py` 钉住（忘挂鉴权、幽灵码、白名单过期或越类都会让 CI 红）。
   - **热更新语义**：`Principal` 每请求从库读角色与权限，映射改动下一次请求即生效，**不作废在线会话**（不递增 `token_version`；会话轮换只用于改密、MFA 变更、踢设备这类账号级安全事件）。代价是每请求数条小 join，基线由 `tests/integration/test_rbac_sql_baseline.py` 钉住（TD-100 目标 M6）。
   - **热更新的边界**：本条只说"权限判据每请求从库读"。踢下线/设备撤销走 Redis 会话标记，Redis 故障时对 `is_active` fail-open（`app/auth/revocation.py:165`），被踢设备最长仍可用 15 分钟（TD-111 → M6）；需要立即断开某账号时按账号级安全事件做会话轮换，不要指望收回权限能断会话。
@@ -807,6 +854,14 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
   - 出厂默认（超管/管理员 = `school`，其余租户角色 = `self`）声明在 `app/rbac/seeds.py:BuiltinRole.scopes`，落库到 `rbac_builtin_role_scope_defaults`；同步**只补"还没有任何范围行"的角色**，与权限映射同一"只补缺、不覆盖人工改动"口径；补完仍出现"整租户没有任何 `data_scopes` 行"时由 `sync_rbac_definitions()` 收尾的 `assert_every_tenant_has_scope()` fail-fast（TD-138）——宁可让迁移/同步失败，也不静默交付一个"接口全 200、列表全空"的租户。
   - 成本：带范围解析后一次带鉴权请求实测 6 条 SQL，上界仍钉 8 条（`tests/integration/test_rbac_sql_baseline.py`，TD-100 → M6 再评估缓存）。
   - 首个真实调用点：`GET /api/v1/school/personnel`(+`/{id}`，`school.personnel.view`)，响应形状按口径 ⑥ 固定为 `id/user_type/display_name/status/last_login_at/email_masked`——**不外发 `login_id`（学号/工号）**、明文邮箱、密码哈希与 MFA 字段；跨租通道复用同一形状。
+- **角色配置与管理员重置落地口径（M2-UI2，2026-10-26）**：
+  - 可编辑角色只有 `EDITABLE_ROLE_CODES = {school_admin, teacher_b_end}`；`school_super_admin`（权限随代码目录全量走）、`student`/`teacher`（内置数据范围由系统固定）与自定义角色（待 M2-UI3）一律 `editable=false` + `lock_reason`，接口侧 409 兜底，前端禁用只是 UX。
+  - **`school.role.manage` 不可转授**：持有者能给自己所在角色补任意 `school.*`/`campus.*` 码，等于无审计的本校超管；因此只有 `school_super_admin` 主体能把该码写进权限集合（`_assert_delegable` → 422 `ROLE_CODE_NOT_DELEGABLE` + 拒绝审计）。这是接口层规则，不改权限矩阵。
+  - **禁令的边界（有意识接受的残余风险，TD-191）**：本条只封住**这个码本身的扩散**，不封住"已被授予 `role.manage` 的管理员给自己所在角色补其它敏感码"（如 `school.personnel.sensitive.read`/`school.personnel.delete`/`school.personnel.mfa.reset`）——他仍可提交一份不含 `role.manage` 的权限集通过校验。收窄方案（"提交的码 ⊆ 自己已有的码"或"禁止编辑自己所在角色"）都会把运营的正常配置流一起挡掉，故本期不做；代价是**授予 `role.manage` 事实上等同授予本校全部权限**，必须视为超管级动作：只有校方超管能授、每次授予都留 `school.role.permissions.updated` 审计（added 里出现该码即应可被复盘）。真正的收口要么拆成"只能授自己已有的码"（需先有多角色/按人授权模型，M2-UI3），要么给敏感码单独再加一层二次确认。
+  - 写操作统一「全量替换 + 版本 CAS」：`version` 不匹配 → 409 附 `latest`；重置也先 compare-and-set 占版本再删/种，两个动作共用同一把锁口径。目录漂移（代码有、库无）在 CAS 之前拦截为 409 `PERMISSION_CATALOG_OUT_OF_SYNC`，避免把"同步未跑"伪装成"权限码非法"；重置的重种另有条数复核（见 §5.12「预览/执行一致性与出厂不变量」）。
+  - **TD-150 标记只管权限、不管数据范围**：同步判据是 `defaults_applied IS NOT TRUE`，而内置角色的范围在 `seed_builtin_roles()` 时已授过，所以一个「映射非空、范围被清空」的内置角色**不会被同步回填范围**——持有者从此看不到任何数据。本期不扩语义（扩成"两侧各自判缺失"会把运营刻意清掉的范围又补回来），口径是：清范围是有意操作，走 `POST /school/roles/{id}/reset` 恢复出厂（预览会列出 `scopes_added`）。
+  - 拒绝审计走**独立事务** best-effort（`_audit_denied`）：服务层在写事务内 raise 会让同事务审计一起回滚，而"谁试过提权/谁试过重置锁定角色"本身就是安全事件；审计 `metadata` 只放判据码（统一 SCREAMING_SNAKE，便于巡检按 reason 分组），不放登录名等明文，写失败只降级为 warning 且不改变拒绝结果。裸 SQL 模块需进守卫清单豁免（`MAX_EXEMPT_MODULES`）。代价：外层事务此刻可能持着 `roles ... FOR UPDATE`，被拒请求因此占两条连接池连接——无锁环（审计写另一张表），但池满时会阻塞而非立刻返回，登记 TD-193（M3 前评审，收口要把审计挪出事务，须与 `personnel/service.py` 一起改）。
+  - MFA 管理员重置只清凭证绑定与撤销会话（`revoked_reason='admin_revoke'` + `token_version+1` + Redis 清会话），**不动账号状态与角色**；校方超管与本人一律拒绝，超管兜底路径是平台 CLI。响应形状不含 `login_id`/邮箱/MFA 字段。
 - **审批分权落地口径（M1-E2，2026-10-23）**：提交人不能自批 = **三道锁，不依赖数据库触发器**（用户口径：加触发器会把"改例外开关"变成"改数据库代码"，收益不超过 CHECK + 函数两道）。① 应用层 `app/onboarding/service.py:_guard_self_approval()` 在**状态机校验之后（409 已排除）、凭证快照复制之前**判定，正常路径拿到干净的 403/422，且不留下孤儿快照对象；拒绝审计 `approval.self_approval.denied` 在**本事务回滚之后**另开平台会话写入（"谁试过自批"不随回滚丢失）。② 数据库函数 `review_registration_request()` 内再判一次并返回 `SELF_APPROVAL_FORBIDDEN`/`SELF_APPROVAL_REASON_REQUIRED`，兜的是"接口层与函数读到的例外开关不是同一时刻"（运营并发改开关）。③ 同表 CHECK `no_self_approval_without_exception`（`提交人为空 OR 审核人≠提交人 OR self_exception_used IS TRUE`）兜绕过应用代码的手工 SQL，用反证测试钉住（无例外标记 → `IntegrityError`；带标记同一条写入必须成功，否则约束是空挡）。第三条款由例外功能逼出（2026-10-23 用户确认：两条款版会让例外不可用），代价是"直写同人 + 标记为真"数据库分不出真假，检测改走反查审计（有例外标记却没有 `approval.self_exception.used` → TD-161）。例外开关落 `system_settings`（`approval.self_exception_enabled`，默认关闭、每请求读库、改完不重启不踢会话），由 `PUT /api/v1/platform/settings/{key}` 修改（`platform.config.edit` + **必填理由** + `platform.setting.update` 审计）；打开后仍需理由，真正用掉例外写 `approval.self_exception.used` 审计。
 - 审批分权：提交人不能自批；超管例外默认关闭；SaaS 审核员不得审核自己提交学校。
 

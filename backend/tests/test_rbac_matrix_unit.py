@@ -364,7 +364,7 @@ def test_campus_roles_match_matrix_columns() -> None:
 
 
 def test_matrix_section4_rows_partition_the_catalog() -> None:
-    """§4 每行的权限码合起来必须**不重不漏**地等于目录 59 码（第三轮审查 M1 的机器口径）。
+    """§4 每行的权限码合起来必须**不重不漏**地等于目录 60 码（第三轮审查 M1 的机器口径）。
 
     只比对"矩阵声明的码 ⊆ 目录"不够：§3 有码、§4 没有对应行时，该权限的授予口径无人声明
     （本次就漏了 `school.kb.delete`、`school.account_termination.*`、`campus.conversation.clear`、

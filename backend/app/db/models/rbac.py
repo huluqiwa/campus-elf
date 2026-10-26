@@ -52,6 +52,12 @@ class Role(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     code: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     is_system: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    # 出厂默认（权限+数据范围）是否已初始化；false 时同步/开通补一次，之后清空不再回填（TD-150）。
+    defaults_applied: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
+    # 权限/范围的乐观锁；管理接口按版本号拒绝并发覆盖（TD-137）。
+    version: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
 
 
 class RolePermission(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
@@ -154,6 +160,9 @@ class PlatformRole(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     code: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     is_system: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    defaults_applied: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
 
 
 class PlatformRolePermission(UUIDPrimaryKeyMixin, Base):

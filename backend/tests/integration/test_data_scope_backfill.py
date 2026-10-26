@@ -5,13 +5,15 @@
 1. 内置角色的默认范围**来自代码声明**（`seeds.BuiltinRole.scopes` → 定义表 → `data_scopes`）；
 2. 与权限映射同一"只补缺"口径：**角色已经有任何范围行就不再改写**——
    运营把 `school` 收窄成 `self` 后，重跑同步不得把全校加回来；
-3. 角色被清空（一条范围都没有）时按出厂默认重补，与"新租户开通即带范围"同源；
+3. 角色被主动清空后**不再自动重补**；只有 `defaults_applied=false`（从未初始化）才补一次
+   （TD-150）；新租户开通即带范围并标记为已初始化；
 4. 范围解析是 fail-closed 的，所以"整租户一条范围都没有"必须在同步链路暴露，
    而不是静默交付一个"接口全 200、列表全空"的租户。
 """
 
 import os
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -125,6 +127,20 @@ async def test_provision_function_gives_new_tenant_scopes(admin_session: AsyncSe
         _factory_scopes("school_super_admin")
     )
     assert await _role_scopes(admin_session, "student", tenant_id) == {"self"}
+    applied: list[Any] = list(
+        (
+            await admin_session.execute(
+                text(
+                    "select defaults_applied from public.roles "
+                    "where tenant_id = cast(:t as uuid) and is_system"
+                ),
+                {"t": tenant_id},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert applied and all(applied), "开通函数没有把内置角色标记为已初始化"
 
 
 @pytest.mark.asyncio
@@ -153,8 +169,10 @@ async def test_sync_keeps_manually_narrowed_scope(admin_session: AsyncSession) -
 
 
 @pytest.mark.asyncio
-async def test_sync_reapplies_defaults_for_emptied_role(admin_session: AsyncSession) -> None:
-    """正面控制：范围被整体撤空的角色按出厂默认重补——"只补缺"不是"永不维护"。"""
+async def test_sync_does_not_reapply_scopes_after_role_is_emptied(
+    admin_session: AsyncSession,
+) -> None:
+    """TD-150：范围被整体撤空后同步不得补回；显式标记未初始化才补一次。"""
 
     tenant_id = await _create_tenant(admin_session, "S4")
     await sync_rbac_definitions(admin_session)
@@ -173,10 +191,24 @@ async def test_sync_reapplies_defaults_for_emptied_role(admin_session: AsyncSess
 
     await sync_rbac_definitions(admin_session)
     await admin_session.commit()
+    assert await _role_scopes(admin_session, "teacher_b_end", tenant_id) == set(), (
+        "主动撤空的范围被同步补回了（TD-150 回归）"
+    )
+
+    await admin_session.execute(
+        text(
+            "update public.roles set defaults_applied = false "
+            "where code = 'teacher_b_end' and tenant_id = cast(:t as uuid)"
+        ),
+        {"t": tenant_id},
+    )
+    await admin_session.commit()
+    await sync_rbac_definitions(admin_session)
+    await admin_session.commit()
 
     assert await _role_scopes(admin_session, "teacher_b_end", tenant_id) == set(
         _factory_scopes("teacher_b_end")
-    )
+    ), "标记为未初始化时没有补出厂范围"
 
 
 @pytest.mark.asyncio

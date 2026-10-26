@@ -13,6 +13,7 @@ import LoginView from "../views/LoginView.vue";
 import MfaEnrollView from "../views/MfaEnrollView.vue";
 import PeopleView from "../views/PeopleView.vue";
 import ResetPasswordView from "../views/ResetPasswordView.vue";
+import RoleSettingsView from "../views/RoleSettingsView.vue";
 import RolloverView from "../views/RolloverView.vue";
 import SecurityView from "../views/SecurityView.vue";
 
@@ -73,6 +74,12 @@ export const router = createRouter({
           name: "rollover",
           component: RolloverView,
           meta: { requiresAuth: true, permission: "school.org.manage" },
+        },
+        {
+          path: "settings/roles",
+          name: "role-settings",
+          component: RoleSettingsView,
+          meta: { requiresAuth: true, permission: "school.role.manage" },
         },
       ],
     },

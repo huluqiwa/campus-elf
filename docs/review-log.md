@@ -430,6 +430,33 @@
 - 更好做法与 TD 处置：TD-141 收口（本点）；TD-183/184 新增延后项；OpenAPI codegen 切换延后 M3（简报 §6）。
 - 结论：**可提交**（第一轮 6 Major 全修复，第二轮主上下文复核通过）。
 
+### M2-UI2 角色权限配置 + 重置出厂 + MFA 管理员重置（2026-10-26）
+
+- 设计简报：docs/design-briefs/M2-UI2-rbac-admin.md（D1 单标记 `defaults_applied`、D2 本点只做角色权限/重置/MFA 重置、D3 重置同时恢复数据范围、D4 专用码 `school.personnel.mfa.reset`；转授禁令由用户在审查后追加决策）
+- commit/diff：staged diff（38 文件，后端服务层/API/迁移 + admin 配置页 + mock E2E）
+- 审查人/agent：第一轮与第二轮均为独立审查子 agent（`git diff --staged` 全量读diff，并交叉验证 `app/db/session.py`、`app/auth/principal.py`、`app/audit/writer.py`、`app/auth/revocation.py`、`app/rbac/seeds.py` 与真实库外键）
+- 第一轮 Findings：**0 Blocker / 2 Major / 6 Minor**
+  - **M1（Major）转授禁令没封住自己声明的威胁模型**：`_assert_delegable` 只挡「payload 里出现 `school.role.manage`」，已被授予该码的管理员仍可提交一份不含它的权限集把 `school.personnel.sensitive.read`/`delete`/`mfa.reset` 写进自己所在角色（多角色绑定后还能 A 角色保 manage、B 角色拿敏感码）。矩阵「△=需超管逐码显式授予」对该主体形同虚设，而 design.md 声称禁令已收口。
+    处置（用户 2026-10-26 拍板「禁止转授该码」，不加传播守卫）：① 不改守卫，但把 design.md §5.12/§9 的措辞改成**真实边界**——本条只限制该码扩散，「授予 `role.manage` 事实上等同授予本校全部权限」，必须当超管级动作对待；② 登记 TD-191（已采纳→M2-UI3，含两个收窄方案被拒的具体理由：`requested ⊆ principal.permissions` 会让出厂只有 6 码的校管授不出任何新码；禁止编辑自己所在角色会让单角色校管什么都改不了）；③ 新增边界钉桩：`test_role_manage_code_cannot_be_delegated` 走完「超管授 manage → 管理员提交不含 manage 但含敏感码的集合 → 200 → 断言该码确实落库且出现在 `school.role.permissions.updated` 的 added 里」，把已接受的残余风险变成可复盘的测试事实。
+  - **M2（Major）重置缺与全量替换对称的目录漂移守卫**：`reset_role` 的重种 INSERT 直接 join `permissions` 且不校验条数，若出厂定义引用的码在库里缺失 → 预览承诺 N 项、实种 N-k 项、审计仍写 N 项，随后 `defaults_applied=true` 让同步永不回填。
+    处置：先用真实库结构核查——`fk_rbac_builtin_role_defaults_permission_code_permissions` 与 `fk_role_permissions_permission_id_permissions` **都是 ON DELETE CASCADE**，即"定义表引用缺码"这个状态在库层不可表示（删一行会连带删掉定义与全部租户映射），故审查建议的"临时删一个 `permissions` 行造漂移"在共享测试库上不可做（会毁掉同库其它用例的前置）。据此：① PUT 侧抽出 `_assert_codes_in_catalog()` 作写前探针（409 `PERMISSION_CATALOG_OUT_OF_SYNC`）+ 保留写后条数复核，并新增可达的漂移用例 `test_permission_replace_rejects_catalog_drift_before_writing`（monkeypatch `permission_def` 造幽灵码，不动全局 `permissions` 表）；② RESET 侧补对称的**重种条数复核**（权限与数据范围各一道，不符即 409 整体回滚），把结论从"依赖 FK"降级为"依赖 FK，但 FK 被人改松时立刻报错"；③ 不变量与代价写进 design.md §5.12「预览/执行一致性与出厂不变量」，`_assert_codes_in_catalog` 的 docstring 同步澄清"重置路径不在此探针内"；④ 集成用例 `test_rbac_sync.py::test_builtin_defaults_tables_never_reference_missing_permissions` 钉住该不变量今天确实成立（孤儿定义=0、可编辑角色的定义与数据范围都能 join 出且非空）。
+  - m1 README「锁定角色与超管 403」与契约不符 → 改为「锁定角色与自定义角色一律 409 `ROLE_IMMUTABLE`（绕过预览直连也被拒）」；m2 `rbac-mock.ts` 自造错误码 `MFA_REASON_REQUIRED` → 对齐后端 `RESET_REASON_REQUIRED`；m3 写侧 404 不落拒绝审计、与 MFA 侧 `USER_NOT_FOUND` 不对称 → 两条写路径均补 `ROLE_NOT_FOUND` 拒绝审计，并在 design.md §5.12 写明「哪些拒绝算安全事件」的划线（版本冲突/确认名不符/理由过短属用错而非越权，不落安全审计；只读 preview 不审计，只读 lookup 审计是因为入参是登录名）；m4 自锁提示只接在 save → 补 `resetSelfLock` 计算属性 + 重置弹窗 `el-alert`；m5 `docs/rbac-matrix.md` 守卫上限 8 → 13；m6 重置版本冲突用例未断言 `detail.latest` → 补断言（并修正为断言**库内当前版本**而非被拒的过期提交值）。
+- 第二轮（复审）：**PASS，0 Blocker / 0 Major / 6 Minor**；逐项确认第一轮 8 条处置真实落盘（含 FK 存在性、探针在首个写语句之前、`clean_test_data` 保证审计序列断言不受其它用例污染、`FOR UPDATE` 持锁期间写另一张表不构成锁环）。新 Minor 处置：
+  - n1 `ROLE_DEFAULTS_UNAVAILABLE` 未进 design.md 错误码表 → 已补表行，并把 `PERMISSION_CATALOG_OUT_OF_SYNC` 的触发条件按两条路径重写。
+  - n2 重置依赖的 FK 不变量只在测试注释里论证、且 `reset_role` 无写后复核 → 已实现重种条数复核（权限/范围各一道）+ design.md 落文档 + 集成用例钉不变量；`_assert_codes_in_catalog` docstring 澄清职责边界。
+  - n3 拒绝审计判据码大小写不一致（`user_not_found` vs 其余 SCREAMING_SNAKE）→ 统一为 `USER_NOT_FOUND`，业务用例断言同步（M2 审计巡检按 reason 分组，混用会拆成两组）。
+  - n4 嵌套 `db_session` 写拒绝审计：外层持 `FOR UPDATE` 时被拒请求占两条连接池连接，池满时会阻塞而非立刻 409 → 登记 TD-193（已延后，M3 前评审；收口要把审计挪出事务，属跨点重构，本期不与 `personnel/service.py` 的既有模式分叉）。
+  - n5 同步给全量型锁定角色每次 `version+1`（无变更也递增）→ 有意接受并在 `app/rbac/__init__.py` 写明代价与不改的理由（锁定角色不进 CAS、版本只影响展示；改 CTE 串联只为数字好看，不值得在开通链路加复杂度）。
+  - n6 提交卫生：TD-192/TD-193 与本轮记录必须与功能同提交 → 已 `git add` 本条目与 `docs/tech-debt.md`。
+- 已登记偏差（简报对照）：本点不含权限账号/自定义角色/多角色（TD-187→M2-UI3）；租户侧不能自设强制 MFA 策略（TD-186→M6）；lookup 无接口级限流（TD-188→M6）；UI 侧无真实后端全栈 E2E（TD-192，本机 8000 被另一项目容器占用，禁杀）。
+- 复测：
+  - 单元/静态：`ruff check app tests` 通过；`mypy --no-incremental app tests` 182 文件 0 错误；bandit（`-r app -x tests`、`-r alembic -s B608`）exit 0；`alembic check` 无新迁移操作。
+  - 业务场景（第二轮修复后受影响集）：`test_bs_m2ui2_rbac_admin.py` + `test_bs_m2ui2_mfa_admin.py` + `test_rbac_sync.py` + `test_migration_rbac_admin_rollback.py` = 16 passed。
+  - 前端：lint / format:check / typecheck / vitest（api-client 54 + admin 21）/ `pnpm --filter admin build` / `npx playwright test` 57 passed（含 m4 新增的自锁正例与反例）。
+  - 全量后端：**661 passed**（1514.36s，真实测试栈），exit 0。
+- 更好做法与 TD 处置：TD-150/137/143/126 已完成；TD-185/186/188/189/192/193 已延后（各附触发条件）；TD-187/191 已采纳→M2-UI3；TD-190 已完成（审计链脚本编码，测试侧修复，未改运维输出）。
+- 结论：**可提交**（第二轮 0 Blocker / 0 Major；6 项新 Minor 中 4 项已实现、2 项以 TD/注释显式处置）。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

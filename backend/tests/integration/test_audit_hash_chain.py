@@ -182,6 +182,24 @@ async def test_missing_key_marks_unhashed(audit_env: AsyncEngine) -> None:
     assert row["prev_hash"] is None
 
 
+def _run_verify_script(script_path: str, admin_url: str) -> subprocess.CompletedProcess[str]:
+    """跑校验脚本并拿到文本输出。
+
+    编码必须两侧都显式指定 utf-8：Windows 控制台的 ANSI 代码页（如 cp936）既让子进程
+    编不出脚本里的 ✅/❌，也让父进程按 GBK 解码子进程的 UTF-8 字节而抛
+    UnicodeDecodeError——那是本机 locale 限制，不代表链校验结论有变化。
+    """
+
+    return subprocess.run(
+        [sys.executable, script_path, "--db-url", admin_url, "--hash-key", TEST_AUDIT_KEY],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        timeout=30,
+    )
+
+
 @pytest.mark.asyncio
 async def test_verify_script_passes(audit_env: AsyncEngine) -> None:
     """校验脚本对合法链返回退出码 0 并输出"全链通过"。"""
@@ -193,12 +211,7 @@ async def test_verify_script_passes(audit_env: AsyncEngine) -> None:
         "postgresql+asyncpg://", "postgresql://"
     )
     script_path = str(Path(__file__).resolve().parents[2] / "scripts" / "verify_audit_chain.py")
-    result = subprocess.run(
-        [sys.executable, script_path, "--db-url", admin_url, "--hash-key", TEST_AUDIT_KEY],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    result = _run_verify_script(script_path, admin_url)
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
     assert "全链通过" in result.stdout or "链为空" in result.stdout
 
@@ -231,8 +244,6 @@ async def test_concurrent_inserts_do_not_fork_chain(audit_env: AsyncEngine) -> N
 async def test_verify_script_detects_unchained_row(audit_env: AsyncEngine) -> None:
     """MA-2：链中混入未入链行（hash_version=0）→ 校验脚本报告并退出码 1。"""
 
-    import subprocess
-    import sys as _sys
     from pathlib import Path as _Path
 
     # 先插入两条正常入链行
@@ -253,10 +264,7 @@ async def test_verify_script_detects_unchained_row(audit_env: AsyncEngine) -> No
 
     admin_url = os.environ["TEST_DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
     script = str(_Path(__file__).resolve().parents[2] / "scripts" / "verify_audit_chain.py")
-    result = subprocess.run(
-        [_sys.executable, script, "--db-url", admin_url, "--hash-key", TEST_AUDIT_KEY],
-        capture_output=True, text=True, timeout=30,
-    )
+    result = _run_verify_script(script, admin_url)
     assert result.returncode == 1, f"应有未入链行告警：stdout={result.stdout}"
     assert "未入链行" in result.stdout
 

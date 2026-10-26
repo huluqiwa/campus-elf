@@ -45,6 +45,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
 }
 
 export {
+  ApiError,
   createAuthSession,
   passwordPolicyError,
   toUserMessage,
@@ -95,3 +96,15 @@ export {
   type ImportRowErrorView,
   type ImportUploadInput,
 } from "./imports";
+
+export {
+  createRbacApi,
+  type MfaResetInput,
+  type PermissionView,
+  type RbacApi,
+  type ResetPreview,
+  type RolePermissionsInput,
+  type RoleResetInput,
+  type RoleView,
+  type UserLookupView,
+} from "./rbac";

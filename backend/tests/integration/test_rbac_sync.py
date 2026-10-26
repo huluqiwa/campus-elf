@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.rbac import sync_rbac_definitions
+from app.rbac.admin import EDITABLE_ROLE_CODES
 from app.rbac.catalog import catalog_codes, codes_with_module, legacy_codes_removed_by_m1e1
 from app.rbac.seeds import TENANT_BUILTIN_ROLES, builtin_role
 from tests.support.db import (
@@ -327,15 +328,14 @@ async def test_sync_refuses_to_delete_legacy_codes_still_granted_to_operator_rol
             await cleanup_engine.dispose()
 
 
-async def test_sync_reapplies_factory_defaults_when_builtin_role_is_emptied(
+async def test_sync_does_not_reapply_defaults_after_role_is_emptied(
     admin_session: AsyncSession,
 ) -> None:
-    """钉住补授启发式的**边界行为**：内置角色被清空（0 条映射）时，出厂默认会被补回（TD-150）。
+    """TD-150：清空内置角色后同步不得补回；仅显式标记 `defaults_applied=false` 时补一次。
 
-    「只在角色还没有任何映射时授默认」与「人工撤销的权限不补回」在同一条规则里：
-    撤销掉最后一条（`teacher_b_end` 的默认只有 `school.kb.upload` 一条）等价于清空，
-    下一次同步就会补回来。这是当前口径的**已知代价**，不是缺陷；把它写成断言，
-    将来改成 `defaults_applied` 标记时这条测试会红，提醒同步修改文档与台账。
+    `teacher_b_end` 的出厂默认只有 `school.kb.upload` 一条，撤销最后一条等价于清空——
+    旧启发式会把这条默认补回来，让运营以为“撤销没保存”。现在由标记区分
+    “从未初始化”与“主动清空”。
     """
 
     await _create_tenant(admin_session, "清空角色学校")
@@ -346,6 +346,12 @@ async def test_sync_reapplies_factory_defaults_when_builtin_role_is_emptied(
         text("select id::text from public.roles where code = 'teacher_b_end' limit 1")
     )
     assert role_id is not None
+    applied = await admin_session.scalar(
+        text("select defaults_applied from public.roles where id = cast(:r as uuid)"),
+        {"r": str(role_id)},
+    )
+    assert applied is True, "同步后出厂默认未标记为已初始化"
+
     await admin_session.execute(
         text("delete from public.role_permissions where role_id = cast(:r as uuid)"),
         {"r": str(role_id)},
@@ -355,10 +361,29 @@ async def test_sync_reapplies_factory_defaults_when_builtin_role_is_emptied(
 
     await sync_rbac_definitions(admin_session)
     await admin_session.commit()
+    assert await _role_permissions(admin_session, "teacher_b_end") == set(), (
+        "主动清空的内置角色被同步补回了出厂默认（TD-150 回归）"
+    )
+
+    # 模拟“从未初始化”：只有显式把标记翻回 false，才允许补一次。
+    await admin_session.execute(
+        text(
+            "update public.roles set defaults_applied = false where id = cast(:r as uuid)"
+        ),
+        {"r": str(role_id)},
+    )
+    await admin_session.commit()
+    await sync_rbac_definitions(admin_session)
+    await admin_session.commit()
 
     assert await _role_permissions(admin_session, "teacher_b_end") == set(
         builtin_role("tenant", "teacher_b_end").permissions
-    ), "清空后的出厂默认补授口径发生变化：请同步更新 TD-150 与简报 §5.1"
+    ), "标记为未初始化时没有补出厂默认"
+    applied = await admin_session.scalar(
+        text("select defaults_applied from public.roles where id = cast(:r as uuid)"),
+        {"r": str(role_id)},
+    )
+    assert applied is True, "补授后未把标记置回 true"
 
 
 async def test_sync_allows_legacy_codes_referenced_only_by_full_scope_roles(
@@ -410,3 +435,56 @@ async def test_sync_allows_legacy_codes_referenced_only_by_full_scope_roles(
     assert await _role_permissions(admin_session, "school_super_admin") == (
         codes_with_module("school") | codes_with_module("campus")
     ), "删掉旧码映射后，超管的全量范围没有按口径补回"
+
+
+async def test_builtin_defaults_tables_never_reference_missing_permissions(
+    admin_session: AsyncSession,
+) -> None:
+    """重置出厂的重种是 `defaults join permissions`：定义表引用缺码时 join 会**静默少种**。
+    `rbac_builtin_role_defaults` / `role_permissions` 对 `permissions` 都是 ON DELETE CASCADE，
+    所以这个状态在库里不存在（删一行会连带删掉引用它的定义与其它租户映射）。
+    `reset_role` 仍加了条数复核兜住"将来有人把 FK 改松"，本用例钉住的是它今天依赖的不变量。
+    """
+
+    tenant_id = await _create_tenant(admin_session, "出厂定义完整性学校")
+    await sync_rbac_definitions(admin_session)
+    await admin_session.commit()
+
+    orphan_defaults = await admin_session.scalar(
+        text(
+            "select count(*) from public.rbac_builtin_role_defaults d "
+            "left join public.permissions p on p.code = d.permission_code "
+            "where p.code is null"
+        )
+    )
+    assert orphan_defaults == 0, "出厂权限定义引用了库里不存在的权限码：重置会静默少种"
+
+    # 可重置角色的出厂定义必须真的能 join 出权限行（条数与 join 结果一致=重种不会少）
+    for role_code in sorted(EDITABLE_ROLE_CODES):
+        defined = await admin_session.scalar(
+            text(
+                "select count(*) from public.rbac_builtin_role_defaults "
+                "where realm = 'tenant' and role_code = :code"
+            ),
+            {"code": role_code},
+        )
+        resolvable = await admin_session.scalar(
+            text(
+                "select count(*) from public.rbac_builtin_role_defaults d "
+                "join public.permissions p on p.code = d.permission_code "
+                "where d.realm = 'tenant' and d.role_code = :code"
+            ),
+            {"code": role_code},
+        )
+        assert int(defined) == int(resolvable) > 0, (
+            f"{role_code} 出厂定义 {defined} 条、可解析 {resolvable} 条"
+        )
+        scopes = await admin_session.scalar(
+            text(
+                "select count(*) from public.rbac_builtin_role_scope_defaults "
+                "where realm = 'tenant' and role_code = :code"
+            ),
+            {"code": role_code},
+        )
+        assert int(scopes) > 0, f"{role_code} 没有出厂数据范围，重置后无人能看到数据"
+    assert tenant_id is not None

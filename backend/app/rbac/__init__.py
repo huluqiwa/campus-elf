@@ -4,9 +4,10 @@
 
 1. **权限项目录**（`catalog.py`）跟代码走：`permissions` 按码 upsert，描述与代码同步更新；
 2. **角色↔权限映射**（`seeds.py` 出厂默认）是运营配置：同步**绝不覆盖、也绝不删除**已有映射，
-   人工撤销的权限不会被悄悄加回来。唯一的补授差异见 `seeds.py:FULL_SCOPE_ROLES` ——
-   两个超管在矩阵里被*定义*成「范围内全量」，所以按「只补不撤」对齐；其余内置角色的默认
-   只在「角色还没有任何映射」时授一次（新建租户由 `seed_builtin_roles()` 授）。
+   人工撤销的权限不会被悄悄加回来。补授口径见 `seeds.py:FULL_SCOPE_ROLES`：两个超管在矩阵里
+   被*定义*成「范围内全量」，按「只补不撤」对齐；其余内置角色只在 `roles.defaults_applied`
+   为 false（出厂默认尚未初始化）时授一次，之后运营主动清空也不会被补回（TD-150）。
+   历史迁移重放时该列尚未创建，自动回退到旧的「角色还没有任何映射」启发式。
 
 出厂默认另外写进三张**代码所有**的定义表：
 
@@ -92,6 +93,19 @@ TENANT_WITHOUT_ANY_SCOPE_SQL: str = """
 SCOPE_DEFAULTS_TABLE_EXISTS_SQL: str = (
     "select to_regclass('public.rbac_builtin_role_scope_defaults') is not null"
 )
+
+# TD-150 的标记列是否已建。为什么查库而不是查版本号：E1/E2 迁移执行的是**当前这份**
+# 同步代码，全新库重放时它们跑在 M2-UI2 加列之前；按版本猜会引用不存在的列直接报错。
+# 判据只认两列同时存在，缺一列则回退到旧启发式（与历史迁移的语义一致）。
+DEFAULTS_MARKER_COLUMNS_EXIST_SQL: str = """
+    select count(*) = 2
+    from information_schema.columns
+    where table_schema = 'public'
+      and (
+          (table_name = 'roles' and column_name = 'defaults_applied')
+          or (table_name = 'platform_roles' and column_name = 'defaults_applied')
+      )
+"""
 
 # 口径 ⑧ 的前置闸门（简报 §5.1-①）：9 个旧码**只允许**在"删掉也不丢能力"的角色上被引用。
 # 全量型角色（`seeds.FULL_SCOPE_ROLES`，即两个超管）满足条件——它们的出厂默认按模块全量补，
@@ -282,15 +296,89 @@ def _rewrite_definition_statements(*, include_scope_defaults: bool) -> list[tupl
     return statements
 
 
-def _backfill_role_statements(*, include_scope_defaults: bool) -> list[tuple[str, dict[str, Any]]]:
+# 「其余内置角色」的出厂默认补种：标记口径（TD-150）与历史迁移重放的旧启发式两套完整 SQL。
+# 两条都写成静态文本、由调用方按库内标记列是否存在整条选用，而不是拼接 SQL 片段——
+# 值全部走绑定参数，源码里不存在任何字符串插值进 SQL 的路径（bandit B608 无需豁免）。
+_TENANT_OTHER_PERMISSIONS_MARKER_SQL = """
+insert into public.role_permissions (id, tenant_id, role_id, permission_id)
+select gen_random_uuid(), r.tenant_id, r.id, p.id
+from public.roles r
+join public.rbac_builtin_role_defaults d
+  on d.realm = 'tenant' and d.role_code = r.code
+join public.permissions p on p.code = d.permission_code
+where r.is_system
+  and r.code = any(cast(:codes as text[]))
+  and r.defaults_applied is not true
+  and not exists (
+      select 1 from public.role_permissions rp
+      where rp.role_id = r.id and rp.permission_id = p.id
+  )
+"""
+
+_TENANT_OTHER_PERMISSIONS_LEGACY_SQL = """
+insert into public.role_permissions (id, tenant_id, role_id, permission_id)
+select gen_random_uuid(), r.tenant_id, r.id, p.id
+from public.roles r
+join public.rbac_builtin_role_defaults d
+  on d.realm = 'tenant' and d.role_code = r.code
+join public.permissions p on p.code = d.permission_code
+where r.is_system
+  and r.code = any(cast(:codes as text[]))
+  and not exists (
+      select 1 from public.role_permissions rp where rp.role_id = r.id
+  )
+  and not exists (
+      select 1 from public.role_permissions rp
+      where rp.role_id = r.id and rp.permission_id = p.id
+  )
+"""
+
+_PLATFORM_OTHER_PERMISSIONS_MARKER_SQL = """
+insert into public.platform_role_permissions (id, platform_role_id, permission_id)
+select gen_random_uuid(), pr.id, p.id
+from public.platform_roles pr
+join public.rbac_builtin_role_defaults d
+  on d.realm = 'platform' and d.role_code = pr.code
+join public.permissions p on p.code = d.permission_code
+where pr.code = any(cast(:codes as text[]))
+  and pr.defaults_applied is not true
+  and not exists (
+      select 1 from public.platform_role_permissions prp
+      where prp.platform_role_id = pr.id and prp.permission_id = p.id
+  )
+"""
+
+_PLATFORM_OTHER_PERMISSIONS_LEGACY_SQL = """
+insert into public.platform_role_permissions (id, platform_role_id, permission_id)
+select gen_random_uuid(), pr.id, p.id
+from public.platform_roles pr
+join public.rbac_builtin_role_defaults d
+  on d.realm = 'platform' and d.role_code = pr.code
+join public.permissions p on p.code = d.permission_code
+where pr.code = any(cast(:codes as text[]))
+  and not exists (
+      select 1 from public.platform_role_permissions prp
+      where prp.platform_role_id = pr.id
+  )
+  and not exists (
+      select 1 from public.platform_role_permissions prp
+      where prp.platform_role_id = pr.id and prp.permission_id = p.id
+  )
+"""
+
+
+def _backfill_role_statements(
+    *, include_scope_defaults: bool, use_defaults_marker: bool
+) -> list[tuple[str, dict[str, Any]]]:
     """按定义表补齐存量租户/平台侧的内置角色、出厂默认映射与默认数据范围。
 
     默认映射分两种口径（原因见 `seeds.py:FULL_SCOPE_ROLES`）：
 
     - **全量型角色**（两个超管）：矩阵把它们定义成「范围内全部权限」，按「只补不撤」对齐，
       新增权限码会自动落到它们身上；
-    - **其余内置角色**：只在「角色还没有任何映射」时授一次出厂默认。映射入库后属于运营配置，
-      人工撤销的权限绝不能被同步悄悄加回来。
+    - **其余内置角色**：只在出厂默认尚未初始化时授一次。`use_defaults_marker=True` 时判据是
+      `defaults_applied IS NOT TRUE`（TD-150：之后运营主动清空不会被补回）；列还没建的
+      历史迁移重放则回退到旧的「角色还没有任何映射」启发式。
 
     `include_scope_defaults` 的口径与 `_rewrite_definition_statements` 一致（表不存在时
     不生成任何碰 `rbac_builtin_role_scope_defaults` 的语句）。
@@ -303,6 +391,16 @@ def _backfill_role_statements(*, include_scope_defaults: bool) -> list[tuple[str
     platform_full_codes = list(_full_scope_codes("platform"))
     platform_other_codes = sorted(
         role.code for role in PLATFORM_BUILTIN_ROLES if role.code not in platform_full_codes
+    )
+    tenant_other_sql = (
+        _TENANT_OTHER_PERMISSIONS_MARKER_SQL
+        if use_defaults_marker
+        else _TENANT_OTHER_PERMISSIONS_LEGACY_SQL
+    )
+    platform_other_sql = (
+        _PLATFORM_OTHER_PERMISSIONS_MARKER_SQL
+        if use_defaults_marker
+        else _PLATFORM_OTHER_PERMISSIONS_LEGACY_SQL
     )
 
     statements = [
@@ -351,23 +449,8 @@ def _backfill_role_statements(*, include_scope_defaults: bool) -> list[tuple[str
             """,
             {"codes": tenant_full_codes},
         ),
-        # 租户侧：其余内置角色只在还没有任何映射时授出厂默认
-        (
-            """
-            insert into public.role_permissions (id, tenant_id, role_id, permission_id)
-            select gen_random_uuid(), r.tenant_id, r.id, p.id
-            from public.roles r
-            join public.rbac_builtin_role_defaults d
-              on d.realm = 'tenant' and d.role_code = r.code
-            join public.permissions p on p.code = d.permission_code
-            where r.is_system
-              and r.code = any(cast(:codes as text[]))
-              and not exists (
-                  select 1 from public.role_permissions rp where rp.role_id = r.id
-              )
-            """,
-            {"codes": tenant_other_codes},
-        ),
+        # 租户侧：其余内置角色只在出厂默认尚未初始化时授一次（TD-150）
+        (tenant_other_sql, {"codes": tenant_other_codes}),
         # 平台侧：同上两条口径
         (
             """
@@ -385,51 +468,121 @@ def _backfill_role_statements(*, include_scope_defaults: bool) -> list[tuple[str
             """,
             {"codes": platform_full_codes},
         ),
-        (
-            """
-            insert into public.platform_role_permissions (id, platform_role_id, permission_id)
-            select gen_random_uuid(), pr.id, p.id
-            from public.platform_roles pr
-            join public.rbac_builtin_role_defaults d
-              on d.realm = 'platform' and d.role_code = pr.code
-            join public.permissions p on p.code = d.permission_code
-            where pr.code = any(cast(:codes as text[]))
-              and not exists (
-                  select 1 from public.platform_role_permissions prp
-                  where prp.platform_role_id = pr.id
-              )
-            """,
-            {"codes": platform_other_codes},
-        ),
+        (platform_other_sql, {"codes": platform_other_codes}),
     ]
     if include_scope_defaults:
-        # 数据范围（M1-E2 口径 ⑨ + TD-138）：内置角色一条范围行都没有时补出厂默认。
-        # 与权限映射同一口径——范围入库后属于运营配置，人工撤掉的不能被同步悄悄加回来，
-        # 所以判据是"这个角色还没有任何范围行"，而不是"缺哪条补哪条"。
+        if use_defaults_marker:
+            # 全量型角色：按范围类型只补缺（新增默认范围随代码生效）。
+            statements.append(
+                (
+                    """
+                    insert into public.data_scopes (id, tenant_id, role_id, scope_type, scope_id)
+                    select gen_random_uuid(), r.tenant_id, r.id, d.scope_type, null
+                    from public.roles r
+                    join public.rbac_builtin_role_scope_defaults d
+                      on d.realm = 'tenant' and d.role_code = r.code
+                    where r.is_system
+                      and r.code = any(cast(:codes as text[]))
+                      and not exists (
+                          select 1 from public.data_scopes s
+                          where s.role_id = r.id
+                            and s.scope_type = d.scope_type
+                            and s.scope_id is null
+                      )
+                    """,
+                    {"codes": tenant_full_codes},
+                )
+            )
+            # 其余内置角色：只在出厂默认未初始化时补一次（TD-150）。
+            statements.append(
+                (
+                    """
+                    insert into public.data_scopes (id, tenant_id, role_id, scope_type, scope_id)
+                    select gen_random_uuid(), r.tenant_id, r.id, d.scope_type, null
+                    from public.roles r
+                    join public.rbac_builtin_role_scope_defaults d
+                      on d.realm = 'tenant' and d.role_code = r.code
+                    where r.is_system
+                      and r.code = any(cast(:codes as text[]))
+                      and r.defaults_applied is not true
+                      and not exists (
+                          select 1 from public.data_scopes s
+                          where s.role_id = r.id
+                            and s.scope_type = d.scope_type
+                            and s.scope_id is null
+                      )
+                    """,
+                    {"codes": tenant_other_codes},
+                )
+            )
+        else:
+            # 历史迁移重放（标记列尚未创建）：保留 M1-E2 的旧启发式。
+            statements.append(
+                (
+                    """
+                    insert into public.data_scopes (id, tenant_id, role_id, scope_type, scope_id)
+                    select gen_random_uuid(), r.tenant_id, r.id, d.scope_type, null
+                    from public.roles r
+                    join public.rbac_builtin_role_scope_defaults d
+                      on d.realm = 'tenant' and d.role_code = r.code
+                    where r.is_system
+                      and not exists (
+                          select 1 from public.data_scopes s where s.role_id = r.id
+                      )
+                    """,
+                    {},
+                )
+            )
+    if use_defaults_marker:
+        # 标记已初始化；全量型角色每次同步仍按"只补不撤"对齐，因此版本也递增，
+        # 让管理界面的乐观锁能感知"代码新增了权限码"。
+        # 已知代价（有意接受）：全量型角色的 version 每次同步都 +1，即使这轮没补进任何码。
+        # 它们全是锁定角色（管理接口一律 409 ROLE_IMMUTABLE，前端只读），version 从不进入
+        # CAS 比较，所以刷新只影响展示；改成"仅补进码才递增"要把这三条集合式语句改成 CTE
+        # 串联，收益只有数字好看，不值得在开通链路上加复杂度。
         statements.append(
             (
                 """
-                insert into public.data_scopes (id, tenant_id, role_id, scope_type, scope_id)
-                select gen_random_uuid(), r.tenant_id, r.id, d.scope_type, null
-                from public.roles r
-                join public.rbac_builtin_role_scope_defaults d
-                  on d.realm = 'tenant' and d.role_code = r.code
-                where r.is_system
-                  and not exists (
-                      select 1 from public.data_scopes s where s.role_id = r.id
+                update public.roles
+                set defaults_applied = true,
+                    version = version + 1
+                where is_system
+                  and (
+                      defaults_applied is not true
+                      or code = any(cast(:full_codes as text[]))
                   )
                 """,
-                {},
+                {"full_codes": tenant_full_codes},
+            )
+        )
+        statements.append(
+            (
+                """
+                update public.platform_roles
+                set defaults_applied = true
+                where is_system
+                  and (
+                      defaults_applied is not true
+                      or code = any(cast(:full_codes as text[]))
+                  )
+                """,
+                {"full_codes": platform_full_codes},
             )
         )
     return statements
 
 
-def build_sync_statements(*, include_scope_defaults: bool = True) -> list[tuple[str, dict[str, Any]]]:
+def build_sync_statements(
+    *,
+    include_scope_defaults: bool = True,
+    use_defaults_marker: bool = True,
+) -> list[tuple[str, dict[str, Any]]]:
     """完整的幂等同步语句（顺序：清旧码 → 补目录 → 重写定义表 → 补缺角色/映射/范围）。
 
     `include_scope_defaults`：是否同步出厂默认**数据范围**（口径与判据见
     `_rewrite_definition_statements`；由调用方按库内表是否存在决定）。
+    `use_defaults_marker`：是否使用 TD-150 的 `defaults_applied` 判据；历史迁移重放时
+    该列尚未创建，调用方按库内列是否存在传 `False` 回退旧启发式。
 
     异常:
         RuntimeError：种子与目录不自洽（`_self_check_seeds`）。
@@ -440,7 +593,10 @@ def build_sync_statements(*, include_scope_defaults: bool = True) -> list[tuple[
         *_delete_legacy_permission_statements(),
         *_upsert_permission_statements(),
         *_rewrite_definition_statements(include_scope_defaults=include_scope_defaults),
-        *_backfill_role_statements(include_scope_defaults=include_scope_defaults),
+        *_backfill_role_statements(
+            include_scope_defaults=include_scope_defaults,
+            use_defaults_marker=use_defaults_marker,
+        ),
     ]
 
 
@@ -523,6 +679,16 @@ def scope_defaults_table_exists(session: Any) -> bool:
     return bool(session.execute(text(SCOPE_DEFAULTS_TABLE_EXISTS_SQL)).scalar_one())
 
 
+def defaults_marker_columns_exist(session: Any) -> bool:
+    """TD-150 的两列（租户/平台角色各一）是否已建。
+
+    参数与 `scope_defaults_table_exists` 相同；历史迁移重放时列还没加，必须回退旧语义，
+    否则 E1/E2 迁移会在引用不存在的列时失败。
+    """
+
+    return bool(session.execute(text(DEFAULTS_MARKER_COLUMNS_EXIST_SQL)).scalar_one())
+
+
 def sync_rbac_definitions_sync(bind: Connection) -> int:
     """同步版本（Alembic 迁移用）：与异步版执行同一份语句、同一套守卫。
 
@@ -540,7 +706,10 @@ def sync_rbac_definitions_sync(bind: Connection) -> int:
     assert_no_legacy_grants(_legacy_grant_rows_sync(bind))
 
     include_scope = scope_defaults_table_exists(bind)
-    statements = build_sync_statements(include_scope_defaults=include_scope)
+    use_marker = defaults_marker_columns_exist(bind)
+    statements = build_sync_statements(
+        include_scope_defaults=include_scope, use_defaults_marker=use_marker
+    )
     for sql, params in statements:
         bind.execute(text(sql), params)
 
@@ -601,7 +770,10 @@ async def sync_rbac_definitions(session: AsyncSession) -> int:
     assert_no_legacy_grants([dict(row) for row in legacy_rows.mappings()])
 
     include_scope = await session.run_sync(scope_defaults_table_exists)
-    statements = build_sync_statements(include_scope_defaults=include_scope)
+    use_marker = await session.run_sync(defaults_marker_columns_exist)
+    statements = build_sync_statements(
+        include_scope_defaults=include_scope, use_defaults_marker=use_marker
+    )
     for sql, params in statements:
         await session.execute(text(sql), params)
 
@@ -620,6 +792,7 @@ async def sync_rbac_definitions(session: AsyncSession) -> int:
 __all__ = [
     "BUILTIN_ROLE_CODES",
     "CONFLICTING_ROLE_CHECK_SQL",
+    "DEFAULTS_MARKER_COLUMNS_EXIST_SQL",
     "LEGACY_GRANT_GUARD_SQL",
     "PLATFORM_BUILTIN_ROLES",
     "SCOPE_DEFAULTS_TABLE_EXISTS_SQL",
@@ -632,6 +805,7 @@ __all__ = [
     "assert_no_legacy_grants",
     "build_sync_statements",
     "conflicting_roles",
+    "defaults_marker_columns_exist",
     "legacy_grant_conflicts",
     "scope_defaults_table_exists",
     "sync_rbac_definitions",

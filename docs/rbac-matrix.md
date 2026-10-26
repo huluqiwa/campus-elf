@@ -2,8 +2,8 @@
 
 | 项 | 内容 |
 |---|---|
-| 版本 | v1.2（§4 新增「对应权限码」列并接入机器校验；补齐 3 个漏项；观测/评估不下放租户角色 + 全量超管口径定稿） |
-| 日期 | 2026-10-23（v1.1 = 2026-10-22 的 §6 七条口径定稿与权限码命名归一） |
+| 版本 | v1.3（2026-10-26：新增 `school.personnel.mfa.reset`（TD-126）+ TD-150「出厂默认只初始化一次」口径） |
+| 日期 | 2026-10-26（v1.2 = 2026-10-23 的 §4 机器校验与全量超管口径；v1.1 = 2026-10-22 的 §6 七条口径定稿与权限码命名归一） |
 | 状态 | 已确认（`docs/design-briefs/M1-E1-rbac-core.md` §4.1/§9） |
 | 实现位置 | 权限项目录 `backend/app/rbac/catalog.py`；内置角色出厂默认 `backend/app/rbac/seeds.py`；落库同步 `backend/app/rbac/__init__.py:sync_rbac_definitions()`；一致性由 `backend/tests/test_rbac_matrix_unit.py` 钉住（§3 逐码相等 + §4 表格分区与逐列 √ 相等，见 §4 说明） |
 | 规则 | 服务端鉴权；前端菜单/按钮不作为安全边界；跨租默认拒绝 |
@@ -55,10 +55,10 @@
 | 口径 | 落点 |
 |---|---|
 | 范围判据从哪来 | `data_scopes`（角色行 ∪ 用户行）在认证主体解析时一次读出门槛值，随 `Principal` 携带（`backend/app/auth/principal.py`）；每请求从库读，与 §5-8 权限同一热更新口径 |
-| 过滤写在哪 | **仓储基类统一注入**（`backend/app/db/repository.py:TenantScopedRepository`）：租户级表的查询必须带范围谓词；需要绕过的模块要在守卫清单里显式登记"为什么这里可以不带范围"（`backend/tests/test_bare_sql_scope_guard_unit.py`，条目上限 8） |
+| 过滤写在哪 | **仓储基类统一注入**（`backend/app/db/repository.py:TenantScopedRepository`）：租户级表的查询必须带范围谓词；需要绕过的模块要在守卫清单里显式登记"为什么这里可以不带范围"（`backend/tests/test_bare_sql_scope_guard_unit.py`，条目上限 13） |
 | 解析不到范围 | **空集**（fail-closed），不回退成全校；平台 realm 不写范围行（`data_scopes` 是租户级表，平台侧走 §5-11 的 realm/权限判定） |
 | 越权响应 | 列表静默过滤到范围内；显式 id 越权 → **404**（与"不存在"同形，不暴露存在性）并写安全审计 `data_scope.denied`（带当前范围与拒绝原因） |
-| 出厂默认范围 | 超管/管理员 = `school`，`teacher_b_end`/`student`/`teacher` = `self`（声明在 `backend/app/rbac/seeds.py:BuiltinRole.scopes`，落库到 `rbac_builtin_role_scope_defaults`）；新租户开通即写入，同步**只补"还没有任何范围行"的角色**——人工收窄或撤掉的不加回来（与权限映射同一口径） |
+| 出厂默认范围 | 超管/管理员 = `school`，`teacher_b_end`/`student`/`teacher` = `self`（声明在 `backend/app/rbac/seeds.py:BuiltinRole.scopes`，落库到 `rbac_builtin_role_scope_defaults`）；新租户开通即写入。同步对**非全量型**角色只在 `roles.defaults_applied = false`（出厂默认尚未初始化）时补一次，之后运营主动清空/收窄**不再回填**（TD-150，与权限映射同一口径）；两个超管属全量型角色，始终按「只补不撤」对齐 |
 | 真实调用点 | `GET /api/v1/school/personnel`、`GET /api/v1/school/personnel/{id}`（`school.personnel.view`）；响应形状固定为 `id/user_type/display_name/status/last_login_at/email_masked/id_card_mask`（口径 ⑥：**不含 `login_id`**（学号/工号）、明文 `email`/身份证、密码哈希、MFA 字段），由 `test_response_shape_excludes_login_id` 逐字段钉住（M2-ORG04 增 `id_card_mask` 仅掩码列） |
 | 本期未交付 | `class`/`course` 过滤与任课关系（TD-151 → M2/M3）；人员列表的前端入口（TD-152 → M2）。已交付：`school.personnel.sensitive.read` 完整查看通道 `GET /school/personnel/{id}/id-card`（理由走请求体 ≥10 字符 + `sensitive.id_card.read` 审计 + no-store，M2-ORG04） |
 
@@ -94,6 +94,7 @@
 | `school.personnel.create/edit/delete` | 人员维护 |
 | `school.personnel.import` | 批量导入 |
 | `school.personnel.sensitive.read` | 身份证等完整查看（理由+审计） |
+| `school.personnel.mfa.reset` | 重置用户 MFA 绑定（理由+审计；TD-126） |
 | `school.permission_account.manage` | 权限账号/角色 |
 | `school.role.manage` | 角色/权限分配 |
 | `school.kb.view` | 文档/构建进度 |
@@ -151,7 +152,7 @@
 > KB 上传（2026-10-22 改口径）：对持后台账号的角色默认开放（含教师 B 端）。配套约束：上传者**永不自批**（M1-E2 已交付，三道锁见 §5-4）；上传后设置查阅人群默认限本人/本人任课范围，**扩到全校需管理员二次确认并留审计**（M3，依赖 `school.kb.acl.manage`）。
 
 > **矩阵如何被机器校验（2026-10-23 补）**：每个权限组一行「对应权限码」，行与行不重不漏、并集等于
-> §3 的 59 码；8 个角色列与 `backend/app/rbac/seeds.py` 的**出厂默认**逐列相等（√ 集合 = 该角色默认
+> §3 的 60 码；8 个角色列与 `backend/app/rbac/seeds.py` 的**出厂默认**逐列相等（√ 集合 = 该角色默认
 > 权限集，△ 集合 ∉ 默认）。两个「范围内全量」角色按范围比对，不按 `seeds` 里的字面量：
 > 校方超管 = 全部租户域码；平台超管列只覆盖平台运维域码（16 个）——它的 `seeds` 默认按 §5-11 持有
 > 目录全量，但对租户域行仍是 —，因为平台主体走校方接口会被 realm 守卫拒绝（`require_permission(..., realm=)`），
@@ -174,6 +175,7 @@
 | 人员增删改/导入 | `school.personnel.create/edit/delete/import` | — | — | — | √ | △ | — | — | — |
 | 部门树维护 | `school.org.manage` | — | — | — | √ | △ | — | — | — |
 | 敏感字段完整查看 | `school.personnel.sensitive.read` | — | — | — | √ | △ | — | — | — |
+| MFA 重置 | `school.personnel.mfa.reset` | — | — | — | √ | △ | — | — | — |
 | 权限账号/角色 | `school.permission_account.manage` `school.role.manage` | — | — | — | √ | △ | — | — | — |
 | KB 查看/构建进度 | `school.kb.view` | — | — | — | √ | √ | △ | — | — |
 | KB 上传 | `school.kb.upload` | — | — | — | √ | △ | √ | — | — |
@@ -251,4 +253,5 @@
 - （已确认 2026-10-21）部门/科室组织单元与文档人群 ACL 模型见 `docs/spec-changes/SC-01-kb-acl-chunk-edit.md`：部门作为**人群选择器**数据源，不进入 `data_scopes`。
 - （已确认 2026-10-22）权限码归一：`campus.chat` → `campus.chat.use`；删除与 realm 专用码重复的 `audit.view`/`audit.export`（§3.4 说明）；库里 **9 个**无引用的旧码（`school.profile.view/edit`、`school.user.view/create/edit/delete`、`school.role.assign`、`school.leave.approve`、`campus.leave.submit`）删除，本文件 §3 是唯一口径。
 - （M1-E1 已交付 2026-10-23）§3 全量 **59 码**（platform 12 + school 34 + campus 9 + observability 2 + eval 2）已随 `e5f7a9c1b3d5` 迁移落库，`permissions` 与 `app/rbac/catalog.py` 逐码相等；§4 的出厂默认落 `rbac_builtin_roles`/`rbac_builtin_role_defaults` 两张**代码持有的定义表**，由 `seed_builtin_roles(tenant_id)` 在新租户开通/审核通过时写入，`sync_rbac_definitions()` 只补存量缺失、不覆盖人工改动。`data_scopes` 本期**不写行**（读取方在 M1-E2 数据范围过滤落地时接入，见下一条）。
-- （M1-E2 已交付 2026-10-23）`data_scopes` 开始写行：出厂默认由代码持有的 `rbac_builtin_role_scope_defaults` 定义（超管/管理员 = `school`，其余租户角色 = `self`；平台角色不写范围行），新租户经 `provision_tenant()`/`seed_builtin_roles()` 写入，`sync_rbac_definitions()` 只补"还没有任何范围行"的角色（口径与权限映射一致：人工收窄保持、被整体清空则按出厂默认重补）。服务端过滤、fail-closed 空集、越权 404 + `data_scope.denied` 审计与真实调用点见 §2.1；审批分权三道锁见 §5-4，平台跨租最小通道见 §5-6，可调开关落 `system_settings`（§5-4）。
+- （M1-E2 已交付 2026-10-23）`data_scopes` 开始写行：出厂默认由代码持有的 `rbac_builtin_role_scope_defaults` 定义（超管/管理员 = `school`，其余租户角色 = `self`；平台角色不写范围行），新租户经 `provision_tenant()`/`seed_builtin_roles()` 写入。服务端过滤、fail-closed 空集、越权 404 + `data_scope.denied` 审计与真实调用点见 §2.1；审批分权三道锁见 §5-4，平台跨租最小通道见 §5-6，可调开关落 `system_settings`（§5-4）。
+- （M2-UI2 已交付 2026-10-26，TD-150）出厂默认改为**只初始化一次**：`roles.defaults_applied` / `platform_roles.defaults_applied` 标记该角色是否已应用出厂默认。同步与开通只在标记为 `false` 时补权限映射与数据范围；之后运营在管理界面主动清空/收窄，**不会被下一次同步加回来**（M1-E2 的"被整体清空即重补"已废止——它会让"撤销一条权限"变成"下次同步自动恢复"）。存量角色迁移时回填 `true`；两个超管属全量型角色，仍按「只补不撤」对齐（新增权限码自动落到它们身上）。

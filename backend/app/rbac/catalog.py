@@ -64,6 +64,7 @@ _DEFINITIONS: tuple[tuple[str, str], ...] = (
     ("school.personnel.delete", "删除人员档案"),
     ("school.personnel.import", "批量导入人员档案"),
     ("school.personnel.sensitive.read", "完整查看身份证等敏感字段（需理由并审计）"),
+    ("school.personnel.mfa.reset", "重置用户 MFA 绑定（需理由并审计）"),
     ("school.permission_account.manage", "维护权限账号（开/停 B 端权限账号）"),
     ("school.role.manage", "维护角色与权限分配"),
     ("school.kb.view", "查看知识库文档与构建进度"),

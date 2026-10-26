@@ -223,25 +223,49 @@ export function toUserMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+/** HTTP 错误：保留状态码与原始 detail（业务错误形如 {code, message, latest?}）。 */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: unknown;
+
+  constructor(message: string, status: number, detail?: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 /** 从错误响应中取出可读信息（FastAPI 的错误体是 {detail: "..."} 或校验错误数组）。 */
-async function readErrorDetail(response: Response): Promise<string> {
+async function readErrorDetail(response: Response): Promise<{ message: string; detail: unknown }> {
   try {
     const body = (await response.json()) as { detail?: unknown };
     if (typeof body.detail === "string" && body.detail) {
-      return body.detail;
+      return { message: body.detail, detail: body.detail };
+    }
+    if (body.detail && typeof body.detail === "object" && !Array.isArray(body.detail)) {
+      const message = (body.detail as { message?: unknown }).message;
+      if (typeof message === "string" && message) {
+        return { message, detail: body.detail };
+      }
     }
     if (Array.isArray(body.detail)) {
       const messages = body.detail
         .map((item) => (item && typeof item === "object" && "msg" in item ? String(item.msg) : ""))
         .filter(Boolean);
       if (messages.length) {
-        return messages.join("；");
+        return { message: messages.join("；"), detail: body.detail };
       }
     }
   } catch {
     /* 非 JSON 响应：忽略 */
   }
-  return `请求失败（${response.status}）`;
+  return { message: `请求失败（${response.status}）`, detail: null };
+}
+
+async function apiError(response: Response): Promise<ApiError> {
+  const { message, detail } = await readErrorDetail(response);
+  return new ApiError(message, response.status, detail);
 }
 
 /** 创建认证会话（无框架依赖，便于单元测试；Vue 侧用 Pinia 包一层）。 */
@@ -292,7 +316,7 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
       body: JSON.stringify(body ?? {}),
     });
     if (!response.ok) {
-      throw new Error(await readErrorDetail(response));
+      throw await apiError(response);
     }
     return (await response.json()) as T;
   }
@@ -306,7 +330,7 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
       body: JSON.stringify(body ?? {}),
     });
     if (!response.ok) {
-      throw new Error(await readErrorDetail(response));
+      throw await apiError(response);
     }
   }
 
@@ -321,7 +345,7 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
           body: "{}",
         });
         if (!response.ok) {
-          throw new Error(await readErrorDetail(response));
+          throw await apiError(response);
         }
         return setTokens(toTokens((await response.json()) as TokenPayload));
       })().finally(() => {
@@ -360,22 +384,22 @@ export function createAuthSession(options: AuthSessionOptions): AuthSession {
       }
     } else if (response.status === 401) {
       // 明确禁止刷新重试的认证接口：交给调用方展示（登录失败/刷新失败/登出等）
-      throw new Error(await readErrorDetail(response));
+      throw await apiError(response);
     }
 
     if (response.status === 403) {
-      const detail = await readErrorDetail(response);
+      const error = await apiError(response);
       const code = response.headers?.get?.(PASSWORD_CHANGE_HEADER) ?? null;
-      if (code === PASSWORD_CHANGE_CODE || detail.includes(PASSWORD_CHANGE_MARKER)) {
+      if (code === PASSWORD_CHANGE_CODE || error.message.includes(PASSWORD_CHANGE_MARKER)) {
         options.onPasswordChangeRequired?.();
       } else {
-        options.onForbidden?.(detail);
+        options.onForbidden?.(error.message);
       }
-      throw new Error(detail);
+      throw error;
     }
 
     if (!response.ok) {
-      throw new Error(await readErrorDetail(response));
+      throw await apiError(response);
     }
     if (response.status === 204) {
       return undefined as T;
