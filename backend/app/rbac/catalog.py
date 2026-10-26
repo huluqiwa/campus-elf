@@ -67,6 +67,7 @@ _DEFINITIONS: tuple[tuple[str, str], ...] = (
     ("school.personnel.mfa.reset", "重置用户 MFA 绑定（需理由并审计）"),
     ("school.permission_account.manage", "维护权限账号（开/停 B 端权限账号）"),
     ("school.role.manage", "维护角色与权限分配"),
+    ("school.role.delete", "删除自定义角色（与配置权限分离，M2-UI3）"),
     ("school.kb.view", "查看知识库文档与构建进度"),
     ("school.kb.upload", "上传知识库文档（上传者不得自批）"),
     ("school.kb.approval", "审批知识库文档版本"),

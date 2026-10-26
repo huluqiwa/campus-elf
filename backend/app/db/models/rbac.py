@@ -47,6 +47,14 @@ class Role(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
         UniqueConstraint("tenant_id", "code", name="uq_roles_tenant_id_code"),
         # 供子表做复合外键 (role_id, tenant_id)：保证父子同租
         UniqueConstraint("id", "tenant_id", name="uq_roles_id_tenant_id"),
+        # M2-UI3：自定义角色首次成为运营可输入的对象，code 格式与内置码保留落到库层
+        # （迁移 d7a1c3e5b9f4）；内置 5 码见该迁移的快照清单。
+        CheckConstraint("code ~ '^[a-z][a-z0-9_]{2,62}$'", name="ck_roles_code_format_valid"),
+        CheckConstraint(
+            "is_system or code not in "
+            "('school_super_admin', 'school_admin', 'teacher_b_end', 'student', 'teacher')",
+            name="ck_roles_builtin_code_is_system",
+        ),
     )
 
     code: Mapped[str] = mapped_column(String(64), nullable=False)

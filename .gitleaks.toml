@@ -39,4 +39,8 @@ regexes = [
   "Mfa-Super-Pass-1",
   "Mfa-Plain-Pass-1",
   "Mfa-Foreign-Pass-1",
+  # M2-UI3 自扩权的种子口令（仅测试账号，随机租户码每次用例现生成）：业务场景 + 接线集成用例。
+  "SelfGr-Super-Pass-1",
+  "SelfGr-Admin-Pass-1",
+  "SelfGr-Wiring-Pass-1",
 ]

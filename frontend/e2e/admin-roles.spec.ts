@@ -51,6 +51,147 @@ test("锁定角色只读并给出原因；可编辑角色勾选后保存并版�
   await expect(page.getByTestId("role-save")).toBeDisabled();
 });
 
+test("给自己所在角色补敏感码：确认条出现、勾了确认还要理由，提交带 self_grant_ack", async ({
+  page,
+}) => {
+  const rbac = await mockRbacApi(page, {
+    roles: [
+      {
+        id: "40000000-0000-0000-0000-000000000002",
+        code: "school_admin",
+        name: "校方授权管理员",
+        is_system: true,
+        editable: true,
+        lock_reason: null,
+        version: 5,
+        defaults_applied: true,
+        user_count: 2,
+        permission_codes: [...SCHOOL_ADMIN_DEFAULTS, "school.role.manage"],
+      },
+    ],
+  });
+  // 操作者本人就在 school_admin 里 → 这一格是给"自己"加的（TD-191 的判据）
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: ROLE_MANAGER, roles: ["school_admin"] },
+  });
+
+  await page.goto("/settings/roles");
+  await page.getByTestId("role-school_admin").click();
+  await page.getByTestId("perm-school.personnel.mfa.reset").click();
+
+  await expect(page.getByTestId("role-self-grant-ack")).toBeVisible();
+  await expect(page.getByTestId("role-self-grant-ack")).toContainText("school.personnel.mfa.reset");
+  await expect(page.getByTestId("role-save")).toBeDisabled();
+
+  // 只勾确认不写理由仍然不能保存：镜像后端 SELF_GRANT_REASON_REQUIRED
+  await page.getByTestId("role-self-grant-ack").click();
+  await expect(page.getByTestId("role-save")).toBeDisabled();
+
+  await page.getByTestId("role-save-reason").fill("兼管 MFA 运维，需要重置用户绑定");
+  await expect(page.getByTestId("role-save")).toBeEnabled();
+  await page.getByTestId("role-save").click();
+  await expect(page.locator(".el-message-box")).toContainText("给你本人新增敏感权限");
+  await confirmMessageBox(page);
+
+  await expect(page.getByText("已保存：新增 1 项、移除 0 项")).toBeVisible();
+  expect(rbac.captures.savePermissions).toHaveLength(1);
+  expect(rbac.captures.savePermissions[0]).toMatchObject({ self_grant_ack: true });
+});
+
+test("本页快照落后于库：服务端拒一次后确认条强制出现，草稿与理由都不丢", async ({ page }) => {
+  const rbac = await mockRbacApi(page, {
+    saveRejectOnce: {
+      status: 422,
+      body: {
+        detail: {
+          code: "SELF_GRANT_CONFIRMATION_REQUIRED",
+          message:
+            "本次修改会给自己新增敏感权限：school.personnel.mfa.reset；请显式确认（self_grant_ack）并填写理由",
+        },
+      },
+    },
+  });
+  // 进页面时 /auth/me 说"我不在 school_admin 里"→ 本地预检算不出净增，确认条自然不出现
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: ROLE_MANAGER, roles: ["teacher_b_end"] },
+  });
+
+  await page.goto("/settings/roles");
+  await page.getByTestId("role-school_admin").click();
+  await page.getByTestId("perm-school.personnel.mfa.reset").click();
+  await expect(page.getByTestId("role-self-grant-ack")).toHaveCount(0);
+  await page.getByTestId("role-save").click();
+  await confirmMessageBox(page);
+
+  // 只弹一个 toast 就是死路（不刷新走不出去）：确认条要由服务端判定逼出来，且原来的勾选还在
+  await expect(page.getByTestId("role-self-grant-forced")).toContainText(
+    "school.personnel.mfa.reset",
+  );
+  await expect(page.getByTestId("role-self-grant-ack")).toBeVisible();
+  await expect(page.getByTestId("perm-school.personnel.mfa.reset").locator("input")).toBeChecked();
+  await expect(page.getByTestId("role-save")).toBeDisabled();
+
+  await page.getByTestId("role-self-grant-ack").click();
+  await page.getByTestId("role-save-reason").fill("兼管 MFA 运维，需要重置用户绑定");
+  await page.getByTestId("role-save").click();
+  await confirmMessageBox(page);
+
+  await expect(page.getByText("已保存：新增 1 项、移除 0 项")).toBeVisible();
+  // 逼出来的条不是粘性的：成功后回到正常状态，下次保存不再要求确认
+  await expect(page.getByTestId("role-self-grant-forced")).toHaveCount(0);
+  expect(rbac.captures.savePermissions).toHaveLength(2);
+  expect(rbac.captures.savePermissions[0]).toMatchObject({ self_grant_ack: false });
+  expect(rbac.captures.savePermissions[1]).toMatchObject({
+    self_grant_ack: true,
+    reason: "兼管 MFA 运维，需要重置用户绑定",
+  });
+});
+
+test("改的不是自己所在的角色时不出现确认条：给教师岗配敏感码是日常配置", async ({ page }) => {
+  const rbac = await mockRbacApi(page);
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: ROLE_MANAGER, roles: ["school_super_admin"] },
+  });
+
+  await page.goto("/settings/roles");
+  await page.getByTestId("role-teacher_b_end").click();
+  await page.getByTestId("perm-school.personnel.mfa.reset").click();
+
+  await expect(page.getByTestId("role-self-grant-ack")).toHaveCount(0);
+  await page.getByTestId("role-save").click();
+  await confirmMessageBox(page);
+  expect(rbac.captures.savePermissions[0]).toMatchObject({ self_grant_ack: false });
+});
+
+test("超管给自己所在角色补敏感码：不逼勾选（后端对它免校验），但明说会写审计", async ({ page }) => {
+  const rbac = await mockRbacApi(page);
+  // 本人就在 school_admin 里的超管：判据命中，但 _assert_self_grant 对超管直接放行
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: ROLE_MANAGER, roles: ["school_super_admin", "school_admin"] },
+  });
+
+  await page.goto("/settings/roles");
+  await page.getByTestId("role-school_admin").click();
+  await page.getByTestId("perm-school.personnel.mfa.reset").click();
+
+  await expect(page.getByTestId("role-self-grant-ack")).toHaveCount(0);
+  await expect(page.getByTestId("role-self-grant-notice")).toContainText(
+    "school.personnel.mfa.reset",
+  );
+  // 不填理由也能保存：界面若照普通主体逼勾选，就把后端允许的合法操作禁成了死路
+  await expect(page.getByTestId("role-save")).toBeEnabled();
+  await page.getByTestId("role-save").click();
+  await expect(page.locator(".el-message-box")).toContainText("仍会单独写入自扩权审计");
+  await confirmMessageBox(page);
+
+  await expect(page.getByText("已保存：新增 1 项、移除 0 项")).toBeVisible();
+  expect(rbac.captures.savePermissions[0]).toMatchObject({ self_grant_ack: false });
+});
+
 test("保存遇到 409 版本冲突：载入后端回传的最新版本，不静默覆盖", async ({ page }) => {
   const rbac = await mockRbacApi(page, {
     saveResponse: {

@@ -6,7 +6,7 @@
 
 ---
 
-## 1. 当前状态（截至 2026-10-26）
+## 1. 当前状态（截至 2026-10-27）
 
 | 里程碑 | 功能点 | 状态 |
 |---|---|---|
@@ -29,11 +29,11 @@
 | M2 | M2-ORG06 入学年份与学年流转（班级模型修订） | ✅ 完成（独立审查两轮：第一轮 1M/5m 修复、第二轮 0B/0M PASS；迁移 `b9d3f7c1e5a9` classes 模型修订 + 流转批次表；简报 `docs/design-briefs/M2-ORG06-academic-year.md`） |
 | M2 | M2-UI1 B 端管理页面（人员/受控查看/班级课程/部门树/导入/学年流转 + TD-141） | ✅ 完成（远端 CI frontend #40231010987 / security #40231010964 / backend #40229631514 success；3 条全栈 E2E 因本机 8000 端口被占未跑，登记 TD-183；简报 `docs/design-briefs/M2-UI1-b-end-pages.md`） |
 | M2 | M2-UI2 角色权限配置后台（TD-150 `defaults_applied` + TD-137 角色↔权限接口/页 + TD-143 重置出厂 + TD-126 MFA 重置；权限目录 59→60 码） | ✅ 完成（本地门禁全绿：后端 661 passed / 前端 75 单测 + 57 mock E2E + build / ruff + mypy + alembic check + bandit×2；两轮独立审查 0B/2M/6m → 复审 PASS 0B/0M/6m，见 `docs/review-log.md`；远端 CI backend #40316861186 / frontend #40316861247 / security #40318461683 success（security 首跑被 gitleaks 对测试种子口令误报，按 TD-052 精确白名单修复后重跑绿）；UI 侧真实后端全栈 E2E 因本机 8000 端口被占未跑，登记 TD-192；简报 `docs/design-briefs/M2-UI2-rbac-admin.md`，迁移 head `c3f7a9d1e5b2`） |
-| M2 | M2-UI3 自定义角色 / 多角色绑定 / 权限账号 | ⏳ 未开始（用户 2026-10-26 决策 D2 从 M2-UI2 裁出；TD-187） |
+| M2 | M2-UI3 自定义角色 / 多角色绑定 / 权限账号 | 🔄 进行中（用户 2026-10-26 决策 D2 从 M2-UI2 裁出；简报 `docs/design-briefs/M2-UI3-custom-roles-accounts.md`，§11 六项决策已逐条拍板）。**第一批已交付**：TD-187a（`roles` 两条 CHECK + 迁移 `d7a1c3e5b9f4` + 新码 `school.role.delete`，目录 60→61）+ TD-191 打断层（`app/rbac/self_grant.py` 判据 + `PUT /school/roles/{id}/permissions` 接线：结果集触达本人且净增敏感码须 `self_grant_ack`+理由，超管免打断不免留痕，`school.role.self_grant` 放行与打断都写；前端确认条）——本地门禁全绿（后端 687 passed / ruff+mypy187+bandit×2+alembic check 无漂移 / 前端 lint+format+typecheck+31 单测+14 mock E2E），独立审查 0B/1M/5m（Major=gitleaks 漏放行接线口令已补、Minor 注释与测试 uuid 已修，其余 TD-193~197 处置），见 `docs/review-log.md`。**待做**：TD-187b–g（自定义角色增删接口、角色级范围编辑、用户↔多角色绑定、权限账号启停、业务场景/集成测试、前端角色/权限账号页） |
 | M3/M4 | 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 KB-09/KB-10、AI-10） |
 
 - **建议的下一步顺序**：M2-UI3（自定义角色 / 多角色绑定 / 权限账号，TD-187/191；用户决策 D2 从 M2-UI2 裁出）→ M3 知识库闭环 → M4 AI 与 C 端。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6（M2-UI1/M2-UI2 新增用例见 TD-183/192；本机 8000 端口被另一项目容器占用时不可强杀）。
-- **数据库迁移 head**：`c3f7a9d1e5b2`（M2-UI2：`roles`/`platform_roles` 加 `defaults_applied` + `roles.version` 乐观锁 + `school.personnel.mfa.reset` 权限码）；`alembic check` 应无漂移。
+- **数据库迁移 head**：`d7a1c3e5b9f4`（M2-UI3 第一批：`roles` 加 `ck_roles_code_format_valid` + `ck_roles_builtin_code_is_system` 两条 CHECK、权限目录新增 `school.role.delete`）；上一 head 为 `c3f7a9d1e5b2`（M2-UI2：`defaults_applied` + `roles.version` 乐观锁 + `school.personnel.mfa.reset`）；`alembic check` 应无漂移。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。

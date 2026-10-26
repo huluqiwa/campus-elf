@@ -24,6 +24,7 @@ export interface PermissionFixture {
   module: string;
   action: string;
   description: string;
+  sensitive_self_grant: boolean;
 }
 
 export interface MfaUserFixture {
@@ -103,41 +104,72 @@ export const FIXTURE_PERMISSIONS: PermissionFixture[] = [
     module: "school",
     action: "view",
     description: "查看校方基础看板",
+    sensitive_self_grant: false,
   },
   {
     code: "school.personnel.view",
     module: "school",
     action: "view",
     description: "查看人员档案（按数据范围）",
+    sensitive_self_grant: false,
   },
   {
     code: "school.personnel.mfa.reset",
     module: "school",
     action: "reset",
     description: "重置用户 MFA 绑定（需理由并审计）",
+    // 与后端 SENSITIVE_SELF_GRANT_CODES 同口径：给自己补这一格需要显式确认
+    sensitive_self_grant: true,
   },
   {
     code: "school.role.manage",
     module: "school",
     action: "manage",
     description: "维护角色与权限分配",
+    sensitive_self_grant: true,
   },
   {
     code: "school.kb.view",
     module: "school",
     action: "view",
     description: "查看知识库文档与构建进度",
+    sensitive_self_grant: false,
   },
-  { code: "school.kb.upload", module: "school", action: "upload", description: "上传知识库文档" },
-  { code: "school.message.view", module: "school", action: "view", description: "查看校方消息" },
-  { code: "school.message.send", module: "school", action: "send", description: "发送校方消息" },
+  {
+    code: "school.kb.upload",
+    module: "school",
+    action: "upload",
+    description: "上传知识库文档",
+    sensitive_self_grant: false,
+  },
+  {
+    code: "school.message.view",
+    module: "school",
+    action: "view",
+    description: "查看校方消息",
+    sensitive_self_grant: false,
+  },
+  {
+    code: "school.message.send",
+    module: "school",
+    action: "send",
+    description: "发送校方消息",
+    sensitive_self_grant: false,
+  },
   {
     code: "school.message.read",
     module: "school",
     action: "read",
     description: "标记校方消息已读",
+    sensitive_self_grant: false,
   },
-  { code: "campus.chat.use", module: "campus", action: "use", description: "使用 AI 对话" },
+  {
+    code: "campus.chat.use",
+    module: "campus",
+    action: "use",
+    description: "使用 AI 对话",
+    sensitive_self_grant: false,
+  },
 ];
 
 export const FIXTURE_MFA_USERS: Record<string, MfaUserFixture> = {
@@ -181,6 +213,12 @@ export interface RbacMockOptions {
   mfaUsers?: Record<string, MfaUserFixture>;
   /** 覆盖保存接口响应（默认 200 + 应用后的角色）。 */
   saveResponse?: { status: number; body?: unknown };
+  /**
+   * 只让**第一次**保存失败（之后回到有状态默认行为）。
+   * 用于"服务端判定与本页快照不一致"的路径：真实后端就是拒一次、补上确认再放行；
+   * 用 saveResponse 会把两次都拒掉，测不出界面有没有把出口还给操作者。
+   */
+  saveRejectOnce?: { status: number; body: unknown };
   /** 覆盖重置执行响应（默认 200 + 影响面）。 */
   resetResponse?: { status: number; body?: unknown };
 }
@@ -269,6 +307,9 @@ export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Pr
     }
     if (url.includes("/permissions")) {
       captures.savePermissions.push(route.request().postDataJSON() as Record<string, unknown>);
+      if (options.saveRejectOnce && captures.savePermissions.length === 1) {
+        return route.fulfill(json(options.saveRejectOnce.status, options.saveRejectOnce.body));
+      }
       if (options.saveResponse) {
         return route.fulfill(
           json(options.saveResponse.status, options.saveResponse.body ?? { detail: {} }),

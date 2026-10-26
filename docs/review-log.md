@@ -458,6 +458,25 @@
 - 远端 CI：`dae60d5` 上 backend #40316861186、frontend #40316861247 success；security #40316861178 首跑失败——gitleaks 对 3 处业务场景测试种子口令报 `generic-api-key`（`test_bs_m2ui2_rbac_admin.py:138`、`test_bs_m2ui2_mfa_admin.py:32/368`）。按 TD-052 口径补 8 条**精确字符串**白名单（不做 tests 目录豁免，否则真实凭证同样被挡住），提交 `2b7892f` 后 security #40318461683 success。该提交只改根配置，backend/frontend 按目录路径过滤未重跑，结论沿用上一提交。
 - 结论：**已交付**（第二轮 0 Blocker / 0 Major；6 项新 Minor 中 4 项已实现、2 项以 TD/注释显式处置；三条工作流在 `main` 顶端全绿）。
 
+### M2-UI3 第一批：自定义角色库层不变量 + 自扩权显式确认守卫（2026-10-27）
+
+- 范围：本批只交付 M2-UI3 的后端地基——TD-187a（`roles` 两条 CHECK 约束 + 迁移 `d7a1c3e5b9f4` + 新码 `school.role.delete`）与 TD-191 收口（`app/rbac/self_grant.py` 判据 + `PUT /school/roles/{id}/permissions` 接线 + 前端确认条）。简报 §8 步骤 3/5 剩余的自定义角色 CRUD/绑定/启停/范围编辑（TD-187b–g）尚未落地，留后续批次。
+- commit/diff：staged diff（后端 `self_grant.py`/`admin.py`/`school_rbac.py`/`catalog.py`/`models/rbac.py`/迁移 + 4 份新增测试；前端 `rbac-logic.ts`/`RoleSettingsView.vue`/`api-client/rbac.ts`/`admin-roles.spec.ts`/`rbac-mock.ts`；文档 `design.md`/`rbac-matrix.md`/`tech-debt.md`/简报/`.gitleaks.toml`）
+- 审查人/agent：独立审查子 agent（只读，与实现者独立上下文；静态审 diff + 交叉核对 `seeds.py`、`principal.py`、迁移全文）。测试栈结论由实现侧复跑提供（见下复测）。
+- 第一轮 Findings：**0 Blocker / 1 Major / 5 Minor**
+  - **Major #1** `.gitleaks.toml` 漏放行 `test_rbac_self_grant_wiring.py:38` 的种子口令 `SelfGr-Wiring-Pass-1`（只加了 Super/Admin 两条），按仓内「每个测试口令精确入白名单」的既有口径，security 工作流大概率 `generic-api-key` 翻红。处置：白名单补 `"SelfGr-Wiring-Pass-1"` 一行并把注释改为覆盖业务场景 + 接线集成两类（本机无 gitleaks，以与既证条目同形的一致性核验，远端 CI 为准）。
+  - Minor #2 `admin.py` 注释「守卫被三条写路径共用」超前描述（当前仅替换路径接线，另两条 TD-187b/d 未落地）→ 改为「应由三条共用（当前仅替换路径，见 TD-194）」。
+  - Minor #3 超管免打断用 `principal.roles`（请求进入时解析）、判据用事务内重读，同一请求内存在「进入时是超管、写时已不是」的窗口（跨请求无 fail-open）→ 已在 TD-195 登记（抽 helper 时统一为事务内读取），本期不改一半口径。
+  - Minor #4 新集成用例用 `abs(hash(...))%100000` 生成租户码，PYTHONHASHSEED 扰动 + 5 位截断可撞 → 改 `uuid4().hex[:8]`，与同批 business/wiring 用例的 `uuid4` 口径统一。
+  - Minor #5 项目根遗留本会话 scratch 测试输出（fe-*.txt / vitest-admin.txt / pw-*.txt）→ 提交前删除，未入库。
+  - Minor #6（记于 TD-193）打断分支新增第二个嵌套 `db_session` 审计点，把被拒请求池占用从「≤2 连接」抬到「2 连接 + 2 次审计写」→ 不改结论，提高 M3 前收口优先级。
+- 重点核对项结论（审查逐条）：租户隔离（两条 SQL 均 `tenant_id` 过滤 + `role_permissions` 复合 `tenant_id` join，无跨租读）；判据用「最终全量集 ∩ 敏感 − 库内当前并集」而非提交差集、写事务内重读（`test_rbac_self_grant_wiring.py` 双向钉谎报/漏报）；拒绝在 `version+1` 之前（422 不推高版本）；打断走独立事务、放行同事务，两条 `self_grant` 的 `reason` 语义差异三处声明一致、无 PII；CHECK 内置码 5 个与 `seeds.py:TENANT_BUILTIN_ROLES` 逐一相等、`down_revision=c3f7a9d1e5b2` 为当时唯一 head、downgrade 只删约束、带存量预检；前端敏感清单后端下发不复刻、未勾默认 false、422 强制展开保留草稿。
+- 复测（实现侧，真实测试栈）：
+  - 后端全量 **687 passed**（390 单元 / 229 集成 / 68 业务场景，exit 0）；`ruff check app tests`、`mypy --no-incremental app tests`（187 文件）0 错误；`bandit -r app -x tests`、`-r alembic -s B608` exit 0；`alembic upgrade head` + `alembic check` 无漂移。
+  - 前端 lint / format:check / typecheck 通过；`--filter admin test:unit` 31 passed；`playwright test admin-roles.spec.ts` 14 passed（含自扩权预检命中、快照落后被服务端逼出、超管 audit_only 三条新路径）。
+- 更好做法与 TD 处置：TD-187a 已完成、TD-191 打断层已完成（硬封+双人确认留 M6）；本批审查提出的守卫抽 helper（TD-194，已采纳→TD-187b/d）、并集查询单一入口（TD-195，已采纳→M3）、超管漂移态分支不可达（TD-196，已延后→M6）、code 长度 63 vs 列宽 64（TD-197，已采纳→TD-187b）、拒绝审计池占用（TD-193 提优先级）均已登记。
+- 结论：**本批可提交**（0 Blocker；Major #1 与 Minor #2/#4/#5 已处置，#3/#6 以 TD 显式处置）；M2-UI3 功能点整体未完成，TD-187b–g 待续。
+
 ## 高风险功能复审记录
 
 | 功能点 | 复审人 | 日期 | 结论 |

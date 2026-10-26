@@ -20,6 +20,7 @@ from app.personnel import mfa_admin
 from app.personnel.mfa_admin import MfaAdminError
 from app.rbac import admin
 from app.rbac.admin import ResetPreview, RoleAdminError, RoleSummary
+from app.rbac.self_grant import SENSITIVE_SELF_GRANT_CODES
 
 router = APIRouter(prefix="/school", tags=["school"])
 
@@ -49,6 +50,9 @@ class PermissionResponse(BaseModel):
     module: str
     action: str
     description: str
+    # 自扩权敏感码（TD-191）：随目录一起下发，前端据此决定要不要弹确认。
+    # 不在前端复刻一份清单——否则后端加一个敏感码，前端的提示就静默失效了。
+    sensitive_self_grant: bool
 
 
 class RolePermissionPayload(BaseModel):
@@ -57,6 +61,9 @@ class RolePermissionPayload(BaseModel):
     permission_codes: list[str]
     version: int = Field(ge=0)
     reason: str | None = Field(default=None, max_length=500)
+    # 自扩权显式确认（TD-191）：结果集触达自己所在角色且净增敏感码时必须为 true，
+    # 默认 false —— 缺省不确认，前端不勾选即 422，而不是静默放行。
+    self_grant_ack: bool = False
 
 
 class ResetPreviewResponse(BaseModel):
@@ -163,6 +170,7 @@ async def list_permissions(
             module=entry.module,
             action=entry.action,
             description=entry.description,
+            sensitive_self_grant=entry.code in SENSITIVE_SELF_GRANT_CODES,
         )
         for entry in admin.list_permissions()
     ]
@@ -175,11 +183,12 @@ async def replace_role_permissions(
     request: Request,
     manager: Annotated[Principal, RoleManagerDep],
 ) -> RoleResponse:
-    """全量替换角色权限（版本锁 + 审计 diff）。
+    """全量替换角色权限（版本锁 + 审计 diff + 自扩权显式确认）。
 
     异常:
         HTTPException: 404（角色不存在/跨租）、409（锁定角色/版本冲突/目录漂移）、
-            422（非法权限码，或非超管试图授予 `school.role.manage`）。
+            422（非法权限码、非超管试图授予 `school.role.manage`、
+            自扩权未确认 `SELF_GRANT_CONFIRMATION_REQUIRED` 或未填理由）。
     """
 
     try:
@@ -190,6 +199,7 @@ async def replace_role_permissions(
             version=payload.version,
             reason=payload.reason,
             request_id=getattr(request.state, "request_id", None),
+            self_grant_ack=payload.self_grant_ack,
         )
     except RoleAdminError as exc:
         raise _role_error(exc) from exc

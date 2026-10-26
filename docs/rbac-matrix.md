@@ -97,6 +97,7 @@
 | `school.personnel.mfa.reset` | 重置用户 MFA 绑定（理由+审计；TD-126） |
 | `school.permission_account.manage` | 权限账号/角色 |
 | `school.role.manage` | 角色/权限分配 |
+| `school.role.delete` | 删除自定义角色（M2-UI3，与配置权限分离） |
 | `school.kb.view` | 文档/构建进度 |
 | `school.kb.upload` | 上传 |
 | `school.kb.approval` | 知识库审批 |
@@ -152,7 +153,7 @@
 > KB 上传（2026-10-22 改口径）：对持后台账号的角色默认开放（含教师 B 端）。配套约束：上传者**永不自批**（M1-E2 已交付，三道锁见 §5-4）；上传后设置查阅人群默认限本人/本人任课范围，**扩到全校需管理员二次确认并留审计**（M3，依赖 `school.kb.acl.manage`）。
 
 > **矩阵如何被机器校验（2026-10-23 补）**：每个权限组一行「对应权限码」，行与行不重不漏、并集等于
-> §3 的 60 码；8 个角色列与 `backend/app/rbac/seeds.py` 的**出厂默认**逐列相等（√ 集合 = 该角色默认
+> §3 的 61 码（M2-UI3 增 `school.role.delete`）；8 个角色列与 `backend/app/rbac/seeds.py` 的**出厂默认**逐列相等（√ 集合 = 该角色默认
 > 权限集，△ 集合 ∉ 默认）。两个「范围内全量」角色按范围比对，不按 `seeds` 里的字面量：
 > 校方超管 = 全部租户域码；平台超管列只覆盖平台运维域码（16 个）——它的 `seeds` 默认按 §5-11 持有
 > 目录全量，但对租户域行仍是 —，因为平台主体走校方接口会被 realm 守卫拒绝（`require_permission(..., realm=)`），
@@ -177,6 +178,7 @@
 | 敏感字段完整查看 | `school.personnel.sensitive.read` | — | — | — | √ | △ | — | — | — |
 | MFA 重置 | `school.personnel.mfa.reset` | — | — | — | √ | △ | — | — | — |
 | 权限账号/角色 | `school.permission_account.manage` `school.role.manage` | — | — | — | √ | △ | — | — | — |
+| 角色删除 | `school.role.delete` | — | — | — | √ | △ | — | — | — |
 | KB 查看/构建进度 | `school.kb.view` | — | — | — | √ | √ | △ | — | — |
 | KB 上传 | `school.kb.upload` | — | — | — | √ | △ | √ | — | — |
 | KB 审批 | `school.kb.approval` | — | — | — | √ | △ | — | — | — |
