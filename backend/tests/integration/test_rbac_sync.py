@@ -233,29 +233,72 @@ async def _permission_snapshot(session: AsyncSession) -> set[str]:
     return rows
 
 
+async def _constraint_exists(session: AsyncSession, name: str) -> bool:
+    """库内是否还有这条约束（临时摘/装 CHECK 的用例用它自检 teardown）。"""
+
+    value = await session.scalar(
+        text("select exists (select 1 from pg_constraint where conname = :name)"),
+        {"name": name},
+    )
+    return bool(value)
+
+
 async def test_sync_refuses_to_touch_non_system_role_with_builtin_code(
     admin_session: AsyncSession,
 ) -> None:
-    """内置角色码撞上运营自建角色（is_system=false）→ fail-fast，不动它的数据。"""
+    """内置角色码撞上运营自建角色（is_system=false）→ fail-fast，不动它的数据。
+
+    M2-UI3 的 `ck_roles_builtin_code_is_system`（迁移 `d7a1c3e5b9f4`）已让这种行**进不了新库**，
+    所以这里临时摘掉约束来还原"约束上线前的存量库"：应用层那道守卫兜的正是这批历史数据，
+    它必须仍然有效——不能因为有 CHECK 就把它当死代码删掉。用例结束把约束装回去。
+    """
 
     tenant_id = await _create_tenant(admin_session, "自建角色学校")
+    # 进出都探针：摘掉约束的用例一旦被中途 kill（或 teardown 的 ALTER 失败），整轮测试就跑在
+    # "库层不变量不存在"的库上，后面的用例只会静默少一层保护。两侧都断言，坏状态当场暴露。
+    assert await _constraint_exists(admin_session, "ck_roles_builtin_code_is_system")
     await admin_session.execute(
-        text(
-            """
-            insert into public.roles (id, tenant_id, code, name, is_system)
-            values (gen_random_uuid(), cast(:t as uuid), 'school_admin', '校方自建管理员', false)
-            """
-        ),
-        {"t": tenant_id},
+        text("alter table public.roles drop constraint ck_roles_builtin_code_is_system")
     )
-    await admin_session.commit()
+    try:
+        await admin_session.execute(
+            text(
+                """
+                insert into public.roles (id, tenant_id, code, name, is_system)
+                values (gen_random_uuid(), cast(:t as uuid), 'school_admin', '校方自建管理员', false)
+                """
+            ),
+            {"t": tenant_id},
+        )
+        await admin_session.commit()
 
-    # 前置检查失败即不执行任何语句：同步前后的角色映射不变
-    snapshot_before = await _permission_snapshot(admin_session)
-    with pytest.raises(RuntimeError, match="非系统角色"):
-        await sync_rbac_definitions(admin_session)
-    await admin_session.rollback()
-    assert await _permission_snapshot(admin_session) == snapshot_before
+        # 前置检查失败即不执行任何语句：同步前后的角色映射不变
+        snapshot_before = await _permission_snapshot(admin_session)
+        with pytest.raises(RuntimeError, match="非系统角色"):
+            await sync_rbac_definitions(admin_session)
+        await admin_session.rollback()
+        assert await _permission_snapshot(admin_session) == snapshot_before
+    finally:
+        # 坏行必须先删再装约束，否则 PG 自己会拒绝（这正是约束的用途）。
+        await admin_session.execute(
+            text(
+                "delete from public.roles "
+                "where tenant_id = cast(:t as uuid) and is_system is not true"
+            ),
+            {"t": tenant_id},
+        )
+        await admin_session.commit()
+        await admin_session.execute(
+            text(
+                "alter table public.roles add constraint ck_roles_builtin_code_is_system "
+                "check (is_system or code not in "
+                "('school_super_admin', 'school_admin', 'teacher_b_end', 'student', 'teacher'))"
+            )
+        )
+        await admin_session.commit()
+        assert await _constraint_exists(admin_session, "ck_roles_builtin_code_is_system"), (
+            "teardown 未能装回 `ck_roles_builtin_code_is_system`：本用例之后的库层不变量已失效"
+        )
 
 
 async def test_sync_refuses_to_delete_legacy_codes_still_granted_to_operator_role(

@@ -642,8 +642,8 @@ GET  /api/v1/platform/tenants/{id}/review-records
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/school/roles` | 角色列表：`id/code/name/is_system/editable/lock_reason/version/defaults_applied/user_count/permission_codes` |
-| GET | `/school/permissions` | 权限目录（`code/module/action/description`），前端按 `module` 分组渲染 |
-| PUT | `/school/roles/{role_id}/permissions` | 全量替换权限：`{permission_codes[], version, reason?}` → 最新 `RoleResponse` |
+| GET | `/school/permissions` | 权限目录（`code/module/action/description/sensitive_self_grant`），前端按 `module` 分组渲染；`sensitive_self_grant` 由后端从 `SENSITIVE_SELF_GRANT_CODES` 派生，前端不复刻清单 |
+| PUT | `/school/roles/{role_id}/permissions` | 全量替换权限：`{permission_codes[], version, reason?, self_grant_ack?}` → 最新 `RoleResponse` |
 | POST | `/school/roles/{role_id}/reset/preview` | 重置出厂影响面（只读，不写库、不审计） |
 | POST | `/school/roles/{role_id}/reset` | 执行重置：`{confirm_role_code, reason, version}` → 影响面；权限与数据范围一并重种（D3） |
 | GET | `/school/users/lookup?login_id=` | 按登录名精确定位用户：`{id, display_name, user_type, status, mfa_enabled, roles[]}`，不回显登录名/邮箱/身份证/MFA 字段 |
@@ -663,6 +663,8 @@ GET  /api/v1/platform/tenants/{id}/review-records
 | `UNKNOWN_PERMISSION_CODE` | 422 | 目录外的码 |
 | `PLATFORM_PERMISSION_FORBIDDEN` | 422 | 试图授予平台 realm 的码 |
 | `ROLE_CODE_NOT_DELEGABLE` | 422 | 非超管主体试图把 `school.role.manage` 写进任一角色（见下） |
+| `SELF_GRANT_CONFIRMATION_REQUIRED` | 422 | 本次写入的结果集**触达操作者自己所在的角色**且**净增**敏感码，但未带 `self_grant_ack=true`（TD-191 收口，见下） |
+| `SELF_GRANT_REASON_REQUIRED` | 422 | 已勾选 `self_grant_ack` 但理由为空或全空白 |
 | `ROLE_CODE_MISMATCH` | 422 | 重置时二次确认的角色编码与目标不一致 |
 | `RESET_REASON_REQUIRED` | 422 | 重置理由 <10 字（角色重置与 MFA 重置同一码） |
 | `LOGIN_ID_REQUIRED` | 422 | 定位时登录名为空 |
@@ -675,10 +677,20 @@ GET  /api/v1/platform/tenants/{id}/review-records
 - **预览/执行一致性与出厂不变量**：重置的重种语句按 `rbac_builtin_role_defaults`（和 `..._scope_defaults`）join `permissions` 写库，**当前**不可能静默少种，因为 `fk_rbac_builtin_role_defaults_permission_code_permissions` 与 `fk_role_permissions_permission_id_permissions` 都是 `ON DELETE CASCADE`——删一个 `permissions` 行会连带删掉引用它的出厂定义与所有租户映射，所以"库里缺码但定义表还引用它"这个状态在库层不存在。该结论依赖外键而不是代码，因此执行路径仍做一次**条数复核**（重种返回的行数 vs 定义表应有的行数，不符 → 409 `PERMISSION_CATALOG_OUT_OF_SYNC` 整体回滚）：将来谁把 FK 改成 RESTRICT/NO ACTION 或允许软删，这里会报错而不是"预览承诺 N 项、实种 N-k 项、还顺手把 `defaults_applied` 置真让同步永不回填"。全量替换侧同理，写前探针 + 写后条数复核两道。
 
 - **`school.role.manage` 不可转授**：持有者能给自己所在角色补任意 `school.*`/`campus.*` 码，等于无审计的本校超管；因此只有 `school_super_admin` 主体能把该码写进权限集合（`_assert_delegable` → 422 `ROLE_CODE_NOT_DELEGABLE` + 拒绝审计）。这是接口层规则，不改权限矩阵（`school_admin` 那一格仍是「△=可由超管按需授予」）。
-  - **禁令的边界（有意识接受的残余风险，TD-191）**：本条只封住**这个码本身的扩散**，不封住"已被授予 `role.manage` 的管理员给自己所在角色补其它敏感码"（如 `school.personnel.sensitive.read`/`school.personnel.delete`/`school.personnel.mfa.reset`）——他仍可提交一份不含 `role.manage` 的权限集通过校验。收窄方案（"提交的码 ⊆ 自己已有的码"或"禁止编辑自己所在角色"）都会把运营的正常配置流一起挡掉，故本期不做；代价是**授予 `role.manage` 事实上等同授予本校全部权限**，必须视为超管级动作：只有校方超管能授、每次授予都留 `school.role.permissions.updated` 审计（added 里出现该码即应可被复盘）。真正的收口要么拆成"只能授自己已有的码"（需先有多角色/按人授权模型，M2-UI3），要么给敏感码单独再加一层二次确认。
+  - **本条只封住「这个码的扩散」**，封不住"放弃该码换别的敏感码"（提交一份不含 `role.manage` 的权限集即可绕过）——那条边界在 M2-UI2 当期是**有意识接受的残余风险**（TD-191），已由 M2-UI3 的自扩权守卫收口，见下条。两道墙的顺序也是契约：带 `role.manage` 的提交先撞转授禁令，到不了自扩权判定。
+
+- **自扩权必须显式确认（M2-UI3：TD-191 收口，简报 §6 方案 A / 决策 #4）**：`SENSITIVE_SELF_GRANT_CODES = {school.role.manage, school.role.delete, school.personnel.sensitive.read, school.personnel.delete, school.personnel.mfa.reset, school.org.manage}`。一次写操作的**结果权限集**（不是提交差集）如果 ① 会经 `user_roles` 流到操作者自己所在的任一角色，且 ② 含操作者当前**没有**的敏感码，则：
+  - 必须 `self_grant_ack=true` + 非空理由，否则 422 `SELF_GRANT_CONFIRMATION_REQUIRED` / `SELF_GRANT_REASON_REQUIRED`，并且**在版本 CAS 之前**拒绝（`roles.version` 不前进、映射不变）；
+  - `school.role.self_grant` **放行与打断都写**（简报 §6 决策 #4 的「无论是否放行都写」）：放行时同事务（`result="success"`，字段 `role_code` / `newly_reaching_self` / `confirmed_by` / `reason`），被打断时在独立事务（`result="denied"`，与通用 `*.denied` 一起）。只记成功案例的报警等于只看得到得手的人，反复试探看不出来。两条审计的 `metadata` 都带 `newly_reaching_self`，打断侧额外带 `self_grant_ack`（区分"没勾框"与"勾了框没写理由"）；专项审计不替代通用 `*.updated` 流水，两者可交叉核对——完整前后码集只在 `*.updated`（`added`/`removed`，`before = (after ∪ removed) − added` 可还原），专项审计只记触达路径，同一份数据不存两遍。
+  - **同一 `action` 两侧的 `reason` 含义不同（审计消费方必读）**：`result="success"` 侧的 `reason` 是操作者填写的自由文本理由；`result="denied"` 侧是判据码（`SELF_GRANT_CONFIRMATION_REQUIRED` / `SELF_GRANT_REASON_REQUIRED`，与本项目所有 `*.denied` 同口径）。按 `result` 分流即可，不要假设 `reason` 恒为自由文本。
+  - 持有 `school_super_admin` 的主体**免打断**（不校验 ack 与理由）但**不免留痕**（`confirmed_by="super_admin"`）——否则每次正常配置都要重复勾选，运营会绕道自建角色。这条分支在**一致种子下不可达**（超管按矩阵 §4 持本校 school+campus 全量，敏感清单全在 school 域 → 净增恒为空），它兜的是"超管角色映射落后于目录"的漂移态（存量库/同步未跑/人工修剪）：那种状态下最高权限账号不能被判成死路。业务场景 BS-M2UI3-D 用显式删映射来还原漂移态并钉住这个分支。
+  - 「操作者当前没有什么」在**写事务内重读**（`_principal_permission_codes`），不用认证依赖那次请求解析的快照：同一账号在两个标签页并发操作时，快照可能落后一条绑定，会把该挡的漏掉或把不该问的多问一遍；角色绑定判据（`_principal_role_ids`）本来就读库，两侧口径必须一致。这条接线由 `tests/integration/test_rbac_self_grant_wiring.py` 双向钉住（直接调服务层、喂一个故意与库不一致的 `Principal`）：快照**谎称已持有**仍必须打断（否则伪造快照就能绕过确认），快照**漏报**库里已经持有的码不得打断（否则挡正常流）。HTTP 用例跑不出这个分叉——两侧 SQL 同源、同一请求内必然相等，只有并发或直调服务层才能分开。
+  - 判据为什么是「净增」而不是「角色里出现敏感码」：管理员本就持有某敏感码时，把它补进自己所在角色没有扩大他的能力面，属日常配置；只有能力变大才需要确认。这让守卫不挡正常流，同时保证每一次"变大"都留下可复盘的审计。
+  - **前端预检只是提示，防线始终在服务端**：`selfExpansionCodes`（`frontend/apps/admin/src/rbac-logic.ts`）吃的是进入页面时的角色码集 + `/auth/me` 权限并集，两份快照都可能落后于库（典型：本次会话内别人把操作者绑进了被编辑的角色）。因此本地算不出净增而服务端仍拒时，`RoleSettingsView` 用 422 的 `SELF_GRANT_*` 判据码**强制展开确认条并保留草稿**（不重新 `load()`：那会把操作者已勾的权限和已写的理由一起清掉，是比死路更糟的"修复"），成功保存或切换角色后清零。反过来本地命中而服务端放行，只是多一个勾选框，不构成风险。
+  - **这是显式化，不是硬封**：被确认过的自扩权仍会发生（全程可查、可事后撤）。完整硬封（"只能授自己已有的码"）与双人确认合并留给 M6 审批引擎（TD-191 处置）。
 
 
-**审计**：成功与拒绝都留痕。`school.role.permissions.updated` / `school.role.reset` / `school.user.lookup` / `school.user.mfa_reset`；拒绝侧 `school.role.permissions.denied` / `school.role.reset_denied` / `school.user.mfa_reset_denied` 以及登录名未命中的 `school.user.lookup`。拒绝审计写在**独立事务**（服务层在写事务内 raise 会连同样事务的审计一起回滚），`result="denied"`、`metadata` 只放判据码，不放登录名等敏感明文；审计写入失败只降级为 warning 日志，不改变拒绝结果。
+**审计**：成功与拒绝都留痕。`school.role.permissions.updated` / `school.role.self_grant` / `school.role.reset` / `school.user.lookup` / `school.user.mfa_reset`；拒绝侧 `school.role.permissions.denied` / `school.role.reset_denied` / `school.user.mfa_reset_denied` 以及登录名未命中的 `school.user.lookup`。`school.role.self_grant` 是**两侧都有**的那一条：成功时 `result="success"` 记在同一事务，被打断时 `result="denied"` 记在独立事务（见 §5.12 自扩权）。拒绝审计写在**独立事务**（服务层在写事务内 raise 会连同样事务的审计一起回滚），`result="denied"`、`metadata` 只放判据码，不放登录名等敏感明文；审计写入失败只降级为 warning 日志，不改变拒绝结果。
 
 - **哪些拒绝算安全事件（M2-UI2 审查 m3 的处置）**：写侧（改权限、执行重置、MFA 重置）的**全部拒绝**都留痕，包括 404 `ROLE_NOT_FOUND`/`USER_NOT_FOUND`——"拿着别人家的 id 来改"本身就是越权探测信号，与 MFA 侧 `USER_NOT_FOUND` 同口径；`metadata.reason` 只记判据码，响应仍是与"不存在"同形的 404，不暴露对方租户。反之 `ROLE_VERSION_CONFLICT`/`ROLE_CODE_MISMATCH`/`RESET_REASON_REQUIRED` 是**用错了**而非越权，不落安全审计（否则正常配置流会淹掉真实信号）。只读的 `reset/preview` 不审计：它不改任何状态，且调用者已具备 `school.role.manage`；`user/lookup` 虽也只读却审计，因为它的入参是**登录名**——枚举本校账号是 MFA 重置链路的前置探测面。
 
@@ -841,7 +853,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 - 15 分钟内 5 次失败锁定 15 分钟，对外统一凭证错误文案并审计真实原因；密码重置清锁。MFA TOTP 可选（M1-D2）。
 - 角色/权限/数据范围矩阵见 `docs/rbac-matrix.md`。
 - **RBAC 落地口径（M1-E1，2026-10-23）**：
-  - 权限项目录跟代码走 — `app/rbac/catalog.py`（60 码，`module`/`action` 由码前缀派生），迁移 `e5f7a9c1b3d5` 经 `sync_rbac_definitions()` upsert 到 `permissions`；库里出现目录外的码 = 界面能勾但后端没有校验点的假开关，因此**新增权限项必须发版**。
+  - 权限项目录跟代码走 — `app/rbac/catalog.py`（61 码，M2-UI3 增 `school.role.delete`；`module`/`action` 由码前缀派生），迁移 `e5f7a9c1b3d5` 经 `sync_rbac_definitions()` upsert 到 `permissions`；库里出现目录外的码 = 界面能勾但后端没有校验点的假开关，因此**新增权限项必须发版**。
   - 角色↔权限映射与数据范围是**数据**：内置角色与其出厂默认放在两张代码持有的定义表 `rbac_builtin_roles`/`rbac_builtin_role_defaults`，新租户由 `provision_tenant()` 与平台审核 `review_registration_request()` 共同调用 `public.seed_builtin_roles(tenant_id)`（SECURITY DEFINER）写入；存量租户由同步补齐。运营在库里的增删改（界面 M2）不被同步覆盖。
   - 补写分两种口径：超管（`school_super_admin`/`platform_super_admin`）**只补不撤**（语义是跟着目录全量走）；其他内置角色仅在 `roles.defaults_applied = false`（出厂默认尚未初始化）时写一次默认，之后运营主动清空也不会被补回（TD-150，2026-10-26 起取代原“角色尚无任何映射”判据）。见 `app/rbac/seeds.py:FULL_SCOPE_ROLES`。
   - 每个接口都必须声明权限：`require_permission(码, realm=…)`（realm 必传，权限目录是全局的，码本身不构成跨 realm 边界）；免鉴权路由进显式白名单并写理由，由 `tests/test_route_permission_manifest_unit.py` 钉住（忘挂鉴权、幽灵码、白名单过期或越类都会让 CI 红）。
@@ -857,7 +869,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 - **角色配置与管理员重置落地口径（M2-UI2，2026-10-26）**：
   - 可编辑角色只有 `EDITABLE_ROLE_CODES = {school_admin, teacher_b_end}`；`school_super_admin`（权限随代码目录全量走）、`student`/`teacher`（内置数据范围由系统固定）与自定义角色（待 M2-UI3）一律 `editable=false` + `lock_reason`，接口侧 409 兜底，前端禁用只是 UX。
   - **`school.role.manage` 不可转授**：持有者能给自己所在角色补任意 `school.*`/`campus.*` 码，等于无审计的本校超管；因此只有 `school_super_admin` 主体能把该码写进权限集合（`_assert_delegable` → 422 `ROLE_CODE_NOT_DELEGABLE` + 拒绝审计）。这是接口层规则，不改权限矩阵。
-  - **禁令的边界（有意识接受的残余风险，TD-191）**：本条只封住**这个码本身的扩散**，不封住"已被授予 `role.manage` 的管理员给自己所在角色补其它敏感码"（如 `school.personnel.sensitive.read`/`school.personnel.delete`/`school.personnel.mfa.reset`）——他仍可提交一份不含 `role.manage` 的权限集通过校验。收窄方案（"提交的码 ⊆ 自己已有的码"或"禁止编辑自己所在角色"）都会把运营的正常配置流一起挡掉，故本期不做；代价是**授予 `role.manage` 事实上等同授予本校全部权限**，必须视为超管级动作：只有校方超管能授、每次授予都留 `school.role.permissions.updated` 审计（added 里出现该码即应可被复盘）。真正的收口要么拆成"只能授自己已有的码"（需先有多角色/按人授权模型，M2-UI3），要么给敏感码单独再加一层二次确认。
+  - **自扩权显式确认（TD-191 收口，M2-UI3，2026-10-26）**：§5.12 那条「禁令的边界」不再是有意识接受的残余风险——结果集触达操作者自己所在的角色且**净增**敏感码时，必须 `self_grant_ack=true` + 非空理由（超管免打断、不免留痕），拒绝在版本 CAS 之前（422 `SELF_GRANT_CONFIRMATION_REQUIRED`/`SELF_GRANT_REASON_REQUIRED`，`roles.version` 与映射都不动）。审计**放行与打断都写**：成功同事务、打断走独立事务，因此 `school.role.self_grant` 既是"能力面流向本人"的报警键，也是"谁在反复试探"的报警键。「操作者已持有什么」在写事务内重读，不吃认证依赖的请求快照。硬封（只能授自己已有的码）+ 双人确认仍在 TD-191 名下等 M6 审批引擎。判据与方案对比见 §5.12 与 `docs/design-briefs/M2-UI3-custom-roles-accounts.md` §6。
   - 写操作统一「全量替换 + 版本 CAS」：`version` 不匹配 → 409 附 `latest`；重置也先 compare-and-set 占版本再删/种，两个动作共用同一把锁口径。目录漂移（代码有、库无）在 CAS 之前拦截为 409 `PERMISSION_CATALOG_OUT_OF_SYNC`，避免把"同步未跑"伪装成"权限码非法"；重置的重种另有条数复核（见 §5.12「预览/执行一致性与出厂不变量」）。
   - **TD-150 标记只管权限、不管数据范围**：同步判据是 `defaults_applied IS NOT TRUE`，而内置角色的范围在 `seed_builtin_roles()` 时已授过，所以一个「映射非空、范围被清空」的内置角色**不会被同步回填范围**——持有者从此看不到任何数据。本期不扩语义（扩成"两侧各自判缺失"会把运营刻意清掉的范围又补回来），口径是：清范围是有意操作，走 `POST /school/roles/{id}/reset` 恢复出厂（预览会列出 `scopes_added`）。
   - 拒绝审计走**独立事务** best-effort（`_audit_denied`）：服务层在写事务内 raise 会让同事务审计一起回滚，而"谁试过提权/谁试过重置锁定角色"本身就是安全事件；审计 `metadata` 只放判据码（统一 SCREAMING_SNAKE，便于巡检按 reason 分组），不放登录名等明文，写失败只降级为 warning 且不改变拒绝结果。裸 SQL 模块需进守卫清单豁免（`MAX_EXEMPT_MODULES`）。代价：外层事务此刻可能持着 `roles ... FOR UPDATE`，被拒请求因此占两条连接池连接——无锁环（审计写另一张表），但池满时会阻塞而非立刻返回，登记 TD-193（M3 前评审，收口要把审计挪出事务，须与 `personnel/service.py` 一起改）。

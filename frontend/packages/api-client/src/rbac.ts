@@ -24,12 +24,16 @@ export interface PermissionView {
   module: string;
   action: string;
   description: string;
+  /** 自扩权敏感码（TD-191）：写进自己所在角色时后端要求显式确认，前端据此提前弹框。 */
+  sensitive_self_grant: boolean;
 }
 
 export interface RolePermissionsInput {
   permission_codes: string[];
   version: number;
   reason?: string | null;
+  /** 自扩权显式确认：后端在结果集触达操作者本人且净增敏感码时校验（超管免）。 */
+  self_grant_ack?: boolean;
 }
 
 export interface ResetPreview {

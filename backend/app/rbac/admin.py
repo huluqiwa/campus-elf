@@ -7,6 +7,9 @@
 - 映射是**运营配置**：接口全量替换并写审计 diff；`roles.version` 乐观锁拒绝并发覆盖；
 - 重置出厂恢复**权限与数据范围**两侧，执行前可预览影响面；
 - `school.role.manage` 只能由校方超管本人授出（转授即等于无条件把本校全部权限交出去）；
+- 自扩权（TD-191 收口）：结果集触达操作者自己所在角色、且净增敏感码时，必须带
+  `self_grant_ack=true` + 理由（超管免打断）。`school.role.self_grant` 审计**放行与打断都写**
+  ——放行时同事务，被打断时走独立事务（外层回滚会带走同事务的留痕）；
 - 所有写入在租户连接内完成（RLS + 显式 tenant_id 过滤），跨租 role_id 与不存在同形 404；
 - 被拒的写操作（锁定角色、非法转授）在**独立事务**写 `*.denied` 审计——外层事务会回滚，
   同事务写的拒绝留痕跟着一起消失。
@@ -24,6 +27,7 @@ from app.audit.writer import append_audit
 from app.auth.principal import Principal
 from app.db.session import db_session
 from app.rbac.catalog import PERMISSION_CATALOG, TENANT_MODULES, PermissionDef, permission_def
+from app.rbac.self_grant import SelfGrantExposure, evaluate_self_grant
 
 logger = logging.getLogger(__name__)
 
@@ -216,11 +220,15 @@ async def _audit_denied(
     resource_id: str,
     reason: str,
     request_id: str | None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """被拒操作留痕（独立事务，best-effort）。
 
     服务层在写事务内 raise 时外层会整体回滚，同事务写的审计一起消失；拒绝本身是安全事件
     （谁试图改锁定角色/试图转授提权码），必须留下痕迹。审计故障不得改变拒绝结果。
+
+    `extra` 用于判据本身需要上下文才可读的动作（自扩权要看到具体敏感码清单）；只允许判定
+    用的码/布尔，PII 与角色名一律不进审计。
     """
 
     tenant_id = principal.tenant_id
@@ -237,7 +245,7 @@ async def _audit_denied(
                 actor_id=principal.user_id,
                 tenant_id=tenant_id,
                 result="denied",
-                metadata={"reason": reason},
+                metadata={"reason": reason, **(extra or {})},
                 request_id=request_id,
             )
     except Exception as exc:
@@ -332,6 +340,91 @@ async def _assert_codes_in_catalog(session: AsyncSession, codes: set[str]) -> No
         )
 
 
+async def _principal_role_ids(session: AsyncSession, tenant_id: UUID, user_id: UUID) -> set[str]:
+    """操作者当前绑定的角色 id（字符串集合）。
+
+    「触达自己」只能用库里的真实绑定判定，不能用 `principal.roles`（那是 code 且来自请求解析）
+    近似：M2-UI3 的多角色绑定下，一个账号可能同时挂在内置角色和自定义角色上。
+    """
+
+    rows: list[Any] = list(
+        (
+            await session.execute(
+                text(
+                    "select role_id from public.user_roles "
+                    "where tenant_id = :tid and user_id = :uid"
+                ),
+                {"tid": tenant_id, "uid": user_id},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {str(item) for item in rows}
+
+
+async def _principal_permission_codes(
+    session: AsyncSession, tenant_id: UUID, user_id: UUID
+) -> set[str]:
+    """操作者当前实际持有的权限码并集（从库里算，不用 `principal.permissions`）。
+
+    「净增」判据要拿操作者**此刻**已有什么作分母。`principal.permissions` 是请求进入时由
+    `/auth/me` 那条链路解析出来的快照，而守卫跑在写事务里：同一账号在两个标签页并发操作
+    （一次绑角色、一次配权限）时，快照可能已经落后一格，把「其实已经有了」误判成自扩权，
+    或反过来漏掉刚被撤掉的那条。既然角色绑定已经读库了，权限并集没有理由继续吃缓存。
+    """
+
+    rows: list[Any] = list(
+        (
+            await session.execute(
+                text(
+                    "select distinct p.code from public.user_roles ur "
+                    "join public.role_permissions rp on rp.role_id = ur.role_id "
+                    "  and rp.tenant_id = ur.tenant_id "
+                    "join public.permissions p on p.id = rp.permission_id "
+                    "where ur.tenant_id = :tid and ur.user_id = :uid"
+                ),
+                {"tid": tenant_id, "uid": user_id},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {str(code) for code in rows}
+
+
+def _assert_self_grant(
+    principal: Principal,
+    exposure: SelfGrantExposure,
+    *,
+    self_grant_ack: bool,
+    reason: str | None,
+) -> None:
+    """自扩权必须显式确认（TD-191 收口，M2-UI3 简报 §6 决策 #4）。
+
+    超管免的是打断而不是免留痕：`requires_confirmation` 为真时调用方仍写审计，只是不校验
+    `ack`/理由——否则每次正常的全量配置都要超管重复勾选，运营会被迫绕道（少一个确认框，
+    多一条"先建个角色再搬权限"的野路子）。
+    """
+
+    if not exposure.requires_confirmation or SUPER_ADMIN_ROLE_CODE in principal.roles:
+        return
+    if not self_grant_ack:
+        # 消息里的码集用顿号连接：这条文案会原样进前端的自扩权提示条，
+        # `['a', 'b']` 这种 Python repr 是运维在屏幕上看到的第一个字，不能是列表字面量。
+        raise RoleAdminError(
+            "SELF_GRANT_CONFIRMATION_REQUIRED",
+            f"本次修改会给自己新增敏感权限：{'、'.join(exposure.newly_reaching_self)}；"
+            "请显式确认（self_grant_ack）并填写理由",
+            422,
+        )
+    # 理由在这里再 strip 一次而不是信任调用方的归一化：本守卫按简报 §6 应由三条写路径共用
+    # （当前仅权限全量替换接线，创建角色/绑定路径待 TD-187b/d，见 TD-194），
+    # "空白理由等于没写" 属于安全判据本身，不能取决于某条路径先做没做规范化。
+    if not (reason or "").strip():
+        raise RoleAdminError("SELF_GRANT_REASON_REQUIRED", "自扩权必须填写理由", 422)
+
+
 async def replace_role_permissions(
     principal: Principal,
     role_id: UUID,
@@ -340,11 +433,13 @@ async def replace_role_permissions(
     version: int,
     reason: str | None,
     request_id: str | None,
+    self_grant_ack: bool = False,
 ) -> RoleSummary:
-    """全量替换角色权限（版本锁 + 审计 diff）。
+    """全量替换角色权限（版本锁 + 审计 diff + 自扩权显式确认）。
 
     异常:
-        RoleAdminError: 404（角色不存在/跨租）、409（锁定角色或版本冲突）、422（非法权限码）。
+        RoleAdminError: 404（角色不存在/跨租）、409（锁定角色或版本冲突）、422（非法权限码、
+            非超管试图转授 `school.role.manage`、自扩权未确认/未填理由）。
     """
 
     tenant_id = _require_tenant(principal)
@@ -395,6 +490,48 @@ async def replace_role_permissions(
         before = await _role_permission_codes(session, tenant_id, role_id)
         # 目录漂移探针放在任何写之前：`permissions` 里缺码时不先删旧映射再回滚。
         await _assert_codes_in_catalog(session, set(requested))
+        # 自扩权判定同样放在版本 CAS 之前：被拒的请求不得把 `roles.version` 推高一格
+        # （否则一次 422 会让其他操作者的下一次提交假报"已被他人修改"）。
+        exposure = evaluate_self_grant(
+            role_id=str(role_id),
+            resulting_codes=set(requested),
+            principal_role_ids=await _principal_role_ids(session, tenant_id, principal.user_id),
+            principal_permissions=await _principal_permission_codes(
+                session, tenant_id, principal.user_id
+            ),
+        )
+        try:
+            _assert_self_grant(
+                principal, exposure, self_grant_ack=self_grant_ack, reason=normalized_reason
+            )
+        except RoleAdminError as exc:
+            await _audit_denied(
+                principal,
+                action="school.role.permissions.denied",
+                resource_id=str(role_id),
+                reason=exc.code,
+                request_id=request_id,
+            )
+            if exposure.requires_confirmation:
+                # 打断本身也是安全事件：`*.denied` 只说明"有人被拒"，报警要盯的是
+                # "谁在试图给自己加敏感码、被拒了几次"。放行时留痕、拒绝时不留痕，
+                # 等于只能统计成功案例，看不出有人在反复试探。
+                # 消费方注意：同一 action 在两侧的 `reason` 含义不同——成功侧是操作者填写的
+                # 理由（自由文本），拒绝侧是判据码（与所有 `*.denied` 一致）；按 `result` 分流。
+                await _audit_denied(
+                    principal,
+                    action="school.role.self_grant",
+                    resource_id=str(role_id),
+                    reason=exc.code,
+                    request_id=request_id,
+                    extra={
+                        "role_code": str(role["code"]),
+                        "newly_reaching_self": list(exposure.newly_reaching_self),
+                        "self_grant_ack": self_grant_ack,
+                    },
+                )
+            raise
+
         updated = await session.execute(
             text(
                 "update public.roles set version = version + 1 "
@@ -454,6 +591,29 @@ async def replace_role_permissions(
             },
             request_id=request_id,
         )
+        if exposure.requires_confirmation:
+            # 独立一条动作便于报警与事后撤销：`*.updated` 是所有配置都会写的流水，
+            # 混在里面等于没有信号；这里只关心"能力面流向操作者本人"的那几次。
+            await append_audit(
+                session,
+                action="school.role.self_grant",
+                resource_type="role",
+                resource_id=str(role_id),
+                actor_realm="tenant",
+                actor_id=principal.user_id,
+                tenant_id=tenant_id,
+                metadata={
+                    "role_code": str(role["code"]),
+                    "newly_reaching_self": list(exposure.newly_reaching_self),
+                    "confirmed_by": (
+                        "super_admin"
+                        if SUPER_ADMIN_ROLE_CODE in principal.roles
+                        else "self_grant_ack"
+                    ),
+                    "reason": normalized_reason,
+                },
+                request_id=request_id,
+            )
         return await _summary(session, tenant_id, role_id)
 
 
@@ -561,6 +721,12 @@ async def reset_role(
     request_id: str | None,
 ) -> ResetPreview:
     """把角色恢复出厂：撤销现有权限与角色数据范围后按定义表重种。
+
+    本路径**不接自扩权守卫**（`replace_role_permissions` 那条），依据是出厂默认与敏感清单互不
+    相交这一条不变量——已由 `tests/test_self_grant_guard_unit.py`（代码侧 `seeds.py`）与
+    `tests/integration/test_rbac_custom_role_constraints.py`（库侧 `rbac_builtin_role_defaults`）
+    双向钉住。哪天必须给某个可编辑角色配一个敏感码作默认，先给本函数接 `_assert_self_grant`
+    再改默认，否则"重置一次自己的角色"就是一条无 ack、无专项审计的自扩权通道。
 
     异常:
         RoleAdminError: 404、409（锁定/版本冲突/无出厂定义）、422（角色名或理由不合格）。

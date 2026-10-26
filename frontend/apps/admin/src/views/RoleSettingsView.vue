@@ -4,6 +4,8 @@
  * - 只允许编辑后端标记 editable 的角色（超管/学生/教师只读并给出原因）；
  * - 保存是"全量替换 + 版本锁"：409 时用后端回传的 latest 刷新本地，绝不静默覆盖；
  * - 恢复出厂先预览影响面，再输入角色编码 + ≥10 字理由二次确认；
+ * - 自扩权（TD-191）：本地预检命中就先挡；服务端判定与本页快照不一致（422 SELF_GRANT_*）时
+ *   强制展开确认条并保留草稿——重新 load() 会把勾选和理由一起清掉，那是更糟的"修复"；
  * - MFA 重置按登录名精确定位、展示目标后填理由执行（仅持专用权限可见）。
  */
 import { toUserMessage } from "@campus-elf/api-client";
@@ -24,6 +26,9 @@ import {
   permissionDiff,
   resetConfirmError,
   ROLE_MANAGE_CODE,
+  selfExpansionCodes,
+  selfGrantGate,
+  selfGrantRejectionMessage,
 } from "../rbac-logic";
 import { useAuthStore } from "../stores/auth";
 
@@ -36,6 +41,7 @@ const selectedRoleCode = ref<string | null>(null);
 const draft = ref<string[]>([]);
 const saveReason = ref("");
 const saving = ref(false);
+const selfGrantAck = ref(false);
 
 const selectedRole = computed(
   () => roles.value.find((role) => role.code === selectedRoleCode.value) ?? null,
@@ -46,10 +52,50 @@ const changes = computed(() =>
 );
 const dirty = computed(() => changes.value.added.length > 0 || changes.value.removed.length > 0);
 
+// 自扩权（TD-191）：敏感码清单由后端目录下发，前端不复刻一份，否则后端加码这里就静默失效
+const sensitiveCodes = computed(
+  () =>
+    new Set(permissions.value.filter((item) => item.sensitive_self_grant).map((item) => item.code)),
+);
+const actorRoles = computed(() => auth.user?.roles ?? []);
+const selfExpansion = computed(() =>
+  selectedRole.value
+    ? selfExpansionCodes(
+        changes.value.added,
+        selectedRole.value.code,
+        actorRoles.value,
+        auth.user?.permissions ?? [],
+        sensitiveCodes.value,
+      )
+    : [],
+);
+// 与后端同一道豁免：超管主体后端不校验 ack/理由，界面也不能把保存禁成多余的勾选
+const selfGrant = computed(() => selfGrantGate(selfExpansion.value, actorRoles.value));
+/**
+ * 服务端已经以 SELF_GRANT_* 拒过一次：本地快照落后于库，判据只能信服务端。
+ * 存的是拒答原文（含具体码集），确认条上方按原文提示；不按当前 draft 重算就清零——
+ * 重算用的正是那份被证明落后的快照，宁可多要一次勾选，不能给出"改回原样就能存"的假出口。
+ */
+const forcedSelfGrant = ref<string | null>(null);
+const needsSelfGrantAck = computed(
+  () => selfGrant.value.kind === "ack_required" || forcedSelfGrant.value !== null,
+);
+const auditOnlySelfGrant = computed(() => selfGrant.value.kind === "audit_only");
+const selfGrantCodes = computed(() => selfGrant.value.codes.join("、"));
+/** 快照落后时本地算不出码集（`selfGrantCodes` 为空），文案改指服务端判定，避免渲染出空括号。 */
+const selfGrantCodesText = computed(() =>
+  selfGrantCodes.value ? `（${selfGrantCodes.value}）` : "（服务端判定的敏感权限）",
+);
+const selfGrantReady = computed(
+  () => !needsSelfGrantAck.value || (selfGrantAck.value && saveReason.value.trim().length > 0),
+);
+
 function selectRole(role: RoleView): void {
   selectedRoleCode.value = role.code;
   draft.value = [...role.permission_codes];
   saveReason.value = "";
+  selfGrantAck.value = false;
+  forcedSelfGrant.value = null;
 }
 
 function replaceRole(role: RoleView): void {
@@ -100,12 +146,24 @@ async function save(): Promise<void> {
   }
   const { added, removed } = changes.value;
   const summary = `新增 ${added.length} 项、移除 ${removed.length} 项`;
+  // 自扩权：后端会拒（422），界面先挡一道并说清是哪几个码
+  if (needsSelfGrantAck.value && !selfGrantReady.value) {
+    ElMessage.warning(
+      `本次会给自己所在角色新增敏感权限${selfGrantCodesText.value}，需勾选确认并填写理由`,
+    );
+    return;
+  }
   // 操作者本人在被改角色里且正要撤掉进门凭证 = 自锁（下一次请求即失去本页访问权）
   const selfLock = isSelfLockRemoval(role.code, removed, auth.user?.roles ?? []);
+  const selfGrantHint = needsSelfGrantAck.value
+    ? `该操作会给你本人新增敏感权限${selfGrantCodesText.value}，已按你的确认提交并单独写入审计。`
+    : auditOnlySelfGrant.value
+      ? `该操作会给你本人新增敏感权限（${selfGrantCodes.value}）；超管无需勾选确认，但仍会单独写入自扩权审计。`
+      : "";
   const confirmed = await ElMessageBox.confirm(
     selfLock
-      ? `确认保存「${role.name}」的权限变更？${summary}。你本人也在该角色中，移除 ${ROLE_MANAGE_CODE} 后本页面将立即不可访问（自锁），后续需由超管重新授权。`
-      : `确认保存「${role.name}」的权限变更？${summary}。保存后对该角色用户立即生效。`,
+      ? `确认保存「${role.name}」的权限变更？${summary}。你本人也在该角色中，移除 ${ROLE_MANAGE_CODE} 后本页面将立即不可访问（自锁），后续需由超管重新授权。${selfGrantHint}`
+      : `确认保存「${role.name}」的权限变更？${summary}。保存后对该角色用户立即生效。${selfGrantHint}`,
     "保存确认",
     { type: "warning" },
   ).catch(() => false);
@@ -117,13 +175,21 @@ async function save(): Promise<void> {
       permission_codes: draft.value,
       version: role.version,
       reason: saveReason.value.trim() || null,
+      self_grant_ack: selfGrantAck.value,
     });
     replaceRole(updated);
     ElMessage.success(`已保存：${summary}`);
     // 权限每请求读库：当前账号若在该角色里，菜单/守卫立即按新库值刷新
     await auth.loadUser();
   } catch (error) {
-    if (!applyConflict(error)) {
+    if (applyConflict(error)) return;
+    const rejected = selfGrantRejectionMessage(error);
+    if (rejected !== null) {
+      // 本地预检落后于库：不刷新页面（那会丢掉正在编辑的勾选与理由），直接把确认条逼出来。
+      // ack 保持原值：REASON_REQUIRED 时勾已经打过了，再撤掉等于让操作者重做已完成的一步。
+      forcedSelfGrant.value = rejected;
+      ElMessage.warning("服务端判定本次为自扩权：勾选确认并填写理由后再次保存");
+    } else {
       ElMessage.error(toUserMessage(error, "保存失败"));
     }
   } finally {
@@ -315,14 +381,41 @@ onMounted(() => {
             <el-input
               v-model="saveReason"
               data-testid="role-save-reason"
-              placeholder="变更说明（可选，≤500 字）"
+              :placeholder="
+                needsSelfGrantAck ? '变更理由（自扩权必填，≤500 字）' : '变更说明（可选，≤500 字）'
+              "
               maxlength="500"
               class="reason-input"
             />
+            <el-alert
+              v-if="forcedSelfGrant !== null"
+              data-testid="role-self-grant-forced"
+              type="warning"
+              show-icon
+              :closable="false"
+              :title="forcedSelfGrant"
+            />
+            <el-checkbox
+              v-if="needsSelfGrantAck"
+              v-model="selfGrantAck"
+              data-testid="role-self-grant-ack"
+              class="self-grant-ack"
+            >
+              我确认：这会给我本人新增敏感权限{{ selfGrantCodesText }}，并已填写理由
+            </el-checkbox>
+            <p
+              v-else-if="auditOnlySelfGrant"
+              data-testid="role-self-grant-notice"
+              class="self-grant-ack"
+            >
+              你是校方超管，本次会给自己新增敏感权限（{{
+                selfGrantCodes
+              }}）：不必勾选确认，但会单独写入自扩权审计。
+            </p>
             <el-button
               type="primary"
               data-testid="role-save"
-              :disabled="!dirty"
+              :disabled="!dirty || !selfGrantReady"
               :loading="saving"
               @click="save"
             >
@@ -511,6 +604,12 @@ onMounted(() => {
 }
 .reason-input {
   max-width: 320px;
+}
+/* 自扩权确认是"占满一行的警示条"，不是行内控件：勾选框和哪几个码被点亮必须一眼看到 */
+.self-grant-ack {
+  width: 100%;
+  color: var(--el-color-warning);
+  font-weight: 600;
 }
 .lookup-bar {
   display: flex;

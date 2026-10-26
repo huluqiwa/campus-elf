@@ -253,7 +253,7 @@ async def test_cross_tenant_parent_reference_is_rejected(
             await session.execute(
                 text(
                     "insert into roles (tenant_id, code, name) "
-                    "values (:tid, 'r1', '角色B') returning id"
+                    "values (:tid, 'role_b', '角色B') returning id"
                 ),
                 {"tid": tenant_b},
             )

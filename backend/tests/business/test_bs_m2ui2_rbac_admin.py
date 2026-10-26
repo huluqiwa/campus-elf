@@ -610,7 +610,7 @@ async def test_locked_foreign_and_custom_roles_are_rejected(client: AsyncClient)
 async def test_role_manage_code_cannot_be_delegated(client: AsyncClient) -> None:
     """Given 超管把 `school.role.manage` 授给 school_admin；When 该管理员试图转授这个码；
     Then 422 且不前进版本、库未改动、拒绝留审计；不含该码的常规编辑仍然放行，超管仍可授/撤；
-    末尾钉住禁令的真实边界（放弃该码换别的敏感码不拦，TD-191）。
+    末尾钉住禁令的真实边界：放弃该码换别的敏感码绕过转授禁令 → 被 TD-191 自扩权守卫挡下（422）。
 
     转授即等于无条件把本校全部权限交出去（持有者能给自己所在角色补任意 school/campus 码），
     所以这个码只能由校方超管本人授出（用户 2026-10-26 决策）。
@@ -701,10 +701,11 @@ async def test_role_manage_code_cannot_be_delegated(client: AsyncClient) -> None
     assert revoked.status_code == 200, revoked.text
     assert "school.role.manage" not in revoked.json()["permission_codes"]
 
-    # 禁令的**真实边界**（TD-191 登记的残余风险，这里钉成用例而不是只写在文档里）：
-    # 「只有超管能授出该码」并不等于「拿不到别的敏感码」。先由超管把该码授回
-    # （撤销后管理员连 PUT 的资格都没有，上面的 403 正是这个意思），再由管理员自己
-    # 提交一份**不含** role.manage 的权限集——把 role.manage 换成敏感查看权，接口放行。
+    # 禁令的**真实边界**：「只有超管能授出该码」并不等于「拿不到别的敏感码」。先由超管把该码
+    # 授回（撤销后管理员连 PUT 的资格都没有），再由管理员自己提交一份**不含** role.manage 的
+    # 权限集——把 role.manage 换成敏感查看权，转授禁令管不着。
+    # M2-UI2 当期这里是**静默放行**的（登记为 TD-191 残余风险）；M2-UI3 把它收口成
+    # 「必须显式确认」，见下方断言与 `test_bs_m2ui3_self_grant.py`。
     regrant = await client.put(
         f"/api/v1/school/roles/{admin_role_id}/permissions",
         json={
@@ -726,13 +727,15 @@ async def test_role_manage_code_cannot_be_delegated(client: AsyncClient) -> None
         },
         headers=admin_headers,
     )
-    assert traded.status_code == 200, traded.text
-    assert "school.personnel.sensitive.read" in traded.json()["permission_codes"]
-    assert "school.role.manage" not in traded.json()["permission_codes"]
-    # 代价可复盘：该码进/出角色都写在 updated 审计的 added/removed 里
-    last_update = (await _audit_entries("school.role.permissions.updated"))[-1]
-    assert "school.personnel.sensitive.read" in last_update["metadata"]["added"]
-    assert "school.role.manage" in last_update["metadata"]["removed"]
+    assert traded.status_code == 422, traded.text
+    assert traded.json()["detail"]["code"] == "SELF_GRANT_CONFIRMATION_REQUIRED"
+    # 打断而不是静默放行：版本未前进、映射未变
+    assert int((await _role_row(seeded["tenant_id"], admin_role_id))["version"]) == int(
+        regrant.json()["version"]
+    )
+    assert set(await _db_permission_codes(seeded["tenant_id"], admin_role_id)) == set(
+        SCHOOL_ADMIN_DEFAULTS | {"school.role.manage"}
+    )
 
 
 async def test_reset_preview_then_execution_restores_factory_defaults(
