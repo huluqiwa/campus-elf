@@ -267,6 +267,33 @@ test("恢复出厂：先预览影响面，编码/理由任一不合格都不提�
   await expect(page.getByText("版本 4")).toBeVisible();
 });
 
+test("自定义角色能配权限，但没有「恢复出厂」入口：editable 已不等于可重置", async ({ page }) => {
+  // TD-187b 把自定义角色翻成 editable=true。若入口只跟 editable 走，这里会出现一个
+  // 点了必然 409 的按钮（服务端对自建角色恒 `ROLE_DEFAULTS_UNAVAILABLE`），所以按钮跟 is_system。
+  const rbac = await mockRbacApi(page, {
+    roles: [
+      {
+        id: "40000000-0000-0000-0000-0000000000aa",
+        code: "library_keeper",
+        name: "图书馆管理员",
+        is_system: false,
+        editable: true,
+        lock_reason: null,
+        version: 0,
+        defaults_applied: false,
+        user_count: 1,
+        permission_codes: ["school.kb.view"],
+      },
+    ],
+  });
+  await mockAuth(page, { authenticated: true, user: { permissions: ROLE_MANAGER } });
+
+  await page.goto("/settings/roles");
+  await expect(page.getByTestId("role-save")).toBeVisible();
+  await expect(page.getByTestId("role-reset")).toHaveCount(0);
+  expect(rbac.captures.resetPreview).toHaveLength(0);
+});
+
 test("MFA 重置：按登录名定位目标、理由门禁、确认后清除绑定", async ({ page }) => {
   const rbac = await mockRbacApi(page);
   await mockAuth(page, { authenticated: true, user: { permissions: ROLE_AND_MFA } });

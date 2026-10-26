@@ -466,7 +466,11 @@ async def test_permission_replace_rejects_catalog_drift_before_writing(
 
 
 async def test_locked_foreign_and_custom_roles_are_rejected(client: AsyncClient) -> None:
-    """Given 锁定角色、自定义角色与另一租户的角色；When 试图改/重置；Then 409 或 404，不泄漏对方数据。"""
+    """Given 锁定角色、自定义角色与另一租户的角色；When 试图改/重置；Then 409 或 404，不泄漏对方数据。
+
+    M2-UI3 TD-187b 起自定义角色可编辑、可删除，但仍**不可重置出厂**（没有出厂定义），
+    所以这一条用例的自定义角色段落在 `ROLE_DEFAULTS_UNAVAILABLE` 而不是 `ROLE_IMMUTABLE`。
+    """
 
     school_code = f"SCH-RBAC{uuid4().hex[:6].upper()}"
     seeded = await _seed_school(school_code)
@@ -509,8 +513,11 @@ async def test_locked_foreign_and_custom_roles_are_rejected(client: AsyncClient)
     )
     assert student_put.status_code == 409
 
-    # 自定义角色不在本期可编辑范围
+    # 自定义角色在 M2-UI3 起可编辑，但「重置出厂」对它仍是 409：它没有出厂定义可恢复。
+    # 语义从 M2-UI2 的「待 M2-UI3 开放」换成 `ROLE_DEFAULTS_UNAVAILABLE`——同一状态码，
+    # 理由从"还没做"变成"结构性不可能"（配置页的恢复出厂按钮因此对自建角色永久禁用）。
     engine = make_test_engine("admin")
+    custom_code = f"custom_{uuid4().hex[:6]}"
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session, session.begin():
@@ -519,27 +526,32 @@ async def test_locked_foreign_and_custom_roles_are_rejected(client: AsyncClient)
                     "insert into roles (tenant_id, code, name, is_system) "
                     "values (:tid, :code, '运营自建', false) returning id"
                 ),
-                {"tid": str(seeded["tenant_id"]), "code": f"custom_{uuid4().hex[:6]}"},
+                {"tid": str(seeded["tenant_id"]), "code": custom_code},
             )
     finally:
         await engine.dispose()
     custom_preview = await client.post(
         f"/api/v1/school/roles/{custom_id}/reset/preview", headers=super_headers
     )
-    assert custom_preview.status_code == 409
-    assert custom_preview.json()["detail"]["code"] == "ROLE_IMMUTABLE"
-    assert "M2-UI3" in custom_preview.json()["detail"]["message"]
+    assert custom_preview.status_code == 409, custom_preview.text
+    assert custom_preview.json()["detail"]["code"] == "ROLE_DEFAULTS_UNAVAILABLE"
+    # 确认码给**真实值**：为的是穿过 `_assert_editable` 与确认码校验，落到"没有出厂定义"这一层。
+    # 自定义角色现在是可编辑的，再拿 ROLE_IMMUTABLE 断言它等于测的已经不是同一件事。
     custom_reset = await client.post(
         f"/api/v1/school/roles/{custom_id}/reset",
         json={
-            "confirm_role_code": "unused",
-            "reason": "试图重置尚未开放的自定义角色",
+            "confirm_role_code": custom_code,
+            "reason": "试图把没有出厂定义的自建角色恢复出厂",
             "version": 0,
         },
         headers=super_headers,
     )
     assert custom_reset.status_code == 409, custom_reset.text
-    assert custom_reset.json()["detail"]["code"] == "ROLE_IMMUTABLE"
+    assert custom_reset.json()["detail"]["code"] == "ROLE_DEFAULTS_UNAVAILABLE"
+    # 拒绝必须发生在版本 CAS 之前：版本号原地不动，否则同事会收到一次莫名的 409 冲突。
+    assert int((await _role_row(seeded["tenant_id"], custom_id))["version"]) == 0, (
+        "重置被拒不应推进 roles.version（出厂定义检查要在写路径之前）"
+    )
 
     # 不存在与跨租同形 404：不区分「没有」与「不是你的」
     missing_id = uuid4()
@@ -581,6 +593,8 @@ async def test_locked_foreign_and_custom_roles_are_rejected(client: AsyncClient)
     # 安全拒绝必须留痕（外层事务已回滚，同事务写的审计会一起消失——这里验独立事务生效）。
     # 预览是只读接口、约定不审计；留痕来自「改权限」与「执行重置」两类写操作。
     # 版本冲突/确认名不符属"用错了"而不是"越权"，不落安全审计。
+    # 同理，自建角色的 `ROLE_DEFAULTS_UNAVAILABLE` 是"操作不适用"（主体有权限、目标是他自己的
+    # 角色，只是没有出厂定义可恢复），归入"用错了"一侧，不落安全审计。
     denied_permissions = await _audit_entries("school.role.permissions.denied")
     assert [(e["result"], e["metadata"].get("reason")) for e in denied_permissions] == [
         ("denied", "ROLE_IMMUTABLE"),
@@ -597,14 +611,15 @@ async def test_locked_foreign_and_custom_roles_are_rejected(client: AsyncClient)
     denied_resets = await _audit_entries("school.role.reset_denied")
     assert [(e["result"], e["metadata"].get("reason")) for e in denied_resets] == [
         ("denied", "ROLE_IMMUTABLE"),
-        ("denied", "ROLE_IMMUTABLE"),
         ("denied", "ROLE_NOT_FOUND"),
     ], denied_resets
     assert {e["resource_id"] for e in denied_resets} == {
         str(super_admin["id"]),
-        str(custom_id),
         str(foreign_role_id),
     }
+    # 自建角色的重置失败（`ROLE_DEFAULTS_UNAVAILABLE`）不落安全审计：它是"操作不适用"，
+    # 不是越权。把它塞进留痕集会让"这条审计=有人试图越权"的读法失效。
+    assert str(custom_id) not in {e["resource_id"] for e in denied_resets}
 
 
 async def test_role_manage_code_cannot_be_delegated(client: AsyncClient) -> None:

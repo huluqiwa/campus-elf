@@ -43,4 +43,10 @@ regexes = [
   "SelfGr-Super-Pass-1",
   "SelfGr-Admin-Pass-1",
   "SelfGr-Wiring-Pass-1",
+  # M2-UI3 自定义角色创建/删除业务场景的种子口令（同上：仅测试账号，按精确字符串放行）。
+  "CustRole-Super-Pass-1",
+  "CustRole-Keeper-Pass-1",
+  "CustRole-Operator-Pass-1",
+  "CustRole-Foreign-Pass-1",
+  "CustRole-Wiring-Pass-1",
 ]

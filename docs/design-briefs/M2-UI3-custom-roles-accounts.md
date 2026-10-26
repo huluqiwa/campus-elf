@@ -152,7 +152,7 @@
 1. **迁移**：`roles` 加自定义角色的 CHECK（`code` 格式 + `is_system` 与 code 保留名单互斥）+ `users.status` 取值 CHECK（若尚无）+ 可选新码 `school.role.delete`。
 2. **不变量测试先红**：`tests/integration/test_rbac_custom_roles.py`——自定义角色不被同步补种、不参与重置、复合外键保证不跨租。
 3. **服务层**：`app/rbac/custom_roles.py`（创建/删除/影响面预览）、`app/rbac/binding.py`（用户↔角色全量替换 + 拒绝审计复用 `_audit_denied`）、`app/personnel/account_admin.py`（开/停，复用 `app/auth/revocation.py` 与 MFA 重置同一条撤销链路）。
-4. **§6 自扩权守卫**：`_assert_self_grant(...)` 三条写路径共用（角色替换、绑定、创建角色）。
+4. **§6 自扩权守卫**：`_assert_self_grant(...)` 三条写路径共用（角色替换、绑定、创建角色）。**TD-187b 修正（2026-10-27 裁定）：两条**——角色替换 + 绑定；创建角色不接，判据对新角色 id 恒不可达，见 §12。
 5. **API**：`app/api/school_rbac.py` 扩端点 + 声明权限 + 错误契约（`SELF_GRANT_CONFIRMATION_REQUIRED`、`ROLE_IN_USE`、`ROLE_CODE_TAKEN`、`ACCOUNT_ALREADY_DISABLED`、`REALM_MISMATCH`）。
 6. **业务场景测试**：`tests/business/test_bs_m2ui3_*.py`（见 §9）。
 7. **前端**：admin「角色权限」页加"新建/删除角色"与范围编辑；新「权限账号」页（账号列表 + 角色绑定抽屉 + 启停按钮，全部 `data-testid`）；api-client 类型；mock E2E。
@@ -215,7 +215,7 @@
 | 1 | 范围切分 | **全部四项**：自定义角色增删 + 用户↔多角色绑定 + 权限账号启停 + 角色级数据范围编辑（§3 选项 A） |
 | 2 | 「多权限分配」数据模型 | **只绑角色**，不引入 `user_permissions`、不做隐式个人角色（§2 方案 A） |
 | 3 | 自定义角色删除语义 | **硬删 + 影响面预览 + 逐字确认 + 理由 + 完整码集快照审计**（§4.2 方案 A）；子表靠复合外键 CASCADE，同名 code 可重建 |
-| 4 | TD-191 自扩权收口 | **自扩权要明说**（§6 方案 A）：结果集触达自己所在角色且新增敏感码 → 必须 `self_grant_ack=true` + 理由，否则 422；`school.role.self_grant` 审计**无论是否超管、无论放行还是打断都写**（打断侧 `result="denied"`，见下方"实现口径"的补充说明）。硬封方案（只能授自己已有的码）作为后续 TD 与 M6 双人确认合并 |
+| 4 | TD-191 自扩权收口 | **自扩权要明说**（§6 方案 A）：结果集触达自己所在角色且新增敏感码 → 必须 `self_grant_ack=true` + 理由，否则 422；`school.role.self_grant` 审计**无论是否超管、无论放行还是打断都写**（打断侧 `result="denied"`，见下方"实现口径"的补充说明）。硬封方案（只能授自己已有的码）作为后续 TD 与 M6 双人确认合并。**TD-187b 修正（2026-10-27 裁定）：三条路径缩成两条——创建自定义角色不接守卫，见 §12** |
 | 5 | 操作者能否给自己绑角色 | **不能**：绑定接口拒绝对「操作者本人 user_id」写入（403 `BINDING_SELF_FORBIDDEN` + 拒绝审计），否则 §6 的确认守卫有第二条绕路。代价（校管换岗需超管代绑）已知并接受 |
 | 6 | 删除角色是否单独授权码 | **新增 `school.role.delete`**，权限目录 60→61 码；`school.role.manage` 只保留建/改/绑定/范围编辑 |
 
@@ -226,5 +226,51 @@
 - 命中即要求 `self_grant_ack`；超管主体免 `ack` 但仍写审计（免的是打断，不是免留痕）。
 - **审计覆盖到"被打断的那次"（2026-10-27 用户裁定：打断也写）**：决策 #4 原句「无论是否超管都写」只约束**主体**，没写**结果**。实现读成"放行与打断都写"，并经用户确认为定稿口径：`SELF_GRANT_*` 拒绝路径除通用 `school.role.permissions.denied` 外，再写一条 `school.role.self_grant`（`result="denied"` + `role_code` + `newly_reaching_self` + `self_grant_ack`）。理由：只记成功案例的报警等于只看得到得手的人，"谁在反复试探给自己加敏感码"这个信号恰恰在拒绝侧；且与本期既有口径一致——写操作的全部拒绝（含 404 探测）都算安全事件。代价是每个被打断的请求多一条审计行（独立事务，外层已回滚，见 TD-193）。
 - **同一 `action` 两侧的 `reason` 含义不同（消费方必读）**：`school.role.self_grant` 放行侧的 `reason` 是操作者填写的自由文本理由，打断侧是判据码（`SELF_GRANT_CONFIRMATION_REQUIRED` / `SELF_GRANT_REASON_REQUIRED`，与本项目所有 `*.denied` 审计同口径）。按 `result` 字段分流即可，不要假设 `reason` 恒为自由文本。
-- 三条写路径共用一个守卫函数：角色权限全量替换、创建自定义角色（以他人角色为源复制敏感码时）、用户↔角色绑定替换（受 #5 限制，路径实际只剩"给别人绑"）。
+- 三条写路径共用一个守卫函数：角色权限全量替换、创建自定义角色（以他人角色为源复制敏感码时）、用户↔角色绑定替换（受 #5 限制，路径实际只剩"给别人绑"）。**→ TD-187b 实现偏离，2026-10-27 用户裁定按新口径定稿，见 §12**：创建路径**不接**守卫（新角色 id 必不在操作者角色集合里，判据无可达分支）；"建角色再绑给自己"这条链由**决策 #5 的自绑禁令**收口，不是由守卫收口——绑定路径接线时按"绑定后该用户的权限并集"判，且 #5 必须如实落地。
 - **`school.role.self_grant` 的字段与 §6 方案 A ② 的措辞差异（已按此实现）**：方案 A 写的是"含 before/after 码集"，交付形态改为「专用审计只记触达路径（`role_code` + `newly_reaching_self` + `confirmed_by` + `reason`），完整前后码集由同事务的 `school.role.permissions.updated` 承担」。理由：一次自扩权写两条审计，若两侧都塞全量码集就是同一份数据存两遍（且 `role.manage` 类角色的码集可达 60 项，审计表会被自己撑大）；`before` 可从 `added`/`removed` 与提交值精确还原（`before = (after ∪ removed) − added`），复盘时按 `request_id` 关联两条即可，信息量为零损失。报警侧只需要"哪几个敏感码流向了本人"，正是专用审计记的那几个字段。
+
+---
+
+## 12. TD-187b 实现结果与对决策 #4 的偏离（2026-10-27 用户裁定：**不接，改判据口径**）
+
+### 12.1 交付面
+
+- 服务层 `app/rbac/admin.py`：`create_role` / `preview_role_deletion` / `delete_role`、`RESERVED_TENANT_ROLE_CODES`（从 `builtin_roles("tenant")` 派生，不手抄）、`ROLE_CODE_PATTERN`、`RoleDeletionPreview`。
+- 接口层 `app/api/school_rbac.py`：`POST /school/roles`、`POST /school/roles/{id}/delete/preview`（`school.role.manage`）、`POST /school/roles/{id}/delete`（**独立码 `school.role.delete`**，决策 #6）。
+- 自定义角色语义定稿：**可编辑 ✔ / 可删除 ✔ / 可重置出厂 ✘**（`ROLE_DEFAULTS_UNAVAILABLE`，结构性不可能而非"待开发"）。M2-UI2 的业务用例据此改写，并新增断言"拒绝不推进 `roles.version`"。
+- `reset_role` 顺手加固：出厂定义检查移到版本 CAS **之前**（原来在之后，靠事务回滚抹掉版本增量；顺序化后被拒请求不抢行锁、不推版本、同事看不到无谓的 409）。
+
+### 12.2 偏离：创建路径不接自扩权守卫
+
+**决策 #4 的字面要求**是三条写路径共用一个守卫函数（角色权限全量替换、创建自定义角色、用户↔角色绑定替换）。实现只在**角色权限全量替换**一条上接线（绑定路径随 TD-187d 建起来时再接），**创建路径有意不接**。
+
+判据本身：`_assert_self_grant` 只在 ① 被改角色的 id ∈ 操作者自己所在的角色集合，且 ② 结果集相对操作者当前持有**净增**敏感码 时才可能命中。新建角色的 id 此刻刚刚生成，`user_roles` 里不可能有指向它的行，因此 ① 恒假 —— 不是"我们选择不触发"，是"该函数在这条路径上没有可到达的true分支"。
+
+**那"先建带敏感码的角色、再绑给自己"这条链呢**（审查 M-1 提的攻击路径）：它确实绕开 `PUT /roles/{id}/permissions` 的 ack 守卫，但**收口它的不是守卫，是决策 #5**——绑定接口对"操作者本人 user_id"硬拒 403 `BINDING_SELF_FORBIDDEN`。**读这段必须记住时点**：本仓今日还没有任何 `user_roles` 写路径（§0 现状核对），所以这条链现在不可达不是因为 #5 已经生效，而是因为根本走不通；#5 是 **TD-187d 的落地前置，不是既有防线**。所以本点的残余风险不在"创建要不要接守卫"，而在 **#5 是否被如实实现**。据此把 TD-187d 的前置约束写死：
+
+1. 绑定路径必须落 #5 的自绑禁令（硬 403 + `bind_denied` 审计），这是这条链的唯一承重墙；
+2. 绑定侧仍要接守卫，但接的时机与判据要按"绑定后该用户的权限并集"算，不是按单角色算——将来若 #5 放宽（例如允许超管"代自己绑"或引入自助换岗），守卫立刻变成活的；
+3. 创建路径本身**不静默**：`school.role.created` 审计带完整 `permission_codes` 与 `copy_from_role_id`，"谁建了一个含 `school.personnel.delete` 的角色"在审计流里可直接按码检索，报警面没有缺项。
+
+**为什么不走"字面遵守"（把守卫也接到创建路径）**：那会引入一段结构上不可达的分支，为它写的用例只能靠 mock 把 `principal_role_ids` 伪造进新角色 id，测的是替身而不是行为；更坏的是它给后来人一个"创建已受守卫保护"的错误暗示，而真正的墙在 #5。
+
+**代价与再评估点**已登记 `docs/tech-debt.md` TD-194（原条目就是"守卫只接线到一条路径"）：TD-187d 落地时按上面 1/2 收口，并把守卫时序抽成单一 helper（TD-194 的原始诉求）。**2026-10-27 用户已裁定按本口径定稿**（另两个备选"按字面接上守卫""创建含敏感码时强制填理由"均未采纳，理由见上：前者是不可达分支 + 只能测替身，后者改接口契约却不提供新的防线）。
+
+### 12.3 与本简报其他条款的符合性
+
+| 条款 | 落点 |
+|---|---|
+| §4.1 校验与库层同界（3..63 + 同一正则） | **两处强制**：`RoleCreatePayload` 的 `Field(pattern=ROLE_CODE_PATTERN, max_length=63)` 与库层 `ck_roles_code_format_valid`；常量定义在服务层做单一来源，用例从迁移源码里解析正则逐字符比对（不抄第二遍）。服务函数本身不校验格式，直调传非法码 = 撞库 CHECK 变 500（第三轮 m-2 把"三处同界"的说法改直） |
+| `name` 非空 | **只在接口层拦**（`field_validator` 去空白、全空白判非法）：服务层还会再 strip，否则落库一行没名字的角色。库层 `roles.name` 只有 NOT NULL + 宽 100，没有"非空白"CHECK，直调服务仍可落空名 → 登记 TD-198（与 §4.1 的 code 不同界这一处是已知缺口，不是遗漏） |
+| `confirm_role_code` 收 64 而非 63 | **有意为宽**：这个字段只做逐字相等比较，超长串必然是"用错了"，让它走到服务层才有 `{code,message}` 的 `ROLE_CODE_MISMATCH`；收成 63 会先撞 Pydantic 的数组形 422，把错误契约打断。与 M2-UI2 的 `RoleResetPayload` 同界 |
+| §4.1 初始权限二选一 | `ROLE_INITIAL_SOURCE_AMBIGUOUS` 422：不选"以显式清单为准、静默忽略复制源"，配置类接口不能猜调用方意图。**空清单与不给该字段等价**（复制模式下前端勾选框本来就是空的，判它非法等于逼调用方靠"少传字段"表达意图），只有"非空清单 + 复制源"才触发——第三轮 m-6 提的第二种写法（`None` 默认值区分两者）判为不必要，理由同上 |
+| §4.1 复制源限制 | 锁定内置角色（超管/C 端）不可作源：`ROLE_COPY_SOURCE_NOT_EDITABLE` 422；不存在与跨租同形 404 |
+| §4.2 硬删 + 影响面预览 + 逐字确认 + 理由 + 完整码集快照 | `delete/preview` 只读不审计；`role_permissions`/`data_scopes`/`user_roles` 靠复合外键 CASCADE；删除前快照进 `school.role.deleted`；响应 `version` 返回被删行的最后版本号而不是从未存在的 `+1` |
+| §4.1 内置码保留 | `RESERVED_TENANT_ROLE_CODES` 人读 409 + 库层 `ck_roles_builtin_code_is_system` 兜手工 SQL |
+| §11 决策 #3 同名可重建 | 硬删后同码再建成功（`uq_roles_tenant_id_code` 随主行消失）；跨租同名互不影响 |
+| 审查三轮 m-1（跨租复制源的留痕够不够） | 该条 `create_denied` 的 `resource_id` 是"试图建的码"（此刻还没有 role id），**被探测的 role id 进 `metadata.copy_from_role_id`**，否则巡检回答不了"谁在拿别人家的 id 枚举"；业务用例 BS-M2UI3-B 逐项断言四条留痕的 metadata |
+| 审查三轮 m-3（"写侧全部拒绝都留痕"说过头了） | 口径改成"越权/撞码/目标不可用三类留痕"，并显式列出**入参非法**这一族不落安全审计：`UNKNOWN_PERMISSION_CODE`、`PLATFORM_PERMISSION_FORBIDDEN`、`ROLE_INITIAL_SOURCE_AMBIGUOUS` + Pydantic 挡在进服务层之前的格式/长度非法（BS-M2UI3-B 正向断言它们不在 `create_denied` 里）。`ROLE_CODE_NOT_DELEGABLE` 是同族里**故意反过来**留痕的那一个：它判的是操作者有没有资格，不是码合不合法。平台域那条要不要单开报警登记 TD-201 |
+| 审查三轮 m-4（影响面数字的过期窗口） | 绑定不推进 `roles.version` → 预览→确认之间新绑的人不被 CAS 挡下；执行侧快照与审计取的是删除当时的真数（事前失守、事后可查），由 `test_preview_affected_users_is_not_protected_by_the_version_cas` 钉现状，收口在 TD-199（TD-187d 二选一拍板） |
+| 审查三轮 m-6（前端复刻了服务端的可重置判据） | `RoleSettingsView` 的恢复出厂按钮今天跟 `is_system` 走，与"有没有出厂定义"等价但不是同一判据；`RoleResponse` 下发服务端派生 `resettable` 的收口登记 TD-200（TD-187g 一并做，避免响应模型改两轮）。服务端 `reset_role` 恒 409 是唯一门禁，本条只影响按钮准确性 |
+| 审查三轮 m-5（`rowcount != 1` 分支零覆盖） | **不补**，理由是造不出真场景而不是遗漏：读侧 `SELECT … FOR UPDATE` 与写侧 `DELETE` 共用同一策略的同一个 `USING`，一致策略下不可能"看得见却删不动"，命中只能 monkeypatch rowcount（测替身）。分支本身作为 RLS 漂移的保险留在代码里，说明写在集成用例模块头，同一文件的第 4 条改为测真实存在的并发面（m-4） |
+| 审查 m-1（并发兜底别误报） | `IntegrityError` 只在**约束名精确等于** `uq_roles_tenant_id_code` 时翻成人读 409（名字取 asyncpg 原生异常的 `constraint_name`——PG 协议字段 `n`，不是错误文本子串；SQLAlchemy 的适配异常上没有这个属性，要往 `exc.orig.__cause__` 取一层，两处都取不到按"不是同码冲突"处理、宁可 500。子串匹配会把 `..._v2` 这类同前缀约束一并误判）；撞格式 CHECK/FK 原样抛出（无全局 handler → Starlette 纯文本 500，响应体不含 SQL），不把库层故障伪装成业务冲突 |
