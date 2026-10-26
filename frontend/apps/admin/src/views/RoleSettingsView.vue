@@ -3,7 +3,8 @@
  * 角色权限配置 + MFA 管理员重置（M2-UI2：TD-137/TD-143/TD-126）。
  * - 只允许编辑后端标记 editable 的角色（超管/学生/教师只读并给出原因）；
  * - 保存是"全量替换 + 版本锁"：409 时用后端回传的 latest 刷新本地，绝不静默覆盖；
- * - 恢复出厂先预览影响面，再输入角色编码 + ≥10 字理由二次确认；
+ * - 恢复出厂先预览影响面，再输入角色编码 + ≥10 字理由二次确认；只对内置角色开——
+ *   自定义角色没有出厂定义，服务端恒 409 `ROLE_DEFAULTS_UNAVAILABLE`，按钮亮着就是死路；
  * - 自扩权（TD-191）：本地预检命中就先挡；服务端判定与本页快照不一致（422 SELF_GRANT_*）时
  *   强制展开确认条并保留草稿——重新 load() 会把勾选和理由一起清掉，那是更糟的"修复"；
  * - MFA 重置按登录名精确定位、展示目标后填理由执行（仅持专用权限可见）。
@@ -421,7 +422,9 @@ onMounted(() => {
             >
               保存权限（新增 {{ changes.added.length }} / 移除 {{ changes.removed.length }}）
             </el-button>
-            <el-button data-testid="role-reset" @click="openReset">恢复出厂设置</el-button>
+            <el-button v-if="selectedRole.is_system" data-testid="role-reset" @click="openReset"
+              >恢复出厂设置</el-button
+            >
           </div>
         </section>
       </div>

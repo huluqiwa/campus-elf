@@ -502,3 +502,29 @@
 - 复测：单元 12 + BS-M2-06 两用例（含归档封闭与回滚零残留断言）+ 受影响套件 96 passed；ruff/mypy 176 文件全绿；迁移回滚用例修复后单独复测 11 passed；全量见提交前门禁记录。
 - 更好做法与 TD 处置：TD-181（已采纳，本点精简版）；TD-182（流转并发分歧残余，M2 末评审）。
 - 结论：**可提交**（第二轮复审 0 Blocker / 0 Major）。
+
+### M2-UI3 TD-187b：自定义角色创建/删除的服务层与接口（2026-10-27）
+
+- 范围：`POST /school/roles`（创建：码格式/保留名单/同码/目录/转授禁令/复制源限制 + 并发唯一约束兜底）、`POST /school/roles/{id}/delete/preview` 与 `POST /school/roles/{id}/delete`（独立码 `school.role.delete`、逐字确认 + 理由 ≥10 + 版本 CAS + CASCADE 前快照审计）；自定义角色的可编辑标记从"待开放"翻成"可编辑可删除、不可重置出厂"；前端恢复出厂入口随 `is_system` 收口。不含 TD-187c（范围编辑）/187d（绑定）/187e（权限账号）/187f/187g。
+- commit/diff：staged diff（`backend/app/rbac/admin.py` +~410、`backend/app/api/school_rbac.py` +~155、新增 `tests/test_rbac_custom_role_crud_unit.py`/`tests/integration/test_rbac_custom_role_create_race.py`/`tests/business/test_bs_m2ui3_custom_role.py`、回改 `tests/business/test_bs_m2ui2_rbac_admin.py`、`frontend/apps/admin/src/views/RoleSettingsView.vue` + `frontend/e2e/admin-roles.spec.ts`、文档 `design.md`/`tech-debt.md`/简报 §8/§11/§12/`.gitleaks.toml`）。
+- 审查人/agent：独立审查子 agent **三轮**（只读、与实现者独立上下文；第二轮为修复后复审，第三轮针对定稿树并复核前两轮发现的落地）。测试栈数据由实现侧复跑提供。
+- 第一轮 Findings：**0 Blocker / 1 Major / 3 Minor**
+  - **M-1** 交付偏离已确认的简报决策 #4（"三条写路径共用一个自扩权守卫"）且未在任何文档留痕：`create_role` 没接守卫。判据 ① 要求"被写角色 ∈ 操作者所在角色集合"，而新建角色的 id 此刻不可能出现在 `user_roles`。处置：实现者先补文档，再提交给用户裁定 → **用户 2026-10-27 选定「不接，改判据口径」**，结论与三条 TD-187d 硬性前置写进简报 §12.2、design.md §5.12「能力只在 PUT 与绑定时流动」、TD-191/TD-194。
+  - **m-1** 并发兜底 `IntegrityError` 一律翻 409 会把真故障（格式 CHECK/FK）伪装成"同码已存在"。处置：只在约束名精确等于 `uq_roles_tenant_id_code` 时翻 409，其余原样抛出（详见第三轮 m-1 前后对该取值路径的两次纠正）。
+  - **m-2** `delete_role` 成功返回 `version+1`：行已不在，报一个从未存在过的版本会诱导前端拿它做下一次乐观锁。处置：返回被删行的最后版本号；业务用例改为 `deleted.json() == preview.json()` 逐项相等断言，并核对仓内没有消费旧 `+1` 语义的调用点。
+  - **m-3** `RoleCreatePayload.name` 全空格可通过（`min_length=1` 挡不住 `"   "`），落库成一行没名字的角色；`confirm_role_code` 收 64 而 `code` 收 63 的界不一致。处置：接口层加 `field_validator` 去空白判非法并补单测；`confirm_role_code` **有意保持宽**（只做逐字比较，超长必然"用错了"，收成 63 会先撞 Pydantic 的数组形 422 打断错误契约），理由写进字段注释与简报 §12.3；`name` 库层非空白 CHECK 缺口登记 TD-198。
+- 第二轮（修复后复审）：**不通过**——原话「代码与错误码语义已达可提交级，但 M-1 文档回写不彻底（3 处"三条路径"残留 + 1 处现在时过度陈述）与门禁文件（review-log/handoff/README/TD-197）未更新，补齐这 5 处文档 + 2 条断言后方可提交」。处置：三处"三条写路径"残留改为两条 + 创建路径的裁定说明；`create_role` docstring 里"绑定禁令"从现在时改成时点澄清（**本仓当时还没有任何 `user_roles` 写路径**，#5 是 TD-187d 的前置而非既有防线）；2 条断言 = 重置被拒不推进 `roles.version`（`test_bs_m2ui2_rbac_admin.py`）+ 删除响应与预览逐项相等；门禁文件回填见本轮复测。
+- 第三轮 Findings：**0 Blocker / 1 Major / 6 Minor**（租户隔离、鉴权、状态机顺序、审计四类分档本身**未发现缺陷**）
+  - **M-1** 本功能点的审查记录缺失（`review-log.md` 只有第一批），且第一轮的 **m-2 在 tech-debt/design/简报/review-log 四处零命中**——按 §10.1「无处置的改进项按 Major」成立。处置：本节即为补齐；m-2 的落点 = `delete_role` 返回被删行版本号 + `deleted==preview` 断言 + design.md 端点表那句"`version` 是被删行的最后版本号"。
+  - **m-1** 跨租复制源被拒时 `create_denied` 只记"试图建的码"，丢掉被探测的 `copy_from_role_id`，巡检回答不了"谁在拿别人家的 id 枚举"。处置：`_audit_denied(..., extra={"copy_from_role_id": ...})`，业务用例逐项断言四条留痕的 metadata；同时纠正 `_audit_denied` docstring 里"只放码/布尔"的口径（内部 id 可进，PII 与角色名不可）。
+  - **m-2** design.md/TD-198 称 `code` 格式"在服务层/Pydantic/库层 CHECK 三处同一字面量"——言过其实：服务层不校验格式（集成用例自己的注释就是证据），实际两处强制。处置：两处口径写直，并说明"直调传非法码 = 撞库 CHECK 变 500"是已知缺口（TD-198）而非防线。
+  - **m-3** design.md 称写侧"**全部拒绝**都留痕"，与代码和用例矛盾（`UNKNOWN_PERMISSION_CODE`、`PLATFORM_PERMISSION_FORBIDDEN`、`ROLE_INITIAL_SOURCE_AMBIGUOUS` 均 422 无痕，业务用例正向断言了这一点）。处置：口径改为"越权/撞码/目标不可用三类留痕"，显式列出**入参非法**这一族不留痕及理由，并点明 `ROLE_CODE_NOT_DELEGABLE` 是同族里故意反过来留痕的那一个（判据看资格不看码）；平台域尝试要不要单开报警登记 TD-201。
+  - **m-4** 删除预览的 `affected_users` 不在版本 CAS 保护范围内（绑定不 bump `roles.version`），操作者可能在陈旧的影响面上按确认；且该窗口零用例。处置：新增集成用例 `test_preview_affected_users_is_not_protected_by_the_version_cas` 钉现状（预览 1 → 再绑 1 → CAS 仍放行 → 执行侧与审计记 2），design.md 增补不变量条目并写清"删除事务内部一致（`FOR UPDATE` 挡住外键 `FOR KEY SHARE`）、事前失守事后可查"，收口二选一登记 **TD-199**（已采纳→TD-187d）。
+  - **m-5** `deleted.rowcount != 1` 分支零覆盖。**不补用例**，理由是造不出真场景：读侧 `SELECT … FOR UPDATE` 与写侧 `DELETE` 共用同一策略的同一个 `USING`，一致策略下不可能"看得见却删不动"，命中只能 monkeypatch rowcount（测的是替身）。分支作为 RLS 漂移的保险保留，说明写进集成用例模块头与 design.md。
+  - **m-6** 前端恢复出厂按钮跟 `is_system`，等于在客户端复刻服务端"有没有出厂定义"的判据；另 `RoleCreatePayload.permission_codes` 的 `default_factory=list` 使"空清单"与"未给"不可分。处置：前者登记 **TD-200**（已采纳→TD-187g，`RoleResponse` 下发服务端 `resettable`，服务端仍是唯一门禁）；后者**判为不改**并把理由写进简报 §12.3 与服务层注释（复制模式下前端勾选框本来就是空的，判它非法等于逼调用方靠"少传字段"表达意图；要拦的是"两份非空来源同时给"）。
+- 复测（实现侧，真实测试栈）：
+  - 后端全量 **706 passed**（28m13s，exit 0；分解 398 单元 / 145 集成 / 163 业务场景，业务场景带 `integration` 标记故按 `-m "integration and not business"` 取互斥数）；第三轮修复后受影响子集 19 passed；`ruff check app tests` 通过、`mypy --no-incremental app tests` 190 文件 0 错误、`uv run --with bandit`（app 与 alembic 两条 invocation）exit 0。本点无新迁移，`alembic check` 无漂移结论沿用第一批（head `d7a1c3e5b9f4`）。
+  - 前端 `pnpm lint` / `pnpm typecheck` / `pnpm format:check` 通过；`pnpm test:unit`（admin）31 passed；`playwright test e2e/admin-roles.spec.ts` **15 passed**（新增 1 例：自定义角色可保存、`role-reset` 计数为 0 且未发出任何重置预览请求）。第三轮修复只动后端与文档，前端门禁未重跑（未触碰）。
+- 重点核对项结论（第三轮逐条）：`_integrity_constraint_name` 的取值路径经 SQLAlchemy 源码核验成立（适配异常只搬 `sqlstate`/`pgcode`/`detail`，`constraint_name` 在原生 asyncpg 异常上、由 `raise … from error` 挂在 `__cause__`；协议字段 `n`，非错误文本子串；`exc.orig` 为 None 时安全返回 None → 原样抛出）；拒绝顺序全部排在版本 CAS 之前；预览只读不审计且与执行响应同形同值；跨租同名互不干扰且同形 404；并发"恰好一行 + 每拒一痕"由独立事务留痕保证；`ROLE_CODE_TAKEN` 与 `ROLE_DEFAULTS_UNAVAILABLE` 的语义差异在 design.md/简报/代码注释三处一致。
+- 更好做法与 TD 处置：TD-194（创建路径不接守卫，用户裁定改口径 + TD-187d 三条前置，已采纳）、TD-197（63 vs 列宽 64，本点落地 → **已完成**）、TD-198（`name` 非空白只在接口层，已采纳→TD-187g）、TD-199（`affected_users` 不受 CAS 保护，已采纳→TD-187d）、TD-200（前端复刻可重置判据，已采纳→TD-187g）、TD-201（平台域尝试不落安全审计，已延后→M6 报警评审）、TD-193（拒绝审计池占用，本点新增 `create_denied`/`delete_denied` 两个独立事务点，结论与优先级不变）。
+- 结论：**TD-187b 可提交**（第三轮 1 Major 为门禁文件与 finding 落点缺失，非代码缺陷；0 Blocker，7 项发现全部有落点或 TD 处置）。M2-UI3 功能点整体未完成（TD-187c–g 待续），本点随分支提交、不推 main。

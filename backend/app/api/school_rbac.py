@@ -1,10 +1,12 @@
-"""校方侧角色权限配置与 MFA 管理员重置（M2-UI2：TD-137/TD-143/TD-126）。
+"""校方侧角色权限配置、自定义角色与 MFA 管理员重置（M2-UI2 + M2-UI3 部分）。
 
 本模块只做鉴权、请求/响应形状与错误映射；判定与落库在
 `app/rbac/admin.py` 与 `app/personnel/mfa_admin.py`：
 
 - 角色配置要求 `school.role.manage`；MFA 重置要求 `school.personnel.mfa.reset`，
   两者都是租户域权限（`realm="tenant"`）；
+- 删除角色另要 `school.role.delete`（决策 #6：拆角色与配权限分离，
+  能改配置的人不一定能让人失去角色）；删除预览只读，仍走 `school.role.manage`；
 - 错误统一返回 `{code, message}`；版本冲突额外带最新角色快照，前端据此刷新而不是静默覆盖；
 - 响应不回显登录名/邮箱/身份证/MFA 密钥等敏感字段。
 """
@@ -13,18 +15,26 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.auth.principal import Principal, require_permission
 from app.personnel import mfa_admin
 from app.personnel.mfa_admin import MfaAdminError
 from app.rbac import admin
-from app.rbac.admin import ResetPreview, RoleAdminError, RoleSummary
+from app.rbac.admin import (
+    ROLE_CODE_PATTERN,
+    ResetPreview,
+    RoleAdminError,
+    RoleDeletionPreview,
+    RoleSummary,
+)
 from app.rbac.self_grant import SENSITIVE_SELF_GRANT_CODES
 
 router = APIRouter(prefix="/school", tags=["school"])
 
 RoleManagerDep = require_permission("school.role.manage", realm="tenant")
+# 删除角色与配置权限分离（决策 #6）：`school.role.manage` 只到建/改/绑定，删角色要专用码。
+RoleDeleterDep = require_permission("school.role.delete", realm="tenant")
 MfaResetterDep = require_permission("school.personnel.mfa.reset", realm="tenant")
 
 
@@ -85,6 +95,54 @@ class RoleResetPayload(BaseModel):
     version: int = Field(ge=0)
 
 
+class RoleCreatePayload(BaseModel):
+    """创建自定义角色请求。
+
+    `code` 校验与库层 `ck_roles_code_format_valid` 同界（3..63，同一个正则）：若按列宽 64 写，
+    64 字符会通过这里、在 INSERT 撞 CHECK 变 500 而不是 422（简报 §4.1）。
+    初始权限二选一：给 `permission_codes`（默认空集），或 `copy_from_role_id` 复制同租户可编辑角色。
+    **空清单与不给该字段等价**（复制模式下前端勾选框本来就是空的），`ROLE_INITIAL_SOURCE_AMBIGUOUS`
+    只在"非空清单 + 复制源同时给"时触发。
+    """
+
+    code: str = Field(min_length=3, max_length=63, pattern=ROLE_CODE_PATTERN)
+    name: str = Field(min_length=1, max_length=100)
+    permission_codes: list[str] = Field(default_factory=list)
+    copy_from_role_id: UUID | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, value: str) -> str:
+        # `min_length=1` 挡得住空串，挡不住 "   "：服务层还会再 strip，于是落库成一行没有名字的
+        # 角色，运营只能靠 code 认。全空格在接口层就按非法处理。
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name 不能为空或全空白")
+        return stripped
+
+
+class RoleDeletePayload(BaseModel):
+    """删除自定义角色请求：逐字确认角色 code + 理由（服务层再校验 ≥10）+ 版本 CAS。"""
+
+    # 有意比 `code` 的上界（63）宽：这个字段只做逐字相等比较，超长必然是"用错了"，要让它走到
+    # 服务层才有 `{code,message}` 形状的 `ROLE_CODE_MISMATCH`；收成 63 会先撞 Pydantic 的数组形
+    # 422，把错误契约打断。与 M2-UI2 的 `RoleResetPayload` 同界。
+    confirm_role_code: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=500)
+    version: int = Field(ge=0)
+
+
+class RoleDeletionPreviewResponse(BaseModel):
+    """删除自定义角色的影响面（预览与执行返回同一形状）。"""
+
+    role_code: str
+    name: str
+    version: int
+    affected_users: int
+    permission_codes: list[str]
+
+
 class UserLookupResponse(BaseModel):
     """按登录名定位到的用户（不含登录名/邮箱/身份证/MFA 字段）。"""
 
@@ -125,6 +183,16 @@ def _preview_response(preview: ResetPreview) -> ResetPreviewResponse:
         scopes_added=list(preview.scopes_added),
         scopes_removed=list(preview.scopes_removed),
         affected_users=preview.affected_users,
+    )
+
+
+def _deletion_response(preview: RoleDeletionPreview) -> RoleDeletionPreviewResponse:
+    return RoleDeletionPreviewResponse(
+        role_code=preview.role_code,
+        name=preview.name,
+        version=preview.version,
+        affected_users=preview.affected_users,
+        permission_codes=list(preview.permission_codes),
     )
 
 
@@ -249,6 +317,87 @@ async def reset_role(
     except RoleAdminError as exc:
         raise _role_error(exc) from exc
     return _preview_response(preview)
+
+
+@router.post("/roles", response_model=RoleResponse, status_code=status.HTTP_201_CREATED)
+async def create_role(
+    payload: RoleCreatePayload,
+    request: Request,
+    manager: Annotated[Principal, RoleManagerDep],
+) -> RoleResponse:
+    """创建自定义角色（`is_system=false`，本租户内）。
+
+    异常:
+        HTTPException: 409（`ROLE_CODE_TAKEN` 撞内置保留码或本租户既有码）、
+            404（复制源角色不存在/跨租）、422（角色码格式、权限码非法或平台域码、
+            复制源为锁定角色、非超管转授 `school.role.manage`）。
+    """
+
+    try:
+        summary = await admin.create_role(
+            manager,
+            code=payload.code,
+            name=payload.name,
+            permission_codes=list(payload.permission_codes),
+            copy_from_role_id=payload.copy_from_role_id,
+            reason=payload.reason,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except RoleAdminError as exc:
+        raise _role_error(exc) from exc
+    return _role_response(summary)
+
+
+@router.post("/roles/{role_id}/delete/preview", response_model=RoleDeletionPreviewResponse)
+async def preview_role_deletion(
+    role_id: UUID,
+    manager: Annotated[Principal, RoleManagerDep],
+) -> RoleDeletionPreviewResponse:
+    """只读预览删除自定义角色的影响面（不写库、不审计）。
+
+    删除权限用 `school.role.manage` 而不是 `school.role.delete`：预览不改状态，
+    与重置预览同口径；只有执行删除才要求专用删除码（决策 #6）。
+
+    异常:
+        HTTPException: 404（角色不存在/跨租）、409（内置角色不可删）。
+    """
+
+    try:
+        preview = await admin.preview_role_deletion(manager, role_id)
+    except RoleAdminError as exc:
+        raise _role_error(exc) from exc
+    return _deletion_response(preview)
+
+
+@router.post("/roles/{role_id}/delete", response_model=RoleDeletionPreviewResponse)
+async def delete_role(
+    role_id: UUID,
+    payload: RoleDeletePayload,
+    request: Request,
+    deleter: Annotated[Principal, RoleDeleterDep],
+) -> RoleDeletionPreviewResponse:
+    """硬删自定义角色：权限、数据范围、用户绑定随复合外键 CASCADE 一并清理。
+
+    删除前的权限码集与受影响用户数先快照进审计——CASCADE 之后取不回，
+    没有这份快照就无法回答「谁在什么时候失去了哪些权限」。
+
+    异常:
+        HTTPException: 403（缺 `school.role.delete`）、404（不存在/跨租）、
+            409（内置角色不可删/版本冲突）、422（确认码不符或理由不足 10 字符）。
+    """
+
+    try:
+        preview = await admin.delete_role(
+            deleter,
+            role_id,
+            confirm_role_code=payload.confirm_role_code,
+            reason=payload.reason,
+            version=payload.version,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except RoleAdminError as exc:
+        raise _role_error(exc) from exc
+    return _deletion_response(preview)
 
 
 @router.get("/users/lookup", response_model=UserLookupResponse)
