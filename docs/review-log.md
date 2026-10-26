@@ -455,7 +455,8 @@
   - 前端：lint / format:check / typecheck / vitest（api-client 54 + admin 21）/ `pnpm --filter admin build` / `npx playwright test` 57 passed（含 m4 新增的自锁正例与反例）。
   - 全量后端：**661 passed**（1514.36s，真实测试栈），exit 0。
 - 更好做法与 TD 处置：TD-150/137/143/126 已完成；TD-185/186/188/189/192/193 已延后（各附触发条件）；TD-187/191 已采纳→M2-UI3；TD-190 已完成（审计链脚本编码，测试侧修复，未改运维输出）。
-- 结论：**可提交**（第二轮 0 Blocker / 0 Major；6 项新 Minor 中 4 项已实现、2 项以 TD/注释显式处置）。
+- 远端 CI：`dae60d5` 上 backend #40316861186、frontend #40316861247 success；security #40316861178 首跑失败——gitleaks 对 3 处业务场景测试种子口令报 `generic-api-key`（`test_bs_m2ui2_rbac_admin.py:138`、`test_bs_m2ui2_mfa_admin.py:32/368`）。按 TD-052 口径补 8 条**精确字符串**白名单（不做 tests 目录豁免，否则真实凭证同样被挡住），提交 `2b7892f` 后 security #40318461683 success。该提交只改根配置，backend/frontend 按目录路径过滤未重跑，结论沿用上一提交。
+- 结论：**已交付**（第二轮 0 Blocker / 0 Major；6 项新 Minor 中 4 项已实现、2 项以 TD/注释显式处置；三条工作流在 `main` 顶端全绿）。
 
 ## 高风险功能复审记录
 

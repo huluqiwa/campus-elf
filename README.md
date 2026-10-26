@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-**当前阶段：M2 组织与人员收尾中（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面已交付；M2-UI2 角色权限后台以本地门禁 + 远端 CI 绿为准；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
+**当前阶段：M2 组织与人员收尾中（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台已交付并过 CI；M2-UI3 自定义角色/权限账号待做；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
 
 已完成：
 
@@ -24,11 +24,11 @@
 - **M2 组织与人员（后端）**：人员档案与组织关系（教师/学生建档、班级/课程/任教、`class` 数据范围 + cursor 分页，迁移 `c9d5f1e3a7b9`）；CSV/XLSX 异步导入（Arq 任务、行级错误报告、失败行重试 + 看门狗，迁移 `e2a6c8d4b0f2`）；部门/科室树（id 物化路径、子树移动、教师归属 + 调岗审计，迁移 `a4c8e2f6b1d3`）；身份证加密采集与受控查看（AES-256-GCM 三件套 + 同租 HMAC 查重唯一索引 + 掩码列表 + `sensitive.read` 理由查看，迁移 `f8b2d6a0c4e8`）；入学年份与学年流转（班级届身份唯一键、当前年级批量刷新、毕业归档、幂等键+dry_run，迁移 `b9d3f7c1e5a9`）；B 端管理页面（Element Plus 校管后台：人员/受控查看/班级课程任教/部门树/导入/学年流转，菜单按权限渲染）。
 - **M2 角色权限配置后台（M2-UI2，TD-126/137/143/150）**：迁移 `c3f7a9d1e5b2` 给 `roles`/`platform_roles` 加 `defaults_applied` 出厂标记、给 `roles` 加 `version` 乐观锁（内置角色的出厂默认从此只在未初始化时补种一次，运营主动清空不再被"补回来"）；`GET /school/roles`(+`/school/permissions`) 与 `PUT /school/roles/{id}/permissions` 全量替换（目录外/平台域码 422、版本冲突 409 并回带最新快照、变更写 `school.role.permissions.updated` 审计含 added/removed/reason、下一请求即生效且不作废在线会话）；`POST /school/roles/{id}/reset/preview` + `/reset` 重置为出厂（同时恢复权限与数据范围、需角色 code 逐字确认 + 理由 ≥10、锁定角色与自定义角色一律 409 `ROLE_IMMUTABLE`（绕过预览直连也被拒））；`GET /school/users/lookup` + `POST /school/users/{id}/mfa/reset` 管理员 MFA 重置（专用码 `school.personnel.mfa.reset`，清绑定/锁定/恢复码 + 撤刷新令牌家族 + `token_version+1` + Redis 清会话，密码不变）；权限目录 59→60 码；admin 端「角色权限」页（按模块分组、增删差异预览、二次确认、409 自动采用最新、菜单与守卫随权限热更新、重置弹窗对「本人也在被重置角色且出厂清单不含 `role.manage`」给出自锁提示）；`school.role.manage` 只能由校方超管写入（非超管主体提交含该码的集合 → 422 + 拒绝审计），禁令的真实边界与残余风险登记在 design.md §5.12 与 TD-191。
 
-当前门禁（M2-UI2 时点，2026-10-26）：后端 **661 passed**（25m14s，真实 PG/Redis/MinIO/Qdrant 测试栈）、前端 **75 单测 + 57 mock E2E + 12 全栈 E2E（TD-110；M2-UI1/UI2 新增 3 条待补跑，TD-183/192）**、`ruff`/`mypy`/`alembic check`/`bandit` 本地全绿、迁移 head `c3f7a9d1e5b2`（无漂移）；M1 全部功能点与 M2-ORG01/03、ORG-02、ORG-05、ORG-04、ORG-06、M2-UI1、M2-UI2 均已交付并通过两轮独立审查（远端 CI 结果以推送后回填为准）。
+当前门禁（M2-UI2 时点，2026-10-26）：后端 **661 passed**（25m14s，真实 PG/Redis/MinIO/Qdrant 测试栈）、前端 **75 单测 + 57 mock E2E + 12 全栈 E2E（TD-110；M2-UI1 新增 3 条全栈用例待补跑 TD-183，M2-UI2 的全栈用例尚未编写 TD-192）**、`ruff`/`mypy`/`alembic check`/`bandit` 本地全绿、迁移 head `c3f7a9d1e5b2`（无漂移）；M1 全部功能点与 M2-ORG01/03、ORG-02、ORG-05、ORG-04、ORG-06、M2-UI1、M2-UI2 均已交付并通过两轮独立审查（M2-UI2 远端 CI：backend #40316861186 / frontend #40316861247 / security #40318461683 success）。
 
 进行中/待做：
 
-- **M2-UI3**（自定义角色 / 单用户多角色 / 权限账号）与 **M3/M4**（知识库闭环、AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。M2-UI1/UI2 新增的 3 条全栈 E2E 因本机 8000 端口被占待补跑（TD-183）。
+- **M2-UI3**（自定义角色 / 单用户多角色 / 权限账号）与 **M3/M4**（知识库闭环、AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。M2-UI1 新增的 3 条全栈 E2E 因本机 8000 端口被占待补跑（TD-183）；M2-UI2 的「UI × 真实库」联动全栈用例同样待补（TD-192）。
 
 ## 技术栈（已锁定）
 
