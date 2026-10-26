@@ -29,4 +29,14 @@ regexes = [
   "Platform-Test-Pass-1",
   # M2-ORG01-03 业务场景的校管种子口令（仅测试种子账号；非真实凭证）。
   "M2-Principal-Pass-1",
+  # M2-UI2 角色权限与 MFA 重置业务场景的种子口令（仅测试账号，随机租户码每次用例现生成）。
+  # 仍按精确字符串放行，不做目录豁免——tests 目录同样可能误粘真实凭证。
+  "Rbac-Super-Pass-1",
+  "Rbac-Admin-Pass-1",
+  "Rbac-Foreign-Pass-1",
+  "Mfa-Operator-Pass-1",
+  "Mfa-Teacher-Pass-1",
+  "Mfa-Super-Pass-1",
+  "Mfa-Plain-Pass-1",
+  "Mfa-Foreign-Pass-1",
 ]
