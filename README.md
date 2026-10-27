@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-**当前阶段：M2 组织与人员收尾中（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台已交付并过 CI；M2-UI3 自定义角色/权限账号进行中——第一批（库层不变量 + 自扩权守卫）与第二批（自定义角色创建/删除接口）已交付，绑定/范围编辑/权限账号/前端待做；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
+**当前阶段：M2 组织与人员收尾中（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台已交付并过 CI；M2-UI3 自定义角色/权限账号进行中——第一批（库层不变量 + 自扩权守卫）、第二批（自定义角色创建/删除接口）与第三批（角色级数据范围编辑）已交付，绑定/权限账号/前端待做；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
 
 已完成：
 
@@ -26,11 +26,13 @@
 - **M2-UI3 第一批：库层不变量 + 自扩权显式确认（TD-187a/TD-191，2026-10-27）**：迁移 `d7a1c3e5b9f4` 给 `roles` 加两条 CHECK（自定义角色码格式 `^[a-z][a-z0-9_]{2,62}$`、内置码只有 `is_system=true` 可占），新码 `school.role.delete`（权限目录 60→61，删除与配置分授）；`app/rbac/self_grant.py` 判据 + `PUT /school/roles/{id}/permissions` 接线——结果权限集触达操作者自己所在角色且**净增**敏感码时必须 `self_grant_ack=true` + 非空理由（超管免打断不免留痕），拒绝排在版本 CAS 之前，`school.role.self_grant` 审计**放行与打断都写**（打断走独立事务，报警因此看得到未遂）；前端按后端下发的敏感清单做本地预检，服务端 422 时强制展开确认条并保留草稿。
 - **M2-UI3 第二批：自定义角色创建与删除（TD-187b，2026-10-27）**：`POST /school/roles`（初始权限二选一：显式清单或复制同租户可编辑角色；保留码/同码/目录外/平台域/转授禁令/复制源锁定各有独立人读错误码；并发同名由 `uq_roles_tenant_id_code` 兜底，且**只有这一条约束**翻 409 `ROLE_CODE_TAKEN`——约束名取自驱动回报的原生异常对象（PG 协议字段 `n`），不做错误文本子串匹配，其余完整性错误原样抛出，不把库层故障伪装成业务冲突）；`POST /school/roles/{id}/delete/preview` + `/delete`（`school.role.delete`、逐字确认码 + 理由 ≥10 + 版本 CAS，CASCADE 之前把权限码集与受影响用户数快照进 `school.role.deleted`，响应 `version` 是被删行的最后版本号）；自定义角色从此 `editable=true` 可删但**不可重置出厂**（`ROLE_DEFAULTS_UNAVAILABLE` 是结构性不可重置，非"尚未开放"），配置页重置入口改跟 `is_system` 走；创建路径**有意不接**自扩权守卫（判据对新角色 id 结构上不可触发，用户 2026-10-27 裁定改口径，能力流动由 PUT 与 TD-187d 的绑定路径承担），见简报 §12 与 TD-194。
 
-当前门禁（M2-UI3 第二批时点，2026-10-27）：后端 **706 passed**（28m13s，真实 PG/Redis/MinIO/Qdrant 测试栈；互斥分解 398 单元 / 145 集成 / 163 业务场景）、`ruff` + `mypy`（190 文件 0 错误）+ `bandit`（app / alembic 两条）+ `alembic check` 本地全绿，迁移 head `d7a1c3e5b9f4`（无漂移）；前端 admin 端本点复跑 **31 单测 + 15 mock E2E** 通过（`pnpm lint`/`typecheck`/`format:check` 绿），仓级前端 75 单测 + 57 mock E2E + 12 全栈 E2E 的数字仍是 M2-UI2 时点测得、本点未重跑全量前端。M1 全部功能点与 M2-ORG01/03、ORG-02、ORG-05、ORG-04、ORG-06、M2-UI1、M2-UI2 均已交付并通过独立审查与远端 CI（M2-UI2：backend #40316861186 / frontend #40316861247 / security #40318461683 success）；M2-UI3 两批只在 `feature/M0-foundation` 上提交，**未推 main、远端 CI 未跑**（等 TD-187c–g 收口）。
+- **M2-UI3 第三批：角色级数据范围编辑（TD-187c，2026-10-27）**：`GET /school/roles/{id}/scopes`（含服务端下发的 `editable`，前端不用按类型名猜）、`POST …/scopes/preview`（差异 + 持有人数 + `retained_non_editable` + `empties_scope`，只读、不审计、不推版本）、`PUT …/scopes`（全量替换：realm 判据 → 未知类型 → 行锁取角色 → 可编辑 → 不可手工授 → 版本 CAS → 范围版自扩权守卫 → `version+1` → **窄删除**（只碰 `school`/`self`，不替不存在的写路径清理角色级 `class` 行）→ `unnest` 插入 → `school.role.scopes.updated` 审计）；可编辑集 `{school,self}`，手工授 `class`/`course` 一律拒授**并留安全审计**——真原因是本端点没有 `scope_id` 入参通道（写入即缺 id 的脏行，解析层抛 `ValueError` 会让该角色每个持有人 500），`course` 另本期不贡献可见性（TD-151）；范围敏感项 `{school}` 与权限侧共用同一判据内核（净增且触达本人 → `self_grant_ack` + 理由，超管免打断不免留痕，`school.role.self_grant` 的 `metadata.kind="scope"` 区分），**空清单合法**并由预览提示"N 名持有人将看不到任何数据"；**重置出厂是这条判据的第 4 个入口、本点未接**（"收窄 → 恢复出厂 → 静默拿回全校"是可达路径，随 TD-187d 收口，TD-194）；三轮独立审查 0B/5M/14m 全部整改，处置见 `docs/review-log.md` 与 TD-195/202/203/204/205。
+
+当前门禁（M2-UI3 第二批时点，2026-10-27）：后端 **706 passed**（28m13s，真实 PG/Redis/MinIO/Qdrant 测试栈；互斥分解 398 单元 / 145 集成 / 163 业务场景）、`ruff` + `mypy`（190 文件 0 错误）+ `bandit`（app / alembic 两条）+ `alembic check` 本地全绿，迁移 head `d7a1c3e5b9f4`（无漂移）；前端 admin 端本点复跑 **31 单测 + 15 mock E2E** 通过（`pnpm lint`/`typecheck`/`format:check` 绿），仓级前端 75 单测 + 57 mock E2E + 12 全栈 E2E 的数字仍是 M2-UI2 时点测得、本点未重跑全量前端。M1 全部功能点与 M2-ORG01/03、ORG-02、ORG-05、ORG-04、ORG-06、M2-UI1、M2-UI2 均已交付并通过独立审查与远端 CI（M2-UI2：backend #40316861186 / frontend #40316861247 / security #40318461683 success）；M2-UI3 三批只在 `feature/M0-foundation` 上提交，**未推 main、远端 CI 未跑**（等 TD-187d–g 收口）。第三批（TD-187c）为**点级门禁**：本点四文件 51 passed（23 单元 / 18 集成 / 5 库层 / 5 业务场景）、RBAC 受影响子集 192 passed、`ruff` + `mypy`（192 文件 0 错误）+ `bandit`（app / alembic）+ `alembic check` 无漂移；全量后端与前端套件按批次规则留到批次 A（+TD-187d）末统一跑，本点未触碰前端。
 
 进行中/待做：
 
-- **M2-UI3 剩余**：TD-187c 角色级数据范围编辑、TD-187d 用户↔多角色绑定（须一并收口 TD-194 守卫三条前置与 TD-199 影响面 CAS）、TD-187e 权限账号启停、TD-187f 业务场景/集成测试补全、TD-187g 前端角色与权限账号页（含 TD-198 `name` 非空白、TD-200 `resettable` 下发）；完成后合并推 main 跑 CI。**M3/M4**（知识库闭环、AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。M2-UI1 新增的 3 条全栈 E2E 因本机 8000 端口被占待补跑（TD-183）；M2-UI2 的「UI × 真实库」联动全栈用例同样待补（TD-192）。
+- **M2-UI3 剩余**：TD-187d 用户↔多角色绑定（须一并收口 TD-194 守卫三条前置与 TD-199 影响面 CAS）、TD-187e 权限账号启停、TD-187f 业务场景/集成测试补全、TD-187g 前端角色与权限账号页（含 TD-198 `name` 非空白、TD-200 `resettable` 下发）；完成后合并推 main 跑 CI。**M3/M4**（知识库闭环、AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。M2-UI1 新增的 3 条全栈 E2E 因本机 8000 端口被占待补跑（TD-183）；M2-UI2 的「UI × 真实库」联动全栈用例同样待补（TD-192）。
 
 ## 技术栈（已锁定）
 
