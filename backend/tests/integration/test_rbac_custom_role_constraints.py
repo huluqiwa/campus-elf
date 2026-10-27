@@ -1,6 +1,6 @@
-"""自定义角色的库层约束与目录落库（M2-UI3 TD-187a）。
+"""自定义角色的库层约束与目录落库（M2-UI3 TD-187a，TD-187c 追加第 4 条）。
 
-钉住三件事（简报 §4.1 + §11 决策 #6）：
+钉住四件事（简报 §4.1 + §11 决策 #6 + §13.2 决策③）：
 
 1. 新权限码 `school.role.delete` 随代码目录同步落库，且校方超管按「本校全量」补到——
    目录加了码但超管没补上 = 新能力只有手写 SQL 才能授出；
@@ -8,12 +8,15 @@
    库层这条是「绕过应用代码的手工 SQL」的最后防线；
 3. 内置角色码保留：非系统角色不得占用内置 code。靠「本租户恰好已有同码内置行」的唯一约束
    不够——那是逐租户偶然成立，跨租户一致性必须由 CHECK 声明。
+4. `data_scopes` 两条 CHECK 的**全名**与代码里引用的一致：范围替换的漂移分支按名字等值比较，
+   命名约定加过前缀，写错就是"人读 409 变纯文本 500"；`scope_id` 那条还是 422 文案的事实来源。
 
 每条都配反证（合法值必须能插入），否则约束可能是空挡或写过头。
 """
 
 import os
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -21,7 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.rbac import sync_rbac_definitions
+from app.rbac import admin, sync_rbac_definitions
 from app.rbac.admin import EDITABLE_ROLE_CODES
 from app.rbac.seeds import TENANT_BUILTIN_ROLES
 from app.rbac.self_grant import SENSITIVE_SELF_GRANT_CODES
@@ -37,6 +40,10 @@ from tests.support.dsn import assert_test_database_dsn
 pytestmark = pytest.mark.integration
 
 _ADMIN_ROLE: EngineRole = "admin"
+
+#: `data_scopes` 里那条"class/course 必须带 scope_id"的 CHECK 全名（库里的事实，不是代码常量）。
+#: `admin.py` 的 422 文案引用它，所以这里既钉名字、也钉"缺 id 真会被挡"这条硬理由。
+_SCOPE_ID_CHECK_CONSTRAINT = "ck_data_scopes_scope_id_required_for_class_course"
 
 
 @pytest.fixture(scope="module")
@@ -215,3 +222,66 @@ async def test_builtin_role_codes_are_reserved_for_system_roles(admin_session: A
     # 反证 2：非内置 code 的自定义角色仍然可建（与上一条用例互为边界）
     await _insert_role(admin_session, tenant_id, "library_admin", is_system=False)
     await admin_session.commit()
+
+
+async def test_data_scope_check_constraint_names_match_the_database(
+    admin_session: AsyncSession,
+) -> None:
+    """`admin.py` 里引用的两条 `data_scopes` CHECK 必须与库里的**全名**一致（TD-187c）。
+
+    为什么要单独钉：
+    - 范围内插的漂移分支按约束名做**等值比较**。SQLAlchemy 的命名约定给模型里声明的名字加
+      `ck_<table>_` 前缀，驱动回报的是前缀后的完整名；写成 `scope_type_valid` 会让"翻成人读 409"
+      的分支变成死代码，实际表现是纯文本 500——而这正是本项目最忌讳的"把业务拒绝伪装成故障"。
+    - `ck_data_scopes_scope_id_required_for_class_course` 是" `class`/`course` 不可经角色配置写入"
+      这条**对外文案**的事实来源。库层没有这条约束，422 的理由就是说谎（运营会照着一个不成立的原因去排查）。
+    反证：同一张表能插入合法的 `class` 行（带 id），说明约束不是空挡、也没有写过头。
+    """
+
+    rows: list[Any] = list(
+        (
+            await admin_session.execute(
+                text(
+                    "select con.conname from pg_constraint con "
+                    "join pg_class cls on cls.oid = con.conrelid "
+                    "where cls.relname = 'data_scopes' and con.contype = 'c'"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    names = {str(row) for row in rows}
+    assert admin._SCOPE_TYPE_CHECK_CONSTRAINT in names, (
+        f"范围内插漂移分支会失配（等值比较落空 → 业务拒绝变成 500）：库里是 {sorted(names)}"
+    )
+    assert _SCOPE_ID_CHECK_CONSTRAINT in names, "422 文案引用的约束在库里不存在"
+
+    tenant_id = await _create_tenant(admin_session, "范围 CHECK 学校")
+    await _insert_role(admin_session, tenant_id, "scope_check_role", is_system=False)
+    await admin_session.commit()
+    role_id = await admin_session.scalar(
+        text("select id from public.roles where tenant_id = cast(:tid as uuid) and code = 'scope_check_role'"),
+        {"tid": tenant_id},
+    )
+
+    # 反证 1：合法的 class 行（带具体班级 id）必须进得了库
+    await admin_session.execute(
+        text(
+            "insert into public.data_scopes (id, tenant_id, role_id, scope_type, scope_id) "
+            "values (gen_random_uuid(), cast(:tid as uuid), cast(:rid as uuid), 'class', gen_random_uuid())"
+        ),
+        {"tid": tenant_id, "rid": str(role_id)},
+    )
+    await admin_session.commit()
+
+    # 正证：缺 scope_id 的 class 行被 CHECK 挡下 —— 这就是角色配置端点拒收它的硬理由
+    with pytest.raises(IntegrityError):
+        await admin_session.execute(
+            text(
+                "insert into public.data_scopes (id, tenant_id, role_id, scope_type, scope_id) "
+                "values (gen_random_uuid(), cast(:tid as uuid), cast(:rid as uuid), 'class', null)"
+            ),
+            {"tid": tenant_id, "rid": str(role_id)},
+        )
+    await admin_session.rollback()

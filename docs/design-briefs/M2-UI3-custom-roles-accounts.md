@@ -16,7 +16,7 @@
 | 账号创建 | 随教师/学生建档发生（`POST /school/teachers`→`app/org/service.py:705 create_teacher`：随机初始密码 + `must_change_password=true`，`initial_password` 只在响应里出现一次、不落日志/审计） | 「创建权限账号」已具备；本点不重复造 |
 | 账号停用 | 无接口。`users.status` 字段存在，登录侧已按 `status != 'active'` 拒绝（`app/auth/service.py:949/963/968`） | 只需写状态 + 复用既有会话撤销链路即可满足 spec 验收 |
 | 自定义角色 | `roles.is_system` 字段存在，语义未定义；M2-UI2 对自定义角色返回 409 `ROLE_IMMUTABLE` + `lock_reason="待 M2-UI3"` | 本点把它变成可创建/可编辑/可删除 |
-| 数据范围 | `data_scopes` 允许绑 role 或 user（CHECK `scope_binding`）；**`class` 范围行由 `app/org/scopes_sync.py` 按「任教 ∪ 班主任 ∪ 辅导员」做期望-实际差量同步**，且必须在关系变更同事务内调用 | 手工按人授 `class` 范围会被下一次同步当差量删掉 → 二者互斥，见 §5 |
+| 数据范围 | `data_scopes` 允许绑 role 或 user（CHECK `scope_binding`）；**`class` 的用户级范围行由 `app/org/scopes_sync.py` 按「任教 ∪ 班主任 ∪ 辅导员」做期望-实际差量同步**（读写谓词都限定 `user_id is not null`；角色级同型行没有合法写入方，见 §13.1 勘误），且必须在关系变更同事务内调用 | 手工按人授 `class` 范围会被下一次同步当差量删掉 → 二者互斥，见 §5 |
 | 出厂默认 | `defaults_applied`（TD-150）只对 `is_system` 角色有意义；`rbac_builtin_role_defaults` 是代码持有的定义表 | 自定义角色不参与同步与重置出厂 |
 | TD-191 | 禁令只封 `school.role.manage` 这个码的扩散；已持该码者仍可把敏感码写进自己所在角色 | 本点多角色化后风险面扩大，必须一并处置 |
 
@@ -152,7 +152,7 @@
 1. **迁移**：`roles` 加自定义角色的 CHECK（`code` 格式 + `is_system` 与 code 保留名单互斥）+ `users.status` 取值 CHECK（若尚无）+ 可选新码 `school.role.delete`。
 2. **不变量测试先红**：`tests/integration/test_rbac_custom_roles.py`——自定义角色不被同步补种、不参与重置、复合外键保证不跨租。
 3. **服务层**：`app/rbac/custom_roles.py`（创建/删除/影响面预览）、`app/rbac/binding.py`（用户↔角色全量替换 + 拒绝审计复用 `_audit_denied`）、`app/personnel/account_admin.py`（开/停，复用 `app/auth/revocation.py` 与 MFA 重置同一条撤销链路）。
-4. **§6 自扩权守卫**：`_assert_self_grant(...)` 三条写路径共用（角色替换、绑定、创建角色）。**TD-187b 修正（2026-10-27 裁定）：两条**——角色替换 + 绑定；创建角色不接，判据对新角色 id 恒不可达，见 §12。
+4. **§6 自扩权守卫**：`_assert_self_grant(...)` 三条写路径共用（角色权限替换、角色范围替换、用户绑定）。**TD-187b 修正（2026-10-27 裁定）：创建角色不接**，判据对新角色 id 恒不可达，见 §12。**TD-187c 补充（2026-10-27 拍板）：范围替换接的是范围版判据**（净增 `school` 才算敏感，见 §13.3），三条 = 权限/范围/绑定，不含创建。
 5. **API**：`app/api/school_rbac.py` 扩端点 + 声明权限 + 错误契约（`SELF_GRANT_CONFIRMATION_REQUIRED`、`ROLE_IN_USE`、`ROLE_CODE_TAKEN`、`ACCOUNT_ALREADY_DISABLED`、`REALM_MISMATCH`）。
 6. **业务场景测试**：`tests/business/test_bs_m2ui3_*.py`（见 §9）。
 7. **前端**：admin「角色权限」页加"新建/删除角色"与范围编辑；新「权限账号」页（账号列表 + 角色绑定抽屉 + 启停按钮，全部 `data-testid`）；api-client 类型；mock E2E。
@@ -274,3 +274,63 @@
 | 审查三轮 m-6（前端复刻了服务端的可重置判据） | `RoleSettingsView` 的恢复出厂按钮今天跟 `is_system` 走，与"有没有出厂定义"等价但不是同一判据；`RoleResponse` 下发服务端派生 `resettable` 的收口登记 TD-200（TD-187g 一并做，避免响应模型改两轮）。服务端 `reset_role` 恒 409 是唯一门禁，本条只影响按钮准确性 |
 | 审查三轮 m-5（`rowcount != 1` 分支零覆盖） | **不补**，理由是造不出真场景而不是遗漏：读侧 `SELECT … FOR UPDATE` 与写侧 `DELETE` 共用同一策略的同一个 `USING`，一致策略下不可能"看得见却删不动"，命中只能 monkeypatch rowcount（测替身）。分支本身作为 RLS 漂移的保险留在代码里，说明写在集成用例模块头，同一文件的第 4 条改为测真实存在的并发面（m-4） |
 | 审查 m-1（并发兜底别误报） | `IntegrityError` 只在**约束名精确等于** `uq_roles_tenant_id_code` 时翻成人读 409（名字取 asyncpg 原生异常的 `constraint_name`——PG 协议字段 `n`，不是错误文本子串；SQLAlchemy 的适配异常上没有这个属性，要往 `exc.orig.__cause__` 取一层，两处都取不到按"不是同码冲突"处理、宁可 500。子串匹配会把 `..._v2` 这类同前缀约束一并误判）；撞格式 CHECK/FK 原样抛出（无全局 handler → Starlette 纯文本 500，响应体不含 SQL），不把库层故障伪装成业务冲突 |
+
+---
+
+## 13. TD-187c：角色级数据范围编辑（2026-10-27 用户拍板四项，批次 A 的一半）
+
+### 13.1 目标与验收
+
+补 M2-UI2 留下的真实缺口：`PUT /school/roles/{id}/permissions` 只改权限、不改范围，而"同一角色看全校还是只看本人"是运营最常配的一项（§5 决策四）。验收口径：
+
+- 角色级 `school`/`self` 可全量替换，下一请求即生效、不作废在线会话（与权限同口径）；
+- `class`/`course` **不可手工授**（本点理由，不是 §5 那条用户级理由）：两类都必须绑定具体班级/课程 id（库 CHECK `ck_data_scopes_scope_id_required_for_class_course`），而角色配置端点的入参只有"类型"这一维、没有"选哪个班"的通道——写下去要么撞 CHECK，要么造出解析层读不懂的行（`scopes.py:scope_context_from_rows` 对缺 id 的 `class` 抛 `ValueError`，该角色每个持有人下一次请求 500）。`course` 另外还本期不贡献可见性（TD-151）。
+  **勘误（TD-187c 独立审查 Major 2）**：本条原写"`class` 行归 `scopes_sync` 的差量同步所有，手工写会被下一次关系变更当差量删掉"——那句只对**用户级**行成立（`scopes_sync` 的读写谓词都限定 `user_id is not null`，删除按 `user_id + scope_id` 定位），角色级同型行今天**没有任何合法写入方**，也就没有"被同步删掉"这回事。理由换成上面这条与库层事实一致的。
+- 范围抬升触达操作者自己所在角色时走自扩权确认（13.2 决策①）；
+- 空清单合法但预览必须报出"该角色 N 名持有人将看不到任何数据"（13.2 决策④）。
+
+### 13.2 四项拍板结论（用户 2026-10-27）
+
+| # | 结论 | 备选与为什么不选 |
+|---|---|---|
+| ① | **范围编辑接自扩权守卫**：结果范围集触达操作者所在角色且**净增 `school`**（全校）时必须 `self_grant_ack=true` + 非空理由，放行与打断都写 `school.role.self_grant`（`metadata.kind="scope"` 区分权限那条） | 不接：判据只覆盖权限码，则 `role.manage` 持有者可静默把自己所在角色从 `self` 抬到 `school`。范围放大与补一个敏感码在效果上是同一件事——可见数据集变大；design.md §5.12「能力只在 PUT 与绑定流动」这句话本来也盖不住范围这一路。**守卫写路径从此是三条**：权限替换、范围替换、用户绑定（创建角色仍不接，§12.2 裁定不变），TD-194 的抽 helper 口径同步改 |
+| ② | **独立端点** `PUT /school/roles/{id}/scopes`（全量替换 + 差异预览语义与权限端点对称） | 合并进 `PUT permissions`：请求少一次，但两个编辑区互相覆盖——权限草稿脏了会把范围草稿一起打回 409，审计的 `added/removed` 也要把"码"和"范围"混进一条 payload。分开则各自 diff、各自留痕、前端各回各的草稿 |
+| ③ | **手工授 `class`/`course` 被拒要留痕**（`school.role.scopes.denied`） | 归"入参非法"族不留痕（同目录外码、平台域码）：这一条拦的不是码合不合法，而是**往库里写一条本端点补不全 `scope_id` 的行**的意图（见 §13.1 勘误），与 `ROLE_CODE_NOT_DELEGABLE` 同类（判据看资格与不变量，不看字面格式），报警侧需要看得到 |
+| ④ | **允许空范围清单**，预览提示持有人数 | 禁止空清单：会挡掉"先建角色、后配范围"的正常流程；且范围解析本就是 fail-closed（`scopes.py`：解析不到范围行 = 空集，绝不回退成全校），空集不会放大可见性，风险方向是"看不见"而不是"看见太多" |
+
+未列问题的默认口径（无需拍板，写进代码注释与 design.md）：范围编辑复用 `school.role.manage`，**不新开权限码**（新开会让"配一个角色"要两个码，且 `role.manage` 的语义本就是配角色）；与权限替换**共享同一个 `roles.version`** 乐观锁（一列版本覆盖两条写路径，避免"权限 CAS 成功、范围 CAS 失败"的半更新态）。
+
+### 13.3 判据扩展（`app/rbac/self_grant.py`）
+
+现有判据是纯权限码的（`SENSITIVE_SELF_GRANT_CODES` × 净增 × 触达本人角色）。本点加一条**同形**的范围判据，不把它揉进码判据里：
+
+- 输入：库内该角色当前范围类型并集、提交后的结果范围集、操作者所在角色在库内的范围并集；
+- 触发条件：结果集含 `school` 且**操作者当前生效的范围并集不含**（净增，读库重读，与权限侧同一口径），且被写角色 ∈ 操作者所在角色集合；
+- `self` 不入敏感清单：∅ → `self` 确实也是扩大，但扩大出来那一份只有持有人自己的记录，够不到任何别人的数据，问一次 ack 只会淹没真信号（原写法"`self` 不比现状更宽"不准确，TD-187c 审查 Minor 6 勘误）。`class` 压根不可经角色配置写入（§13.1），到不了这一步；`school` 是唯一敏感项，因为它是"覆盖其余一切"的那个类型（`scopes.py:sees_whole_school`）。
+- 与权限判据共用 `_assert_self_grant` 的调用骨架与留痕动作，差异只在 `metadata.kind` 与敏感项定义 → 这就是 TD-194 抽 helper 的第二条腿。
+
+### 13.4 接口与错误契约（新增）
+
+| 方法/路径 | 权限码 | 说明 |
+|---|---|---|
+| `GET /school/roles/{id}/scopes` | `school.role.manage` | 该角色当前范围行（只读，含 `editable=false` 的 `class` 行——角色级同型行今天没有合法写入方，只有手工 SQL 能造出来，用例靠它钉住窄删除；前端按"不可编辑"渲染） |
+| `POST /school/roles/{id}/scopes/preview` | `school.role.manage` | 差异预览：新增/移除范围类型、结果集是否触达本人、持有人数、空清单提示；只读不审计 |
+| `PUT /school/roles/{id}/scopes` | `school.role.manage`（+ §6 范围版确认） | 全量替换 `school`/`self`；`version` CAS；审计 `school.role.scopes.updated`（记 added/removed/resulting/affected_users/reason），被拒走 `school.role.scopes.denied` |
+
+错误码：`SCOPE_TYPE_NOT_EDITABLE`(422，含 `class`/`course`，留痕)、`UNKNOWN_SCOPE_TYPE`(422，不在 `ScopeType` 内，不留痕，且**排在可编辑性判定之前**)、`SELF_GRANT_CONFIRMATION_REQUIRED`/`SELF_GRANT_REASON_REQUIRED`(422，沿用)、`ROLE_VERSION_CONFLICT`(409，回带最新角色快照)；内置锁定角色沿用 `ROLE_IMMUTABLE`；库内 CHECK 与模型 `ScopeType` 漂移时 `SCOPE_CATALOG_OUT_OF_SYNC`(409)。
+
+版本冲突**不复用新码**：两条写路径本就共享同一列 `roles.version`（§13.2 未列问题那句），冲突对运营是同一件事——"这个角色被别人改过了，刷新重试"。再造一个 `ROLE_SCOPE_VERSION_CONFLICT` 只会让前端多认一个码、语义不变，属无收益的契约扩张。
+
+### 13.5 实现顺序（TDD 红→绿）
+
+1. 纯判据单测先红：范围版判据（净增 `school` 才触发、收窄 `school`→`self` 不算、改别人所在角色不算、`self` 不入清单）；
+2. 服务层 `app/rbac/admin.py`：`list_role_scopes` / `preview_role_scopes` / `replace_role_scopes`（复用 M2-UI2 的 CAS + 差异 + `_audit_denied` 骨架）；
+3. API 三条路由 + payload：`scope_types` 收 `list[str]`（**有意不用 `Literal` 收窄**——非字面量必须走到服务层才有人读的 `{code,message}` 422，Pydantic 先拦会换成 FastAPI 的数组形校验错误，与 `RoleDeletePayload.confirm_role_code` 同口径）；
+4. 业务场景 BS-M2UI3-C：自定义角色持有人从「无范围（空集）」→ `school` → `self` → 空清单，每步用**同一条 token** 断言 `/school/personnel` 的真实行集（不停在 HTTP 200），并断言预览/审计/`affected_users` 与范围行一致；
+5. 前端（归 TD-187g 批次 B）：范围编辑区 + 差异预览 + 自扩权确认条复用。
+
+### 13.6 预判技术债
+
+- `class` 范围行的只读展示与手工特例的长期方案沿用 §10 那条（独立表 + 与同步的优先级规则），本点不动；
+- 范围与权限共享一列 `version` → 前端两个编辑区会互相让对方的草稿失效，本点用"保存前重取快照 + 409 自动采用最新"缓解，彻底解法是分列版本或合并端点 → 登记 TD；
+- `school` 之外若将来出现第二个"覆盖型"范围（如 `department` 全校化），13.3 的敏感项清单要跟着改，本点先写死 `school` 单一事实来源。

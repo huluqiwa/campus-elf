@@ -7,6 +7,10 @@
   两者都是租户域权限（`realm="tenant"`）；
 - 删除角色另要 `school.role.delete`（决策 #6：拆角色与配权限分离，
   能改配置的人不一定能让人失去角色）；删除预览只读，仍走 `school.role.manage`；
+- 角色数据范围编辑（TD-187c）与权限替换同用 `school.role.manage`、同一列 `roles.version`；
+  范围只可手工授 `school`/`self`——`class`/`course` 必须绑定到具体 id 而本端点没有「选哪个班」的
+  入参通道，一律拒授并留痕（`course` 本期还不贡献可见性，TD-151）。
+  关系同步维护的是**用户级**行，角色级同型行今天没有合法写入方；
 - 错误统一返回 `{code, message}`；版本冲突额外带最新角色快照，前端据此刷新而不是静默覆盖；
 - 响应不回显登录名/邮箱/身份证/MFA 密钥等敏感字段。
 """
@@ -27,6 +31,7 @@ from app.rbac.admin import (
     RoleAdminError,
     RoleDeletionPreview,
     RoleSummary,
+    ScopeChangePreview,
 )
 from app.rbac.self_grant import SENSITIVE_SELF_GRANT_CODES
 
@@ -74,6 +79,53 @@ class RolePermissionPayload(BaseModel):
     # 自扩权显式确认（TD-191）：结果集触达自己所在角色且净增敏感码时必须为 true，
     # 默认 false —— 缺省不确认，前端不勾选即 422，而不是静默放行。
     self_grant_ack: bool = False
+
+
+class RoleScopePayload(BaseModel):
+    """全量替换角色级数据范围（TD-187c）。
+
+    `scope_types` 有意不用 `Literal` 收窄：**未知字符串字面量**必须走到服务层的
+    `UNKNOWN_SCOPE_TYPE` 才有 `{code,message}` 的错误契约，Pydantic 先拦会换成 FastAPI 的数组形
+    422（与 `RoleDeletePayload.confirm_role_code` 同口径）。非字符串元素（`[1]`/`[null]`）仍被
+    Pydantic 挡——那是类型错误，不是业务判据，不必给它留到服务层。清单不设长度上限，与权限侧
+    `permission_codes` 同界（审查建议加 `max_length`，未采纳：单侧加限会让两条同族写路径的入参
+    契约不一致，而越界的代价只是一次内存去重）。**重复项在服务层去重后写入**，等价于只提交一次。
+    **空清单合法**——解析层 fail-closed 返回空集，预览用 `empties_scope` 提示运营（简报 §13.2 决策④）。
+    `version` 与权限编辑共用同一列 `roles.version`：一次权限保存会让另一侧的草稿 409，
+    代价见 TD-202。
+    """
+
+    scope_types: list[str]
+    version: int = Field(ge=0)
+    reason: str | None = Field(default=None, max_length=500)
+    self_grant_ack: bool = False
+
+
+class RoleScopePreviewPayload(BaseModel):
+    """范围替换预览：只提交候选清单，版本与 ack 属于写路径，这里不接受。"""
+
+    scope_types: list[str]
+
+
+class RoleScopeRowResponse(BaseModel):
+    """角色上的一条范围行（`editable=false` 不由本端点写入，前端只展示不可改）。"""
+
+    scope_type: str
+    scope_id: str | None
+    editable: bool
+
+
+class ScopeChangePreviewResponse(BaseModel):
+    """范围替换的事前影响面（预览与执行返回同一语义，执行走 `RoleResponse`）。"""
+
+    version: int
+    added: list[str]
+    removed: list[str]
+    affected_users: int
+    empties_scope: bool
+    retained_non_editable: list[str]
+    newly_reaching_self: list[str]
+    requires_confirmation: bool
 
 
 class ResetPreviewResponse(BaseModel):
@@ -196,6 +248,19 @@ def _deletion_response(preview: RoleDeletionPreview) -> RoleDeletionPreviewRespo
     )
 
 
+def _scope_preview_response(preview: ScopeChangePreview) -> ScopeChangePreviewResponse:
+    return ScopeChangePreviewResponse(
+        version=preview.version,
+        added=list(preview.added),
+        removed=list(preview.removed),
+        affected_users=preview.affected_users,
+        empties_scope=preview.empties_scope,
+        retained_non_editable=list(preview.retained_non_editable),
+        newly_reaching_self=list(preview.newly_reaching_self),
+        requires_confirmation=preview.requires_confirmation,
+    )
+
+
 def _role_error(exc: RoleAdminError) -> HTTPException:
     detail: dict[str, Any] = {"code": exc.code, "message": exc.message}
     if exc.latest is not None:
@@ -264,6 +329,92 @@ async def replace_role_permissions(
             manager,
             role_id,
             permission_codes=payload.permission_codes,
+            version=payload.version,
+            reason=payload.reason,
+            request_id=getattr(request.state, "request_id", None),
+            self_grant_ack=payload.self_grant_ack,
+        )
+    except RoleAdminError as exc:
+        raise _role_error(exc) from exc
+    return _role_response(summary)
+
+
+@router.get("/roles/{role_id}/scopes", response_model=list[RoleScopeRowResponse])
+async def list_role_scopes(
+    role_id: UUID,
+    manager: Annotated[Principal, RoleManagerDep],
+) -> list[RoleScopeRowResponse]:
+    """角色当前数据范围行（含 `editable=false` 的只读行，供配置页渲染）。
+
+    角色级 `class`/`course` 同型行今天没有合法写入方（`app/org/scopes_sync.py` 只维护**用户级**行），
+    这里出现它们只可能是历史数据或手工 SQL；`course` 另因本期不贡献可见性而无效果。两者都只展示不可改，
+    是否可编辑由服务端下发，不让前端按范围类型名再猜一份（TD-200 同口径）。
+
+    异常:
+        HTTPException: 404（角色不存在/跨租）。
+    """
+
+    try:
+        rows = await admin.list_role_scopes(manager, role_id)
+    except RoleAdminError as exc:
+        raise _role_error(exc) from exc
+    return [
+        RoleScopeRowResponse(scope_type=row.scope_type, scope_id=row.scope_id, editable=row.editable)
+        for row in rows
+    ]
+
+
+@router.post("/roles/{role_id}/scopes/preview", response_model=ScopeChangePreviewResponse)
+async def preview_role_scopes(
+    role_id: UUID,
+    payload: RoleScopePreviewPayload,
+    manager: Annotated[Principal, RoleManagerDep],
+) -> ScopeChangePreviewResponse:
+    """只读预览范围替换的影响面（不写库、不审计、不推高版本）。
+
+    类型族校验与 `PUT` **同码同序**（未知类型先于不可手工授类型），否则运营会看到
+    "预览说能过、保存被拒"。两处结构性差异：`PUT` 的"角色存在/可编辑"排在类型族之间（它要先
+    `FOR UPDATE` 拿到行才能判定），预览不锁行、把类型族一次性放在角色查询之前。判据码集合不变。
+    预览阶段被拒不落安全审计，反复试探由写路径的 `*.denied` 计数。
+
+    异常:
+        HTTPException: 404（角色不存在/跨租）、409（锁定角色）、
+            422（`UNKNOWN_SCOPE_TYPE`、`SCOPE_TYPE_NOT_EDITABLE`）。
+    """
+
+    try:
+        preview = await admin.preview_role_scopes(
+            manager, role_id, scope_types=set(payload.scope_types)
+        )
+    except RoleAdminError as exc:
+        raise _role_error(exc) from exc
+    return _scope_preview_response(preview)
+
+
+@router.put("/roles/{role_id}/scopes", response_model=RoleResponse)
+async def replace_role_scopes(
+    role_id: UUID,
+    payload: RoleScopePayload,
+    request: Request,
+    manager: Annotated[Principal, RoleManagerDep],
+) -> RoleResponse:
+    """全量替换角色级数据范围（版本 CAS + 审计 diff + 范围版自扩权显式确认，TD-187c）。
+
+    只替换 `school`/`self` 两类；`class`/`course` 提交即 422 并留安全审计（这两类必须绑定具体
+    班级/课程 id，本端点没有那个入参通道，写下去是解析层读不懂的脏数据，见简报 §13.2 决策③）。
+    空清单合法，效果是该角色持有人看到空集。
+
+    异常:
+        HTTPException: 404（角色不存在/跨租）、409（锁定角色/版本冲突/类型与库 CHECK 漂移）、
+            422（`UNKNOWN_SCOPE_TYPE`、`SCOPE_TYPE_NOT_EDITABLE`、
+            `SELF_GRANT_CONFIRMATION_REQUIRED` 或未填理由）。
+    """
+
+    try:
+        summary = await admin.replace_role_scopes(
+            manager,
+            role_id,
+            scope_types=set(payload.scope_types),
             version=payload.version,
             reason=payload.reason,
             request_id=getattr(request.state, "request_id", None),

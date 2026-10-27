@@ -13,8 +13,15 @@ import pytest
 from app.auth.principal import Principal
 from app.rbac.admin import EDITABLE_ROLE_CODES, RoleAdminError, _assert_self_grant
 from app.rbac.catalog import catalog_codes
+from app.rbac.scopes import KNOWN_SCOPE_TYPES
 from app.rbac.seeds import TENANT_BUILTIN_ROLES
-from app.rbac.self_grant import SENSITIVE_SELF_GRANT_CODES, SelfGrantExposure, evaluate_self_grant
+from app.rbac.self_grant import (
+    SENSITIVE_SCOPE_TYPES,
+    SENSITIVE_SELF_GRANT_CODES,
+    SelfGrantExposure,
+    evaluate_scope_self_grant,
+    evaluate_self_grant,
+)
 
 _SELF_ROLE = "11111111-1111-1111-1111-111111111111"
 _OTHER_ROLE = "22222222-2222-2222-2222-222222222222"
@@ -217,3 +224,99 @@ def test_factory_defaults_of_editable_roles_hold_no_sensitive_code() -> None:
         if role.code in EDITABLE_ROLE_CODES and role.permissions & SENSITIVE_SELF_GRANT_CODES
     }
     assert offenders == {}, f"可编辑角色的出厂默认含敏感码，reset 会是无守卫的自扩权路径：{offenders}"
+
+
+# --- 范围版判据（M2-UI3 TD-187c，简报 §13.3）---
+
+
+def test_sensitive_scope_list_is_a_subset_of_known_scope_types() -> None:
+    """范围敏感项清单必须是判据层已知范围类型的子集（拼错即失败，同权限侧那条对称的断言）。"""
+
+    assert SENSITIVE_SCOPE_TYPES <= KNOWN_SCOPE_TYPES
+
+
+def test_sensitive_scope_list_is_currently_school_only() -> None:
+    """TD-203 的防御：敏感范围清单今天就是 `{school}` 单值。
+
+    新增 `ScopeType`（M3 真按部门/课程过滤，或 `course` 开始贡献可见性）时这条会红，逼改的人
+    回答"这个新范围是不是又一个覆盖型范围"——不是的话加进 `KNOWN_SCOPE_TYPES` 即可，是的话
+    必须同时决定是否进敏感清单，否则"把角色抬成跨部门可见"会走成静默配置。
+    """
+
+    assert set(SENSITIVE_SCOPE_TYPES) == {"school"}
+
+
+def test_scope_upgrade_to_school_reaching_self_requires_confirmation() -> None:
+    """把操作者所在角色的范围从 self 抬到 school = 一次自扩权，判据与权限码那条同形。"""
+
+    exposure = evaluate_scope_self_grant(
+        role_id=_SELF_ROLE,
+        resulting_scopes={"school"},
+        principal_role_ids={_SELF_ROLE},
+        principal_scopes={"self"},
+    )
+    assert exposure.newly_reaching_self == ("school",)
+    assert exposure.requires_confirmation is True
+
+
+def test_scope_already_visible_to_the_operator_is_not_an_expansion() -> None:
+    """操作者通过别的角色已经看得到全校时，把他所在角色也抬成 school 不放大他的能力面。
+
+    与权限侧同一理由：净增为零是日常配置，不是扩权。
+    """
+
+    exposure = evaluate_scope_self_grant(
+        role_id=_SELF_ROLE,
+        resulting_scopes={"school"},
+        principal_role_ids={_SELF_ROLE},
+        principal_scopes={"school"},
+    )
+    assert exposure.requires_confirmation is False
+
+
+def test_scope_narrowing_never_requires_confirmation() -> None:
+    """school → self、以及清空范围（fail-closed 成"什么都看不到"）都不该打断：守卫只管变大。"""
+
+    for resulting in ({"self"}, set(), {"class"}):
+        exposure = evaluate_scope_self_grant(
+            role_id=_SELF_ROLE,
+            resulting_scopes=resulting,
+            principal_role_ids={_SELF_ROLE},
+            principal_scopes={"school"},
+        )
+        assert exposure.requires_confirmation is False, resulting
+
+
+def test_scope_change_on_another_role_does_not_reach_self() -> None:
+    """改的是别人所在的角色 → 范围放大不流向操作者本人，与权限侧同一判据 ①。"""
+
+    exposure = evaluate_scope_self_grant(
+        role_id=_OTHER_ROLE,
+        resulting_scopes={"school"},
+        principal_role_ids={_SELF_ROLE},
+        principal_scopes=set(),
+    )
+    assert exposure.requires_confirmation is False
+
+
+def test_factory_defaults_of_editable_roles_do_hold_the_sensitive_scope() -> None:
+    """范围侧的不变量与权限侧**相反**，而且这个相反是有意的：必须钉住它。
+
+    权限侧断言"可编辑角色的出厂默认 ∩ 敏感码 = ∅"，所以 `reset_role` 今天不构成自扩权通道。
+    范围侧同一条断言不成立——`school_admin` 的出厂范围本来就是 `school`（矩阵 §2）。于是
+    「有人把 school_admin 降级成 self → 另一个持有者执行重置出厂 → 他自己的可见范围从本人抬回
+    全校」是一条**不经过 ack** 的抬升路径。它今天靠 reset 自己的逐字确认 + 理由 ≥10 +
+    `school.role.reset` 审计兜住，但按 TD-194 已记录的收口范围，抽 helper 时必须把 reset
+    接进**范围版**判据，不能只接权限码那条腿。这条用例是那个结论的证据，不是待修的缺陷。
+    """
+
+    offenders = {
+        role.code: sorted(role.scopes & SENSITIVE_SCOPE_TYPES)
+        for role in TENANT_BUILTIN_ROLES
+        if role.code in EDITABLE_ROLE_CODES and role.scopes & SENSITIVE_SCOPE_TYPES
+    }
+    assert offenders == {"school_admin": ["school"]}, (
+        f"可编辑角色的出厂默认范围与敏感清单的交集变了：{offenders}；"
+        "变成 ∅ 说明 school_admin 的出厂范围被改窄（要回写矩阵 §2 与 design.md §9），"
+        "出现新成员说明又多了一条无 ack 的 reset 抬升路径（TD-194 的 reset 接线范围要扩）"
+    )

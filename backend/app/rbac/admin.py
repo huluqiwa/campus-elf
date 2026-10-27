@@ -1,6 +1,6 @@
-"""角色权限配置（TD-137/TD-143）+ 自定义角色增删（TD-187b）：列表、全量替换、重置出厂、创建、删除。
+"""角色权限配置（TD-137/TD-143）+ 自定义角色增删（TD-187b）+ 角色级数据范围编辑（TD-187c）。
 
-口径（`docs/design-briefs/M2-UI2-rbac-admin.md` §3/§4 与 `M2-UI3-custom-roles-accounts.md` §4）：
+口径（`docs/design-briefs/M2-UI2-rbac-admin.md` §3/§4 与 `M2-UI3-custom-roles-accounts.md` §4/§13）：
 
 - 可编辑对象 = 两个内置可编辑角色（`school_admin`、`teacher_b_end`）+ 全部自定义角色
   （`is_system=false`，M2-UI3 开放）；超管与 C 端基础角色锁定，避免把登录/对话/审批入口改坏或自锁；
@@ -13,6 +13,16 @@
 - 自扩权（TD-191 收口）：结果集触达操作者自己所在角色、且净增敏感码时，必须带
   `self_grant_ack=true` + 理由（超管免打断）。`school.role.self_grant` 审计**放行与打断都写**
   ——放行时同事务，被打断时走独立事务（外层回滚会带走同事务的留痕）；
+- 角色级数据范围（TD-187c）：`school`/`self` 可全量替换，与权限替换**共享同一列 `roles.version`**
+  （一列版本覆盖两条写路径，避免出现"权限已更新、范围更新失败"的半更新态，代价见 TD-202）；
+  `class`/`course` **不可手工授**且被拒要留痕——这两类必须绑定到具体班级/课程 id（库 CHECK
+  `ck_data_scopes_scope_id_required_for_class_course`），而角色配置这条路径只有"类型"这一维入参、
+  没有"选哪个班"的通道，写下去就是缺 id 的脏数据（该角色每个持有人下一次请求在范围解析处 500）；
+  `course` 另外还本期不贡献可见性（TD-151）。用户级班级行才归 `app/org/scopes_sync.py` 的差量同步
+  所有——它只读/删 `user_id is not null` 的行，角色级同型行今天**没有任何合法写入方**，
+  本端点既不 owns 也不碰（删除语句限定在可编辑那两类）。
+  把本人所在角色从 `self` 抬成 `school` 与补一个敏感码是同一件事，走同一条自扩权确认；
+  空范围清单**合法**（解析层 fail-closed 成"看不到数据"，不会放大可见性）；
 - 所有写入在租户连接内完成（RLS + 显式 tenant_id 过滤），跨租 role_id 与不存在同形 404；
 - 被拒的写操作（锁定角色、非法转授）在**独立事务**写 `*.denied` 审计——外层事务会回滚，
   同事务写的拒绝留痕跟着一起消失。
@@ -20,7 +30,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -31,8 +41,9 @@ from app.audit.writer import append_audit
 from app.auth.principal import Principal
 from app.db.session import db_session
 from app.rbac.catalog import PERMISSION_CATALOG, TENANT_MODULES, PermissionDef, permission_def
+from app.rbac.scopes import KNOWN_SCOPE_TYPES
 from app.rbac.seeds import builtin_roles
-from app.rbac.self_grant import SelfGrantExposure, evaluate_self_grant
+from app.rbac.self_grant import SelfGrantExposure, evaluate_scope_self_grant, evaluate_self_grant
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +69,23 @@ ROLE_CODE_PATTERN = r"^[a-z][a-z0-9_]{2,62}$"
 # 并发创建兜底用的唯一约束名（`779f731db342` 建表时定义）：只有它翻成人读 409，其余完整性错误
 # 保持原样抛出，避免把真故障伪装成业务冲突。
 _ROLE_CODE_UNIQUE_CONSTRAINT = "uq_roles_tenant_id_code"
+# 角色级数据范围的可编辑子集（M2-UI3 TD-187c，简报 §5/§13）：只有这两类是"配角色"的语义。
+# `class`/`course` 必须绑定到具体班级/课程 id（库 CHECK `ck_data_scopes_scope_id_required_for_class_course`），
+# 而本端点的入参只有"类型"这一维、没有"选哪个班"的通道——写下去就是缺 id 的脏数据；`course`
+# 另外还本期不贡献可见性（TD-151）。两者一律拒授并留痕，不是"尚未开放"。
+EDITABLE_SCOPE_TYPES: frozenset[str] = frozenset({"school", "self"})
+# 不可编辑范围类型的人读理由（错误消息里直接引用，避免文案与判据分家）。
+_SCOPE_TYPE_OWNERSHIP: dict[str, str] = {
+    "class": "班级范围必须绑定到具体班级 id（库 CHECK 强制），角色配置这条路径没有"
+    "「选哪个班」的入参通道，写下去是缺 id 的脏数据；用户级班级行由「任教 ∪ 班主任 ∪ 辅导员」"
+    "关系自动同步（app/org/scopes_sync.py），角色级同型行今天没有合法写入方",
+    "course": "课程范围本期不贡献可见性（TD-151），配置了也不生效",
+}
+# 范围内插漂移兜底用的 CHECK 约束名（迁移 `779f731db342` 建表时定义）：只有它翻成人读 409，
+# 其余完整性错误保持原样抛出，避免把真故障伪装成业务冲突。
+# 写全名而不是 `scope_type_valid`：`app/db/base.py` 的 NAMING_CONVENTION 给约束名加了
+# `ck_<table>_` 前缀，异步驱动报的是前缀后的完整名字（比对过 `pg_constraint.conname`）。
+_SCOPE_TYPE_CHECK_CONSTRAINT = "ck_data_scopes_scope_type_valid"
 _SYSTEM_ROLE_REASON = "该内置角色不在可编辑范围"
 
 TENANT_PERMISSIONS: tuple[PermissionDef, ...] = tuple(
@@ -430,18 +458,53 @@ async def _principal_permission_codes(
     return {str(code) for code in rows}
 
 
+async def _principal_scope_types(
+    session: AsyncSession, tenant_id: UUID, user_id: UUID
+) -> set[str]:
+    """操作者此刻实际生效的数据范围类型并集（角色级 ∪ 用户级），判据的"净增"分母。
+
+    谓词与 `app/auth/principal.py:DATA_SCOPE_SELECT_SQL` 同形（角色范围与用户范围取并集，
+    矩阵 §2「用户级授权是额外给，不是收窄」）——两处不一致时守卫会按一个运行时并不存在的
+    能力面来判"扩没扩权"。与权限侧同一理由，读库而不吃 `principal.scope_types` 的请求快照。
+    """
+
+    rows: list[Any] = list(
+        (
+            await session.execute(
+                text(
+                    "select distinct s.scope_type from public.data_scopes s "
+                    "where s.tenant_id = :tid "
+                    "and (s.user_id = :uid or exists ( "
+                    "  select 1 from public.user_roles ur "
+                    "  where ur.tenant_id = :tid and ur.user_id = :uid and ur.role_id = s.role_id"
+                    "))"
+                ),
+                {"tid": tenant_id, "uid": user_id},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {str(scope) for scope in rows}
+
+
 def _assert_self_grant(
     principal: Principal,
     exposure: SelfGrantExposure,
     *,
     self_grant_ack: bool,
     reason: str | None,
+    kind: Literal["permission", "scope"] = "permission",
 ) -> None:
-    """自扩权必须显式确认（TD-191 收口，M2-UI3 简报 §6 决策 #4）。
+    """自扩权必须显式确认（TD-191 收口，M2-UI3 简报 §6 决策 #4 与 §13.2 决策①）。
 
     超管免的是打断而不是免留痕：`requires_confirmation` 为真时调用方仍写审计，只是不校验
     `ack`/理由——否则每次正常的全量配置都要超管重复勾选，运营会被迫绕道（少一个确认框，
     多一条"先建个角色再搬权限"的野路子）。
+
+    `kind` 只影响文案（权限码 vs 数据范围），判据结构是同一个：两条腿共用这套
+    ack/理由/超管豁免的规则，比复制一份"范围版打断"更难走偏（TD-194 抽 helper 时
+    `kind` 就是这个入参，不要拆成两个函数）。
     """
 
     if not exposure.requires_confirmation or SUPER_ADMIN_ROLE_CODE in principal.roles:
@@ -449,15 +512,20 @@ def _assert_self_grant(
     if not self_grant_ack:
         # 消息里的码集用顿号连接：这条文案会原样进前端的自扩权提示条，
         # `['a', 'b']` 这种 Python repr 是运维在屏幕上看到的第一个字，不能是列表字面量。
+        items = "、".join(exposure.newly_reaching_self)
+        detail = (
+            f"本次修改会给自己新增敏感权限：{items}"
+            if kind == "permission"
+            else f"本次修改会扩大自己可见的数据范围：{items}（`school` 即全校）"
+        )
         raise RoleAdminError(
             "SELF_GRANT_CONFIRMATION_REQUIRED",
-            f"本次修改会给自己新增敏感权限：{'、'.join(exposure.newly_reaching_self)}；"
-            "请显式确认（self_grant_ack）并填写理由",
+            f"{detail}；请显式确认（self_grant_ack）并填写理由",
             422,
         )
-    # 理由在这里再 strip 一次而不是信任调用方的归一化：本守卫按简报 §6 由两条写路径共用
-    # （角色权限全量替换 + TD-187d 的绑定替换；创建自定义角色**不接**——新角色 id 必不在操作者
-    # 所在角色集合里，判据无可达分支，2026-10-27 用户裁定见简报 §12 与 TD-194），
+    # 理由在这里再 strip 一次而不是信任调用方的归一化：本守卫按简报 §6/§13.2 由三条写路径共用
+    # （角色权限全量替换、角色范围全量替换、TD-187d 的绑定替换；创建自定义角色**不接**——新角色 id
+    # 必不在操作者所在角色集合里，判据无可达分支，2026-10-27 用户裁定见简报 §12 与 TD-194），
     # "空白理由等于没写" 属于安全判据本身，不能取决于某条路径先做没做规范化。
     if not (reason or "").strip():
         raise RoleAdminError("SELF_GRANT_REASON_REQUIRED", "自扩权必须填写理由", 422)
@@ -564,6 +632,7 @@ async def replace_role_permissions(
                     request_id=request_id,
                     extra={
                         "role_code": str(role["code"]),
+                        "kind": "permission",
                         "newly_reaching_self": list(exposure.newly_reaching_self),
                         "self_grant_ack": self_grant_ack,
                     },
@@ -642,6 +711,7 @@ async def replace_role_permissions(
                 tenant_id=tenant_id,
                 metadata={
                     "role_code": str(role["code"]),
+                    "kind": "permission",
                     "newly_reaching_self": list(exposure.newly_reaching_self),
                     "confirmed_by": (
                         "super_admin"
@@ -760,11 +830,19 @@ async def reset_role(
 ) -> ResetPreview:
     """把角色恢复出厂：撤销现有权限与角色数据范围后按定义表重种。
 
-    本路径**不接自扩权守卫**（`replace_role_permissions` 那条），依据是出厂默认与敏感清单互不
-    相交这一条不变量——已由 `tests/test_self_grant_guard_unit.py`（代码侧 `seeds.py`）与
+    本路径**不接自扩权守卫**（`replace_role_permissions` / `replace_role_scopes` 那条），依据只在
+    **权限这一侧**成立：出厂默认权限码与 `SENSITIVE_SELF_GRANT_CODES` 互不相交，已由
+    `tests/test_self_grant_guard_unit.py`（代码侧 `seeds.py`）与
     `tests/integration/test_rbac_custom_role_constraints.py`（库侧 `rbac_builtin_role_defaults`）
-    双向钉住。哪天必须给某个可编辑角色配一个敏感码作默认，先给本函数接 `_assert_self_grant`
-    再改默认，否则"重置一次自己的角色"就是一条无 ack、无专项审计的自扩权通道。
+    双向钉住。
+    **范围这一侧的前提已经破了**（TD-187c）：`SENSITIVE_SCOPE_TYPES = {school}`，而 `school_admin`
+    的出厂范围就含 `school`（`test_factory_defaults_of_editable_roles_do_hold_the_sensitive_scope`
+    钉住）。于是这是一条**可达路径**，不是理论风险：同租的另一名管理员把 `school_admin` 收窄成
+    `self`（走本文件的 `replace_role_scopes`）→ 该角色的持有者点一次「恢复出厂」→ 范围净增回
+    `school`、静默拿回全校可见，全程无 ack、无 `school.role.self_grant` 留痕。本函数因此是 TD-194
+    抽 `_guard_self_grant(..., kind=...)` helper 时必须覆盖的**第 4 个入口、且要覆盖两个维度**，
+    随 TD-187d 收口。在那之前，「重置一次自己的角色」是范围侧一条已知的未受守卫通道（TD-194）。
+    哪天必须给某个可编辑角色配一个敏感码作默认，同样先接守卫再改默认。
 
     异常:
         RoleAdminError: 404、409（锁定/版本冲突/无出厂定义）、422（角色名或理由不合格）。
@@ -1257,8 +1335,377 @@ async def delete_role(
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RoleScopeRow:
+    """角色上的一条范围行。
+
+    `editable=False` 表示这行不归角色配置这条写路径：`class` 需要绑定具体班级 id、本端点没有
+    那个入参通道（用户级班级行才归 `app/org/scopes_sync.py` 的差量同步所有）。判据留在服务端
+    下发，不让前端按范围类型名字猜——猜就是第二处事实来源，与 TD-200 同一口径。
+    """
+
+    scope_type: str
+    scope_id: str | None
+    editable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeChangePreview:
+    """一次范围替换的事前影响面（只读、不审计）。"""
+
+    version: int
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+    affected_users: int
+    #: 替换后该角色一条范围都没有——持有人会看到空集（解析层 fail-closed），需要提示
+    empties_scope: bool
+    #: 本次不写、也不会被删掉的非可编辑行（缺 `scope_id` 通道，本端点不碰），列出来免得"结果集"被误读
+    retained_non_editable: tuple[str, ...]
+    newly_reaching_self: tuple[str, ...]
+    requires_confirmation: bool
+
+
+def _assert_known_scope_types(scope_types: set[str]) -> None:
+    """字面量必须是模型声明的 `ScopeType` 之一；未知即入参非法（按四类分档**不留痕**）。
+
+    先于"可编辑性"判定：`{'bogus','class'}` 报 UNKNOWN 而不是 NOT_EDITABLE——可编辑性要先认识
+    这个类型才谈得上。清单来自 `app/rbac/scopes.py:KNOWN_SCOPE_TYPES`（直接取模型的
+    `ScopeType` 参数化类型），不在这里再抄一份字面量。
+    """
+
+    unknown = sorted(scope_types - KNOWN_SCOPE_TYPES)
+    if unknown:
+        raise RoleAdminError("UNKNOWN_SCOPE_TYPE", f"未知数据范围类型：{'、'.join(unknown)}", 422)
+
+
+def _assert_editable_scope_types(scope_types: set[str]) -> None:
+    """`class`/`course` 不可手工授：**留痕**（简报 §13.2 决策③）。
+
+    这一条与"目录外权限码"不同族——后者是填错了字面量，前者拦的是"往库里写一条本端点补不全
+    的行"：这两类必须绑定具体班级/课程 id（库 CHECK
+    `ck_data_scopes_scope_id_required_for_class_course`），而本端点的入参只有"类型"这一维、没有
+    "选哪个班"的通道，真写下去要么撞 CHECK，要么造出一条解析层读不懂的行（持有人每次请求在
+    `scope_context_from_rows` 抛 ValueError → 500）。用户级班级行才归 `app/org/scopes_sync.py`
+    的差量同步所有，它只处理 `user_id is not null` 的行；角色级同型行今天没有任何合法写入方。
+    判据看的是"谁在试图扩"，所以按 `ROLE_CODE_NOT_DELEGABLE` 的处理走 `*.denied`。
+    """
+
+    blocked = sorted(scope_types - EDITABLE_SCOPE_TYPES)
+    if not blocked:
+        return
+    reasons = "；".join(
+        f"{item}：{_SCOPE_TYPE_OWNERSHIP.get(item, '不由角色配置写入')}" for item in blocked
+    )
+    raise RoleAdminError("SCOPE_TYPE_NOT_EDITABLE", f"这些数据范围不由角色配置写入：{reasons}", 422)
+
+
+async def _role_scope_rows(
+    session: AsyncSession, tenant_id: UUID, role_id: UUID
+) -> list[RoleScopeRow]:
+    rows: list[Any] = list(
+        (
+            await session.execute(
+                text(
+                    "select scope_type, scope_id::text as scope_id from public.data_scopes "
+                    "where role_id = :rid and tenant_id = :tid "
+                    "order by scope_type, scope_id nulls first"
+                ),
+                {"rid": role_id, "tid": tenant_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        RoleScopeRow(
+            scope_type=str(row["scope_type"]),
+            scope_id=None if row["scope_id"] is None else str(row["scope_id"]),
+            editable=str(row["scope_type"]) in EDITABLE_SCOPE_TYPES,
+        )
+        for row in rows
+    ]
+
+
+def _resulting_scope_types(submitted: set[str], existing: list[RoleScopeRow]) -> set[str]:
+    """全量替换的真实结果集 = 提交的清单 ∪ 本次**不碰**的非可编辑行。
+
+    只按提交清单算结果集会低估守卫看到的范围、也会让预览的"新增/移除"说谎：非可编辑行
+    不参与删除（见 `replace_role_scopes` 里那条窄删除），它们替换后仍然生效。
+    """
+
+    return set(submitted) | {row.scope_type for row in existing if not row.editable}
+
+
+async def list_role_scopes(principal: Principal, role_id: UUID) -> list[RoleScopeRow]:
+    """该角色当前的范围行（含只读行，供配置页渲染）。不存在/跨租同形 404、读路径不留痕。"""
+
+    tenant_id = _require_tenant(principal)
+    async with db_session(tenant_id=tenant_id) as session:
+        role = await _role_row(session, tenant_id, role_id, for_update=False)
+        if role is None:
+            raise RoleAdminError("ROLE_NOT_FOUND", "角色不存在", 404)
+        return await _role_scope_rows(session, tenant_id, role_id)
+
+
+async def preview_role_scopes(
+    principal: Principal, role_id: UUID, *, scope_types: set[str]
+) -> ScopeChangePreview:
+    """范围替换的事前影响面：差异、持有人数、是否触达本人。只读，不审计、不推高版本。
+
+    类型族两档与 `PUT` **同码、相对顺序也同**（未知 → 不可手工授），否则"预览说能过、保存被拒"
+    会让运营当预览是装饰。整体顺序**有意不同**且是结构性的：`PUT` 的"角色存在/可编辑"夹在两档
+    之间（要先 `FOR UPDATE` 拿到行才判得了角色），预览不锁行、也不做版本比较，所以三档判据一次性
+    放在取行之前——"不存在的角色 + `class`"预览给 422 而 `PUT` 给 404 留痕。预览阶段被拒不落安全
+    审计：那时还没有任何写入意图落地，反复试探由写路径那条 `*.denied` 计数。
+    """
+
+    tenant_id = _require_tenant(principal)
+    _assert_known_scope_types(scope_types)
+    _assert_editable_scope_types(scope_types)
+    async with db_session(tenant_id=tenant_id) as session:
+        role = await _role_row(session, tenant_id, role_id, for_update=False)
+        if role is None:
+            raise RoleAdminError("ROLE_NOT_FOUND", "角色不存在", 404)
+        _assert_editable(role)
+        existing = await _role_scope_rows(session, tenant_id, role_id)
+        resulting = _resulting_scope_types(scope_types, existing)
+        before = {row.scope_type for row in existing}
+        exposure = evaluate_scope_self_grant(
+            role_id=str(role_id),
+            resulting_scopes=resulting,
+            principal_role_ids=await _principal_role_ids(session, tenant_id, principal.user_id),
+            principal_scopes=await _principal_scope_types(session, tenant_id, principal.user_id),
+        )
+        return ScopeChangePreview(
+            version=int(role["version"]),
+            added=tuple(sorted(resulting - before)),
+            removed=tuple(sorted(before - resulting)),
+            affected_users=await _affected_users(session, tenant_id, role_id),
+            empties_scope=not resulting,
+            retained_non_editable=tuple(sorted(r.scope_type for r in existing if not r.editable)),
+            newly_reaching_self=exposure.newly_reaching_self,
+            requires_confirmation=exposure.requires_confirmation,
+        )
+
+
+async def replace_role_scopes(
+    principal: Principal,
+    role_id: UUID,
+    *,
+    scope_types: set[str],
+    version: int,
+    reason: str | None,
+    request_id: str | None,
+    self_grant_ack: bool = False,
+) -> RoleSummary:
+    """全量替换角色级数据范围（版本 CAS + 审计 diff + 范围版自扩权确认，TD-187c）。
+
+    与 `replace_role_permissions` 共享同一列 `roles.version`：一次权限保存会让另一侧的范围草稿
+    409，这是有意的（分列版本会出现"权限已更新、范围更新失败"的半更新态），代价登记在 TD-202。
+
+    异常:
+        RoleAdminError: 404（不存在/跨租）、409（锁定角色、版本冲突、类型与库 CHECK 漂移）、
+            422（`UNKNOWN_SCOPE_TYPE`、`SCOPE_TYPE_NOT_EDITABLE`、自扩权未确认/未填理由）。
+    """
+
+    tenant_id = _require_tenant(principal)
+    _assert_known_scope_types(scope_types)
+    submitted = sorted(scope_types)
+    normalized_reason = reason.strip() if reason and reason.strip() else None
+
+    async with db_session(tenant_id=tenant_id) as session:
+        role = await _role_row(session, tenant_id, role_id, for_update=True)
+        if role is None:
+            # 写路径的 id 探测按"越权/撞码"一侧留痕，与权限替换同口径
+            await _audit_denied(
+                principal,
+                action="school.role.scopes.denied",
+                resource_id=str(role_id),
+                reason="ROLE_NOT_FOUND",
+                request_id=request_id,
+            )
+            raise RoleAdminError("ROLE_NOT_FOUND", "角色不存在", 404)
+        try:
+            _assert_editable(role)
+        except RoleAdminError as exc:
+            await _audit_denied(
+                principal,
+                action="school.role.scopes.denied",
+                resource_id=str(role_id),
+                reason=exc.code,
+                request_id=request_id,
+            )
+            raise
+        try:
+            _assert_editable_scope_types(scope_types)
+        except RoleAdminError as exc:
+            # 试图手工授 `class`/`course` = 试图写一条本端点无法补全 `scope_id` 的范围行，
+            # 判据看的是"谁在试图扩"，留痕（简报 §13.2 ③）
+            await _audit_denied(
+                principal,
+                action="school.role.scopes.denied",
+                resource_id=str(role_id),
+                reason=exc.code,
+                request_id=request_id,
+                extra={"requested_scope_types": submitted},
+            )
+            raise
+        if int(role["version"]) != version:
+            latest = await _summary(session, tenant_id, role_id)
+            raise RoleAdminError(
+                "ROLE_VERSION_CONFLICT", "角色已被他人修改，请刷新后重试", 409, latest=latest
+            )
+
+        existing = await _role_scope_rows(session, tenant_id, role_id)
+        before = {row.scope_type for row in existing}
+        resulting = _resulting_scope_types(scope_types, existing)
+        # 范围版自扩权判定同样排在版本 CAS 之前：被拒的请求不得推高 `roles.version`
+        exposure = evaluate_scope_self_grant(
+            role_id=str(role_id),
+            resulting_scopes=resulting,
+            principal_role_ids=await _principal_role_ids(session, tenant_id, principal.user_id),
+            principal_scopes=await _principal_scope_types(session, tenant_id, principal.user_id),
+        )
+        try:
+            _assert_self_grant(
+                principal,
+                exposure,
+                self_grant_ack=self_grant_ack,
+                reason=normalized_reason,
+                kind="scope",
+            )
+        except RoleAdminError as exc:
+            await _audit_denied(
+                principal,
+                action="school.role.scopes.denied",
+                resource_id=str(role_id),
+                reason=exc.code,
+                request_id=request_id,
+            )
+            if exposure.requires_confirmation:
+                await _audit_denied(
+                    principal,
+                    action="school.role.self_grant",
+                    resource_id=str(role_id),
+                    reason=exc.code,
+                    request_id=request_id,
+                    extra={
+                        "role_code": str(role["code"]),
+                        "kind": "scope",
+                        "newly_reaching_self": list(exposure.newly_reaching_self),
+                        "self_grant_ack": self_grant_ack,
+                    },
+                )
+            raise
+
+        updated = await session.execute(
+            text(
+                "update public.roles set version = version + 1 "
+                "where id = :rid and tenant_id = :tid and version = :version "
+                "returning version"
+            ),
+            {"rid": role_id, "tid": tenant_id, "version": version},
+        )
+        if updated.scalar_one_or_none() is None:
+            latest = await _summary(session, tenant_id, role_id)
+            raise RoleAdminError(
+                "ROLE_VERSION_CONFLICT", "角色已被他人修改，请刷新后重试", 409, latest=latest
+            )
+
+        # 删除只限可编辑的那两类：非可编辑行（角色级 `class` 同型行）不归这条写路径所有，
+        # 全删等于替一个今天还不存在的写入方做清理，预览的"结果集"也会因此说谎。
+        await session.execute(
+            text(
+                "delete from public.data_scopes "
+                "where role_id = :rid and tenant_id = :tid "
+                "and scope_type = any(cast(:types as text[]))"
+            ),
+            {
+                "rid": role_id,
+                "tid": tenant_id,
+                "types": sorted(EDITABLE_SCOPE_TYPES),
+            },
+        )
+        if submitted:
+            try:
+                inserted: list[Any] = list(
+                    (
+                        await session.execute(
+                            text(
+                                "insert into public.data_scopes "
+                                "(id, tenant_id, role_id, scope_type, scope_id) "
+                                "select gen_random_uuid(), :tid, :rid, s.scope_type, null "
+                                "from unnest(cast(:types as text[])) as s(scope_type) "
+                                "returning scope_type"
+                            ),
+                            {"tid": tenant_id, "rid": role_id, "types": submitted},
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            except IntegrityError as exc:
+                # `KNOWN_SCOPE_TYPES` 来自模型的 `ScopeType`，库内那条 CHECK 来自迁移——只有
+                # 两边漂移时才会走到这里（模型加了类型、迁移没跟上）。
+                # 只翻译这一条约束，其余完整性错误原样抛出（同 187b 的并发兜底口径）。
+                if _integrity_constraint_name(exc) != _SCOPE_TYPE_CHECK_CONSTRAINT:
+                    raise
+                raise RoleAdminError(
+                    "SCOPE_CATALOG_OUT_OF_SYNC",
+                    "数据范围类型与数据库约束不一致，请先执行迁移",
+                    409,
+                ) from exc
+            if len(inserted) != len(submitted):
+                raise RoleAdminError(
+                    "SCOPE_CATALOG_OUT_OF_SYNC", "数据范围类型与数据库约束不一致，请先执行迁移", 409
+                )
+
+        await append_audit(
+            session,
+            action="school.role.scopes.updated",
+            resource_type="role",
+            resource_id=str(role_id),
+            actor_realm="tenant",
+            actor_id=principal.user_id,
+            tenant_id=tenant_id,
+            metadata={
+                "role_code": str(role["code"]),
+                "added": sorted(resulting - before),
+                "removed": sorted(before - resulting),
+                "resulting_scopes": sorted(resulting),
+                "affected_users": await _affected_users(session, tenant_id, role_id),
+                "reason": normalized_reason,
+            },
+            request_id=request_id,
+        )
+        if exposure.requires_confirmation:
+            await append_audit(
+                session,
+                action="school.role.self_grant",
+                resource_type="role",
+                resource_id=str(role_id),
+                actor_realm="tenant",
+                actor_id=principal.user_id,
+                tenant_id=tenant_id,
+                metadata={
+                    "role_code": str(role["code"]),
+                    "kind": "scope",
+                    "newly_reaching_self": list(exposure.newly_reaching_self),
+                    "confirmed_by": (
+                        "super_admin"
+                        if SUPER_ADMIN_ROLE_CODE in principal.roles
+                        else "self_grant_ack"
+                    ),
+                    "reason": normalized_reason,
+                },
+                request_id=request_id,
+            )
+        return await _summary(session, tenant_id, role_id)
+
+
 __all__ = [
     "EDITABLE_ROLE_CODES",
+    "EDITABLE_SCOPE_TYPES",
     "LOCKED_ROLE_REASONS",
     "NON_DELEGABLE_CODES",
     "RESERVED_TENANT_ROLE_CODES",
@@ -1268,13 +1715,18 @@ __all__ = [
     "ResetPreview",
     "RoleAdminError",
     "RoleDeletionPreview",
+    "RoleScopeRow",
     "RoleSummary",
+    "ScopeChangePreview",
     "create_role",
     "delete_role",
     "list_permissions",
+    "list_role_scopes",
     "list_roles",
     "preview_role_deletion",
     "preview_role_reset",
+    "preview_role_scopes",
     "replace_role_permissions",
+    "replace_role_scopes",
     "reset_role",
 ]
