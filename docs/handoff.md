@@ -36,7 +36,7 @@
 - **数据库迁移 head**：`d7a1c3e5b9f4`（M2-UI3 第一批：`roles` 加 `ck_roles_code_format_valid` + `ck_roles_builtin_code_is_system` 两条 CHECK、权限目录新增 `school.role.delete`）；上一 head 为 `c3f7a9d1e5b2`（M2-UI2：`defaults_applied` + `roles.version` 乐观锁 + `school.personnel.mfa.reset`）；`alembic check` 应无漂移。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
-- 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为功能点完成**。
+- 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为交付批次完成**（推送粒度见 AGENTS.md §7）。
 
 ---
 
@@ -108,20 +108,23 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 
 ---
 
-## 3. 工作流门禁（每个功能点都必须走完，顺序不可省）
+## 3. 工作流门禁（每个功能点都必须走完，顺序不可省；标「批次末」的两处按交付批次执行）
 
 1. **先写设计简报**：`docs/design-briefs/<ID>.md`，含目标与验收编号、**≥2 个候选方案**、选择结论与理由、实现顺序（数据→接口→界面）、TDD 红→绿清单、测试策略、预判技术债、高风险确认；**高风险功能（认证/租户隔离/权限/状态机/删除/发布/加密/AI 护栏）必须等用户确认后再编码**。
 2. **TDD 实现**：先写失败测试，再实现；分层跑：单元 → 集成（真实 PG/Redis/MinIO/Qdrant，外部 LLM/嵌入/重排 mock）→ **业务场景**（从 Given/When/Then 跑完整链路，断言业务输出与副作用，不只看 HTTP 200）。
 3. **独立代码审查**：**另起一个独立上下文/子 agent** 审查 `git diff --staged`，输出 Blocker/Major/Minor；安全、租户隔离、权限、状态机、数据一致性、AI 护栏、Langfuse 脱敏问题一律按 Blocker/Major。
-4. **修复 + 复测**：修完重跑"受影响用例 + 全量单元/集成/业务场景"（前端补 Playwright，AI 补评估）；实质变更要再复审，直到无 Blocker/Major。
-5. **提交 + 推送 + 远端 CI 绿**：
+4. **修复 + 复测（每点）**：修完重跑"受影响用例 + 本功能点的业务场景链路"；**全量后端 + 前端全量套件（`lint`/`typecheck`/`format:check`/全部单测/Playwright）只在交付批次末跑一次**（口径见 AGENTS.md §1.6：**功能点**＝单个 TD/子能力，**交付批次**＝一次可推 main 的一组相邻 TD）。实质变更要再复审，直到无 Blocker/Major。**审查频次不随全量降频**——每点一轮独立审查是硬门禁。
+5. **提交（每点）→ 推送 + 远端 CI 绿（批次末）**：
    ```bash
+   # 每个功能点
    git add <明确路径...>            # 禁止 git add . / -A
    git status && git diff --staged  # 检查密钥/产物/调试代码/大文件
    git commit -m "feat(<scope>): ..."   # Conventional Commits
+   # 交付批次末（全量门禁通过 + 整批审查结论落 review-log 后）
    git branch -f main feature/M0-foundation && git push origin main
    gh run list --limit 4 && gh run view <id> --log-failed   # 必须看到 success
    ```
+   批次内未推 main 的 commit 只算"该点已落地"，不算"该批次已交付"；批次中途不许把未过审的点混进推送。
    禁止：`--force`、`reset --hard`、`clean -fd`、直接 push 共享分支（本项目 main 只接受来自功能分支的快进合并）。
 6. **汇报**：按 `AGENTS.md` §9 的 7 段格式（实现了什么 / 文件清单 / 测试与业务场景对照 / 审查 findings 与修复复测 / Spec 完成度与下一步 / Git 状态 / 为什么这样写与更好的做法）。
 7. **技术债闭环**：任何"更好的做法"必须登记 `docs/tech-debt.md` 并给处置（已完成/已采纳/已延后/已拒绝）；里程碑边界要评审台账。
@@ -198,7 +201,7 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 铁律（不要偏离）：
 - 先设计简报（≥2 候选方案 + 风险 + 技术债），高风险功能必须等我确认后再编码；
 - TDD：先写失败测试，分层跑单元/集成/业务场景（业务场景断言数据库状态、审计、状态机、对象存储、Qdrant、AI 引用/拒答等业务输出，不能只断言 HTTP 200）；
-- 每个功能点完成后：跑全量测试 → 用**独立上下文/子 agent** 审查 staged diff（输出 Blocker/Major/Minor）→ 修复并复测 → 复审通过 → 提交（明确路径，禁止 git add .）→ 快进合并 main 并推送 → 用 gh 确认远端 CI 全绿；
+- 每个功能点完成后：跑受影响用例 + 本点业务场景链路 → 用**独立上下文/子 agent** 审查 staged diff（输出 Blocker/Major/Minor）→ 修复并复测 → 复审通过 → 提交（明确路径，禁止 git add .）；**跑全量后端/前端套件、快进合并 main 并推送、用 gh 确认远端 CI 全绿，这三件事在交付批次末做一次**（不是每个 TD 一次）；
 - 每个功能点完成后按 AGENTS.md §9 的 7 段格式汇报，并回写 docs/（简报实现结果、review-log、tech-debt、README「当前状态」、handoff 状态表）；
 - 不得提交密钥/凭证；不得 force push / reset --hard；生产开关不得默认放行。
 
