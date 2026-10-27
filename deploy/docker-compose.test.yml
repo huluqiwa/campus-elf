@@ -14,7 +14,11 @@ services:
       POSTGRES_USER: ${TEST_POSTGRES_USER:-campus_elf_test}
       POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD:?TEST_POSTGRES_PASSWORD is required}
     ports:
-      - "127.0.0.1:55432:5432"
+      # 默认 55432；Windows 上 Hyper-V 会在开机时随机保留一段 5xxxx 动态端口，
+      # 撞上下面的映射就容器起不来（`bind: An attempt was made to access a socket in a way
+      # forbidden by its access permissions`）。此时在 deploy/.env.test 里设 TEST_PG_HOST_PORT
+      # 换一个未保留的端口即可，无需改本文件；CI/其他机器不设该键，行为不变。
+      - "127.0.0.1:${TEST_PG_HOST_PORT:-55432}:5432"
     tmpfs:
       # 测试库不需要持久化；容器停止即丢弃，避免残留测试数据。
       - /var/lib/postgresql/data

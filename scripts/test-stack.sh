@@ -43,6 +43,16 @@ read_env_value() {
   grep -E "^${key}=" "${ENV_FILE}" | head -1 | cut -d= -f2-
 }
 
+pg_host_port() {
+  # 默认 55432。Windows 的 Hyper-V 会在开机时随机保留一整段 5xxxx 动态端口，
+  # 撞上了 compose 就报 `bind: ... forbidden by its access permissions`，容器起不来。
+  # 遇到时在 git 忽略的 deploy/.env.test 里加一行 `TEST_PG_HOST_PORT=57432` 即可；
+  # compose 的映射与本脚本导出的连接串都读同一个键，不会两边不同步。
+  local port
+  port="$(read_env_value TEST_PG_HOST_PORT)"
+  echo "${port:-55432}"
+}
+
 compose() {
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
 }
@@ -140,25 +150,26 @@ wait_healthy() {
 }
 
 print_env() {
-  local pg_pw redis_pw app_pw platform_pw pg_user pg_db
+  local pg_pw redis_pw app_pw platform_pw pg_user pg_db pg_port
   pg_pw="$(read_env_value TEST_POSTGRES_PASSWORD)"
   redis_pw="$(read_env_value TEST_REDIS_PASSWORD)"
   app_pw="$(read_env_value TEST_APP_PASSWORD)"
   platform_pw="$(read_env_value TEST_PLATFORM_PASSWORD)"
   pg_user="$(read_env_value TEST_POSTGRES_USER)"
   pg_db="$(read_env_value TEST_POSTGRES_DB)"
+  pg_port="$(pg_host_port)"
   pg_user="${pg_user:-campus_elf_test}"
   pg_db="${pg_db:-campus_elf_test}"
   # 说明行走 stderr：stdout 只保留 `export K=V`，便于 `eval "$(... env)"` 与 CI 解析。
   echo "[test-stack] Redis 固定用 DB 15（满足集成用例的一次性 DB 护栏 DB>=10）；凭据来自 ${ENV_FILE}" >&2
   cat <<EOF
-export TEST_DATABASE_URL="postgresql+asyncpg://${pg_user}:${pg_pw}@127.0.0.1:55432/${pg_db}"
+export TEST_DATABASE_URL="postgresql+asyncpg://${pg_user}:${pg_pw}@127.0.0.1:${pg_port}/${pg_db}"
 export TEST_REDIS_URL="redis://:${redis_pw}@127.0.0.1:56379/15"
 export TEST_QDRANT_URL="http://127.0.0.1:56333"
 export TEST_MINIO_ENDPOINT="http://127.0.0.1:59000"
 # 非超级用户连接（RLS 只在非超级用户下生效）：租户侧与平台侧分离
-export TEST_APP_DATABASE_URL="postgresql+asyncpg://campus_elf_test_tenant:${app_pw}@127.0.0.1:55432/${pg_db}"
-export TEST_PLATFORM_DATABASE_URL="postgresql+asyncpg://campus_elf_test_platform:${platform_pw}@127.0.0.1:55432/${pg_db}"
+export TEST_APP_DATABASE_URL="postgresql+asyncpg://campus_elf_test_tenant:${app_pw}@127.0.0.1:${pg_port}/${pg_db}"
+export TEST_PLATFORM_DATABASE_URL="postgresql+asyncpg://campus_elf_test_platform:${platform_pw}@127.0.0.1:${pg_port}/${pg_db}"
 export TEST_SMTP_HOST="127.0.0.1"
 export TEST_SMTP_PORT="51025"
 export TEST_MAILHOG_API="http://127.0.0.1:58025"
@@ -169,22 +180,23 @@ EOF
 print_env_plain() {
   # 供 CI 写入 $GITHUB_ENV：不加 export、不加引号（GITHUB_ENV 不会剥引号，
   # 带引号会让值本身带上 `"`，集成用例的一次性 DB 护栏会把 `"redis://...:15"` 判为非法）。
-  local pg_pw redis_pw app_pw platform_pw pg_user pg_db
+  local pg_pw redis_pw app_pw platform_pw pg_user pg_db pg_port
   pg_pw="$(read_env_value TEST_POSTGRES_PASSWORD)"
   redis_pw="$(read_env_value TEST_REDIS_PASSWORD)"
   app_pw="$(read_env_value TEST_APP_PASSWORD)"
   platform_pw="$(read_env_value TEST_PLATFORM_PASSWORD)"
   pg_user="$(read_env_value TEST_POSTGRES_USER)"
   pg_db="$(read_env_value TEST_POSTGRES_DB)"
+  pg_port="$(pg_host_port)"
   pg_user="${pg_user:-campus_elf_test}"
   pg_db="${pg_db:-campus_elf_test}"
   cat <<EOF
-TEST_DATABASE_URL=postgresql+asyncpg://${pg_user}:${pg_pw}@127.0.0.1:55432/${pg_db}
+TEST_DATABASE_URL=postgresql+asyncpg://${pg_user}:${pg_pw}@127.0.0.1:${pg_port}/${pg_db}
 TEST_REDIS_URL=redis://:${redis_pw}@127.0.0.1:56379/15
 TEST_QDRANT_URL=http://127.0.0.1:56333
 TEST_MINIO_ENDPOINT=http://127.0.0.1:59000
-TEST_APP_DATABASE_URL=postgresql+asyncpg://campus_elf_test_tenant:${app_pw}@127.0.0.1:55432/${pg_db}
-TEST_PLATFORM_DATABASE_URL=postgresql+asyncpg://campus_elf_test_platform:${platform_pw}@127.0.0.1:55432/${pg_db}
+TEST_APP_DATABASE_URL=postgresql+asyncpg://campus_elf_test_tenant:${app_pw}@127.0.0.1:${pg_port}/${pg_db}
+TEST_PLATFORM_DATABASE_URL=postgresql+asyncpg://campus_elf_test_platform:${platform_pw}@127.0.0.1:${pg_port}/${pg_db}
 TEST_SMTP_HOST=127.0.0.1
 TEST_SMTP_PORT=51025
 TEST_MAILHOG_API=http://127.0.0.1:58025

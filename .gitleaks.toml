@@ -49,4 +49,9 @@ regexes = [
   "CustRole-Operator-Pass-1",
   "CustRole-Foreign-Pass-1",
   "CustRole-Wiring-Pass-1",
+  # M2-UI3 角色级数据范围编辑（TD-187c）的种子口令：接线集成用例 + 业务场景用例
+  # （仅测试账号，随机租户码每次用例现生成；仍按精确字符串放行）。
+  "ScopeEdit-Seed-Pass-1",
+  "ScopeBs-Admin-Pass-1",
+  "ScopeBs-Keeper-Pass-1",
 ]
