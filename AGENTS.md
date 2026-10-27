@@ -11,7 +11,10 @@
 3. **单点推进**：一次只开发一个功能点；完成后必须汇报，禁止并行铺开。
 4. **假设显式化**：技术选型、数据结构、边界行为、默认值必须列入 spec/design 的“决策记录”或“待确认假设”。
 5. **A1–A29、H1–H4、S1–S2、R1–R8、L1–L6、K1–K3** 已确认；新增/变更决策必须回写文档。
-6. **测试门禁**：单元/集成/业务场景测试通过后，必须做独立代码审查；审查问题修复后重跑全量+业务场景测试，复审通过才能提交。
+6. **测试门禁**：单元/集成/业务场景测试通过后，必须做独立代码审查；审查问题修复后重跑受影响用例+业务场景测试，复审通过才能提交。
+   - **术语**：**功能点**＝一个 TD/子能力（提交粒度不变，仍单点单 commit）；**交付批次**＝一次可推送 main 的逻辑单元（通常是里程碑内的一组相邻 TD，如 M2-UI3 全部 187a–g）。
+   - **每点跑「受影响子集 + 静态门禁」**（`ruff`/`mypy`/`bandit`/`alembic check`），**全量后端 + 前端全量套件只在交付批次末跑一次**；业务场景用例不受"子集"豁免，每点都要跑自己那条链路。
+   - **审查粒度不降**：每个功能点仍做一轮独立审查，出 Blocker/Major 才复审；这条与本条无关，不许顺带放松。
 7. **业务输出正确性**：不能只断言 HTTP 200/字段存在；必须断言数据库状态、状态机、审计、消息/通知、对象存储、Qdrant、AI 引用/拒答/兜底等业务结果。
 8. **一次只提交一个可运行逻辑单元**；提交前展示 `git status` / `git diff --staged`。
 
@@ -72,7 +75,8 @@
 ### 6.2 代码审查
 - 测试通过后，使用独立 review agent/上下文审查 staged diff；输出 Blocker/Major/Minor。
 - 安全、租户隔离、权限、状态机、数据一致性、AI 护栏、Langfuse 脱敏问题一律 Blocker/Major。
-- 修复后重跑受影响+全量单元/集成/业务场景；前端补 Playwright；AI 补评估。
+- 修复后重跑受影响用例 + 本功能点的业务场景链路；**全量单元/集成/业务场景在交付批次末跑一次**（定义见 §1.6）。前端每点跑受影响的单测/mock E2E 文件，批次末跑 `lint`+`typecheck`+`format:check`+全部单测与 Playwright；AI 补评估在里程碑边界跑。
+- 审查仍是**每个功能点一轮独立审查**，出 Blocker/Major 才复审；改成批次末一次审不属于本条授权范围。
 - 实质变更重新审查；无 Blocker/Major 后才 commit。
 - 审查记录写入 `docs/review-log.md`。
 
@@ -84,7 +88,7 @@
 - 提交前必须：`git status`、`git diff --staged`；检查密钥/产物/临时调试代码/大文件。
 - 禁止 `git add .` / `git add -A`；禁止 force push、直接 push 共享分支、`reset --hard`、`clean -fd`、修改 hooks/GPG。
 - 误提交密钥：立即停止 push，`git rm --cached`，并告知密钥已泄露、必须轮换。
-- **远端与推送**：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 通道可用）。每个功能点「测试通过 + 独立审查通过 + 提交」后必须推送，流程：功能分支提交 → `git branch -f main <feature-branch>`（等价的快进合并）→ `git push origin main`；**CI 未绿不得视为功能点完成**。
+- **远端与推送**：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 通道可用）。**推送粒度＝交付批次**（§1.6）：功能点各自 commit 在功能分支上累积，批次末统一执行 功能分支提交 → `git branch -f main <feature-branch>`（等价的快进合并）→ `git push origin main`；**CI 未绿不得视为该批次完成**。批次内每个功能点仍要完成「受影响子集+业务场景通过 + 独立审查通过」才能 commit，未通过的点不得混进批次推送。
 - **CI 查询**：`gh run list` / `gh run view <id> --log-failed`（新机器需 `winget install --id GitHub.cli` + `gh auth login`）；4 条工作流按目录路径过滤触发，security 另在推送 main 与每周一 03:00 运行。
 
 ## 8. 环境与运行
