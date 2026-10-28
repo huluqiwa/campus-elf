@@ -43,7 +43,7 @@ jobs:
             --exit-code=2 --log-opts="--no-merges"
 
       - name: 安装 uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
