@@ -61,8 +61,9 @@ jobs:
 
       - name: 静态检查
         run: |
-          uv run ruff check app tests
+          uv run ruff check app tests scripts
           uv run mypy app tests
+          uv run mypy scripts
 
       - name: 测试（单元 + 集成 + 业务场景 + 关键包分支覆盖率）
         # `--cov-fail-under` 只比较 TOTAL，会把四个关键包的平均值当门槛、掩盖单包倒退；
@@ -76,6 +77,15 @@ jobs:
 
       - name: 关键包分支覆盖率门槛
         run: uv run python scripts/check_coverage.py
+
+      - name: 上传覆盖率报告（门槛排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 测试栈日志（失败时）
         if: failure()
