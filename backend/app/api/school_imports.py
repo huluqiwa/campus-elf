@@ -46,7 +46,9 @@ async def _audit_job(
     import logging
 
     from app.audit.writer import append_audit
+    from app.core.metrics import record_audit_write_failure
 
+    flushed = False
     try:
         async with db_session(tenant_id=tenant_id) as session:
             await append_audit(
@@ -61,7 +63,11 @@ async def _audit_job(
                 metadata=metadata,
                 request_id=None,
             )
+            flushed = True
     except Exception as exc:
+        if flushed:
+            # append_audit 已成功 flush，异常只能来自事务提交；它记不到这里，补一次计数。
+            record_audit_write_failure(action)
         logging.getLogger(__name__).warning(
             "导入 job 审计写入失败：%s.%s", type(exc).__module__, type(exc).__name__
         )

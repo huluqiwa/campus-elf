@@ -64,6 +64,32 @@ uv run python scripts/langfuse_smoke.py
 docker compose down
 ```
 
+## 应用指标与告警（P0 最小观测）
+
+后端在 `METRICS_ENABLED=true` 时暴露 `GET /metrics`（Prometheus 文本格式；**默认关闭**）。
+
+- 使用**私有指标注册表**：只输出本应用的 `campus_*` 计数器，不夹带 Python/进程默认采集器，
+  也不受第三方库注册到全局注册表的影响。
+- 标签有界且低敏：`method`（非标准动词归 `OTHER`）/ `route`（路由模板，不是真实路径）/
+  `status`（客户端断开记 `aborted`）/ `realm` / `reason` / `action`（审计动作码）；
+  **不含** tenant_id、user_id、角色名、登录名（AGENTS.md §3 脱敏红线）。
+- 端点不带业务鉴权（Prometheus 抓取不带业务令牌），生产必须只对抓取端放行
+  （内网 / 安全组 / 反代 IP 白名单），**禁止经 Nginx 对外暴露**；开启时进程启动日志会打
+  一条告警提示。
+- 多 worker 部署时各进程独立计数；汇总需要 `PROMETHEUS_MULTIPROC_DIR` 与
+  `MultiProcessCollector`（随 TD-214 落地，当前默认单 worker）。
+- 告警规则：`deploy/observability/prometheus/alerts.yml`——5xx 比例（有流量时）+
+  5xx 绝对量（低流量兜底）、审计写入失败、权限/范围拒绝激增、登录失败与锁定激增。
+  规则不会自己触发——Prometheus + Alertmanager 的部署、抓取与通知渠道随
+  **TD-214（M6 生产观测，OBS-02）** 落地，阈值需在 staging 校准。
+- 本地验证：
+
+  ```bash
+  cd backend
+  METRICS_ENABLED=true uv run uvicorn app.main:app --port 8001
+  curl -s http://127.0.0.1:8001/metrics | grep campus_
+  ```
+
 ## 注意
 
 - 该栈内存占用约 5–6GB；与 core+rag 同时常驻会接近 16GB 主机上限，建议单独启动验证。

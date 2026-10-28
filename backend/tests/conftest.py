@@ -15,6 +15,9 @@ os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/15")
 os.environ.setdefault("JWT_SECRET", "test-only-jwt-secret-0123456789abcdef")
 # 字段加密测试密钥：固定 32 字节 base64，仅用于测试库中的 MFA secret 往返
 os.environ.setdefault("ENCRYPTION_KEK", base64.b64encode(b"0" * 32).decode())
+# 指标端点默认关闭（生产默认不暴露）；测试里**强制**开启，便于断言计数器与 /metrics 输出。
+# 用直接赋值而不是 setdefault：开发者 shell 里的 METRICS_ENABLED=false 会让所有指标断言悄悄失效。
+os.environ["METRICS_ENABLED"] = "true"
 # 本机服务（PG/Redis/Qdrant/MailHog）不得走系统代理：httpx 在 Windows 会读注册表代理设置，
 # 若不绕过，127.0.0.1 的请求会被发到代理端口（表现为连接被拒）。
 for _proxy_key in ("NO_PROXY", "no_proxy"):

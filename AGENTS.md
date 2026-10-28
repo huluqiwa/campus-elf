@@ -82,14 +82,15 @@
 
 ## 7. Git 规范
 
-- 模式 A：`main` + `feature/*` + `hotfix/*`；无 PR；**不在 `main` 上直接改代码提交**（`main` 只接受来自功能分支的快进合并）。
+- 模式 A：`main` + `feature/*` + `hotfix/*`；无人工 PR；**不在 `main` 上直接改代码提交**（`main` 只接受来自功能分支的快进合并）。唯一例外是 Dependabot 自动创建的依赖 PR（包生态安全更新；Actions 周更仅 minor/patch）：必须按 §2 逐条审查、CI 绿后手动合并，不在 PR 上开发功能。
+- **依赖自动更新**：`.github/dependabot.yml` 中包生态只开安全更新（`open-pull-requests-limit: 0` 关闭常规版本更新），Actions 周更分组只含 minor/patch；Dependabot 只开 PR，不自动合并，审查与合并仍按本节规则执行。
 - 分支命名：`<类型>/<任务号>-<简短描述>`，无任务号用日期。
 - Conventional Commits：`feat/fix/docs/style/refactor/perf/test/build/ci/chore/revert`。
 - 提交前必须：`git status`、`git diff --staged`；检查密钥/产物/临时调试代码/大文件。
 - 禁止 `git add .` / `git add -A`；禁止 force push、直接 push 共享分支、`reset --hard`、`clean -fd`、修改 hooks/GPG。
 - 误提交密钥：立即停止 push，`git rm --cached`，并告知密钥已泄露、必须轮换。
 - **远端与推送**：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 通道可用）。**推送粒度＝交付批次**（§1.6）：功能点各自 commit 在功能分支上累积，批次末统一执行 功能分支提交 → `git branch -f main <feature-branch>`（等价的快进合并）→ `git push origin main`；**CI 未绿不得视为该批次完成**。批次内每个功能点仍要完成「受影响子集+业务场景通过 + 独立审查通过」才能 commit，未通过的点不得混进批次推送。
-- **CI 查询**：`gh run list` / `gh run view <id> --log-failed`（新机器需 `winget install --id GitHub.cli` + `gh auth login`）；4 条工作流按目录路径过滤触发，security 另在推送 main 与每周一 03:00 运行。
+- **CI 查询**：`gh run list` / `gh run view <id> --log-failed`（新机器需 `winget install --id GitHub.cli` + `gh auth login`）；4 条工作流按目录路径过滤触发；security 在推送 main / feature 分支、面向 main 的 PR（Dependabot 安全更新）与每周一 03:00 运行。
 
 ## 8. 环境与运行
 
@@ -110,6 +111,9 @@
 5. 当前 Spec 完成度与下一步。
 6. 当前 Git 分支状态、未提交改动、本次 commit 清单。
 7. 为什么采用这种写法，是否有更好的写法。
+8. **与规范/最佳实践的差距**：本轮发现但尚未处理的质量、安全、流程缺口，逐条写
+   「问题 → 影响（用白话，不用代号代替解释）→ 建议动作 → 去向（TD 编号/里程碑）」。
+   不要因为用户没问就省略，也不要只给代号不说后果。
 
 ## 10. 更好做法与技术债闭环
 

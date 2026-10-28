@@ -6,7 +6,7 @@
 
 ---
 
-## 1. 当前状态（截至 2026-10-27）
+## 1. 当前状态（截至 2026-10-28）
 
 | 里程碑 | 功能点 | 状态 |
 |---|---|---|
@@ -30,13 +30,14 @@
 | M2 | M2-UI1 B 端管理页面（人员/受控查看/班级课程/部门树/导入/学年流转 + TD-141） | ✅ 完成（远端 CI frontend #40231010987 / security #40231010964 / backend #40229631514 success；3 条全栈 E2E 因本机 8000 端口被占未跑，登记 TD-183；简报 `docs/design-briefs/M2-UI1-b-end-pages.md`） |
 | M2 | M2-UI2 角色权限配置后台（TD-150 `defaults_applied` + TD-137 角色↔权限接口/页 + TD-143 重置出厂 + TD-126 MFA 重置；权限目录 59→60 码） | ✅ 完成（本地门禁全绿：后端 661 passed / 前端 75 单测 + 57 mock E2E + build / ruff + mypy + alembic check + bandit×2；两轮独立审查 0B/2M/6m → 复审 PASS 0B/0M/6m，见 `docs/review-log.md`；远端 CI backend #40316861186 / frontend #40316861247 / security #40318461683 success（security 首跑被 gitleaks 对测试种子口令误报，按 TD-052 精确白名单修复后重跑绿）；UI 侧真实后端全栈 E2E 因本机 8000 端口被占未跑，登记 TD-192；简报 `docs/design-briefs/M2-UI2-rbac-admin.md`，迁移 head `c3f7a9d1e5b2`） |
 | M2 | M2-UI3 自定义角色 / 多角色绑定 / 权限账号 | 🔄 进行中（用户 2026-10-26 决策 D2 从 M2-UI2 裁出；简报 `docs/design-briefs/M2-UI3-custom-roles-accounts.md`，§11 六项决策已逐条拍板）。**第一批已交付**：TD-187a（`roles` 两条 CHECK + 迁移 `d7a1c3e5b9f4` + 新码 `school.role.delete`，目录 60→61）+ TD-191 打断层（`app/rbac/self_grant.py` 判据 + `PUT /school/roles/{id}/permissions` 接线：结果集触达本人且净增敏感码须 `self_grant_ack`+理由，超管免打断不免留痕，`school.role.self_grant` 放行与打断都写；前端确认条）——本地门禁全绿（后端 687 passed / ruff+mypy187+bandit×2+alembic check 无漂移 / 前端 lint+format+typecheck+31 单测+14 mock E2E），独立审查 0B/1M/5m（Major=gitleaks 漏放行接线口令已补、Minor 注释与测试 uuid 已修，其余 TD-193~197 处置），见 `docs/review-log.md`。**第二批已交付（commit `15037d3` 之后，本地门禁全绿、远端 CI 待 M2-UI3 整体收尾再跑）**：TD-187b 自定义角色创建/删除——`POST /school/roles` + `POST /school/roles/{id}/delete/{preview,}`（删除走独立码 `school.role.delete`，逐字确认 + 理由 ≥10 + 版本 CAS，CASCADE 前把码集与受影响用户数快照进 `school.role.deleted`；自定义角色翻成可编辑/可删除/**不可重置出厂** `ROLE_DEFAULTS_UNAVAILABLE`，前端重置入口改跟 `is_system` 走）；三轮独立审查（0B/2M/9m：M-1 创建路径未接自扩权守卫**经用户 2026-10-27 裁定改判据口径**、M-1(三轮) 审查记录与 m-2 落点补齐；Minor 含并发兜底只认 `uq_roles_tenant_id_code`、删除返回被删行版本号而非 `+1`、`name` 全空格拦截、留痕口径与格式校验层数两处文档纠偏、跨租复制源留 `copy_from_role_id`），处置见 `docs/review-log.md` 与 TD-194/197/198/199/200/201；复测后端 **706 passed**（398 单元/145 集成/163 业务场景）+ ruff/mypy190/bandit×2 + 前端 lint/typecheck/format/31 单测/`admin-roles` E2E 15 passed。**第三批已交付（本地 commit，未推 main、远端 CI 未跑——按批次规则等批次 A 末统一跑）**：TD-187c 角色级数据范围编辑——`GET /school/roles/{id}/scopes`（服务端下发 `editable`）、`POST …/scopes/preview`（差异 + 持有人数 + `retained_non_editable` + `empties_scope`，只读不审计）、`PUT …/scopes`（判据顺序：`_require_tenant` → 未知类型 → 行锁取角色 → 可编辑 → 不可手工授 → 版本 CAS → 范围版自扩权守卫 → `version+1` → **窄删除**（只碰 `school`/`self`）→ `unnest` 插入 → `school.role.scopes.updated`）；可编辑集 `{school,self}`，手工授 `class`/`course` 一律拒授**并留安全审计**（真原因是本端点没有 `scope_id` 入参通道，写下去是缺 id 的脏行、解析层 `ValueError` 会让该角色每个持有人 500；`course` 另本期不贡献可见性）；敏感范围 `SENSITIVE_SCOPE_TYPES={school}` 与权限侧共用同一判据内核（`kind="scope"` 只改文案与审计 metadata），空清单合法并由预览提示"N 名持有人将看不到任何数据"；**重置出厂是这条判据的第 4 个入口、本点未接**（可达路径与收口时点见 TD-194），注册 `school_super_admin` 免打断不免留痕。三轮独立审查（0B/5M/14m，全部整改：约束名写错的死代码分支、对运营错误的拒授理由、`reset_role` docstring 与文档相反、接口层残留假陈述、范围并集查询副本无登记/无用例），处置见 `docs/review-log.md` 与 TD-194/195/202/203/204/205。本点复测：本点四文件 **51 passed**（23 单元 / 18 集成 / 5 库层不变量 / 5 业务场景）、RBAC 受影响子集 **192 passed**、ruff + mypy（192 文件 0 错误）+ bandit（app/alembic 两条）+ `alembic check` 无漂移；全量后端与前端套件按批次规则留到批次 A 末。**待做**：TD-187d 用户↔多角色绑定（含自绑禁令与守卫接线，**并须一并收口 TD-194 三条前置与 TD-199**）、TD-187e 权限账号启停、TD-187f 业务场景/集成测试补全、TD-187g 前端角色/权限账号页（含 TD-198 `name` CHECK、TD-200 `resettable` 下发） |
+| 质量/安全/运维 P0（跨里程碑） | 关键包分支覆盖率门槛 + `security` 覆盖功能分支/PR + Dependabot + `/metrics` 与告警规则 | ✅ 完成（两轮独立审查：1 Blocker / 7 Major / 5 Minor + 0 Blocker / 0 Major / 8 Minor 全部处置；全量后端 755 passed/1573s（第二轮新增 2 条用例后未重跑，批次 A 末复跑）；四包分支覆盖率 73.87/81.15/81.25/66.67%，阈值 73/81/81/66 且反证会红；`METRICS_ENABLED` 默认 false；简报 `docs/design-briefs/P0-quality-security-ops.md` §7，详见 `docs/review-log.md`）。**待人工**：GitHub Settings 开启 Dependabot alerts/security updates 并用真实安全 PR 验证（handoff §7）。不含 TD-214（Prometheus/Alertmanager/多进程/反代拒绝，M6） |
 | M3/M4 | 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 KB-09/KB-10、AI-10） |
 
 - **建议的下一步顺序**：M2-UI3（自定义角色 / 多角色绑定 / 权限账号，TD-187/191；用户决策 D2 从 M2-UI2 裁出）→ M3 知识库闭环 → M4 AI 与 C 端。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6（M2-UI1/M2-UI2 新增用例见 TD-183/192；本机 8000 端口被另一项目容器占用时不可强杀）。
 - **数据库迁移 head**：`d7a1c3e5b9f4`（M2-UI3 第一批：`roles` 加 `ck_roles_code_format_valid` + `ck_roles_builtin_code_is_system` 两条 CHECK、权限目录新增 `school.role.delete`）；上一 head 为 `c3f7a9d1e5b2`（M2-UI2：`defaults_applied` + `roles.version` 乐观锁 + `school.personnel.mfa.reset`）；`alembic check` 应无漂移。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
-- 远端 CI：4 条工作流（backend / frontend / evals / security），按目录路径过滤触发；**CI 未绿不得视为交付批次完成**（推送粒度见 AGENTS.md §7）。
+- 远端 CI：4 条工作流（backend / frontend / evals / security）。前三条按目录路径过滤触发；`security` 在推送 `main` 与 `feature/**`、面向 `main` 的 PR（含 Dependabot）、每周一 03:00 定时运行；**CI 未绿不得视为交付批次完成**（推送粒度见 AGENTS.md §7）。
 
 ---
 
@@ -55,7 +56,11 @@ cd backend
 uv sync --frozen
 uv run ruff check app tests
 uv run mypy --no-incremental app tests
-REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（当前 651 passed）
+REQUIRE_TEST_SERVICES=1 uv run pytest -q          # 应全绿（用例数以 pytest 汇总为准）
+# 关键包分支覆盖率（P0）：先产出 json 再逐包比较；--cov-fail-under 只看 TOTAL，不用它
+uv run pytest --cov=app.rbac --cov=app.auth --cov=app.tenant --cov=app.audit \
+  --cov-branch --cov-report=json:coverage.json
+uv run python scripts/check_coverage.py
 uv run alembic -x db_url="$TEST_DATABASE_URL" check   # 迁移漂移检查
 
 # 3) 前端
@@ -78,13 +83,14 @@ cd .. && bash scripts/ci.sh            # 或 bash scripts/ci.sh --with-e2e
 4. **测试库重置**（仅测试库）：`drop schema public cascade; create schema public; grant usage on schema public to public;` 然后 `alembic ... upgrade head`。
 5. **MailHog 端口**：测试栈 SMTP=51025、API=58025（不是 1025/8025，那是开发栈）。测试必须用 `TEST_SMTP_*`/`TEST_MAILHOG_API`，不要写死默认端口（CI 上会因 1025 无服务而 502）。
 6. **测试栈容器重启后**：偶发端口转发短暂异常，重跑 `bash scripts/test-stack.sh up` 即可。
-7. **Playwright 必须在 `frontend/` 根目录跑**（配置是 `frontend/playwright.config.ts`，用系统 Chrome + `webServer` 起 4173/4174 预览）。在 `frontend/e2e/` 里跑找不到配置 → 既没有 `baseURL`（`Cannot navigate to invalid URL`），又会退回未安装的 Playwright Chromium（`Executable doesn't exist ... chromium_headless_shell`）；本机装了系统 Chrome，正确做法是回根目录跑，不必下载浏览器。
-8. **`bandit -r app` 对任何 issue 都非零退出（含 Low）**，其中 B101（`assert` 用于运行时收窄类型）最容易踩：生产代码不要用 `assert` 做不变量守卫，改成把条件并入分支判断（`if x is not None and ...`）并由末尾的 `RuntimeError` 兜住落空分支。M1-D2 首次本地 CI 就是这条挂的。
-9. **别用 `pytest | tail` / `| tee` 判绿**：管道会返回 tail 的退出码，测试失败也可能显示成功。正确写法：`pytest -q > /tmp/pytest.log 2>&1; echo "PYTEST_EXIT=$?"`，再看日志末尾汇总。
-10. **禁止 `ruff format`**：CI 只跑 `ruff check`，格式化会制造大量与功能无关的 diff；只按 check 报错点修。
-11. **测试栈容器重启会导致角色口令漂移**：表现为集成测试成片 `InvalidPasswordError`（`campus_elf_test_platform`）。重跑 `bash scripts/test-stack.sh up`（幂等 `ALTER ROLE ... PASSWORD`）并确认 `TEST_DATABASE_URL`/`TEST_APP_DATABASE_URL`/`TEST_PLATFORM_DATABASE_URL` 三条都能连上，再信任任何全量结果。
-12. **取用例数用 `pytest --collect-only -q -o addopts=""`**：默认 `addopts` 里已有 `-q`，再叠一个会变成 `-qq`，跑完不打印“N passed”汇总；计数与最终门禁数字要分开取。
-13. **`test-postgres` 起不来、报 `bind: An attempt was made to access a socket in a way forbidden by its access permissions`**：Windows 的 Hyper-V 开机时会随机保留一整段 5xxxx 动态端口（`netsh interface ipv4 show excludedportrange protocol=tcp` 可查），撞上默认映射 55432 就失败。**不要去改 compose 的默认值**（CI 与其他机器用它）：在 git 忽略的 `deploy/.env.test` 里加一行 `TEST_PG_HOST_PORT=57432`（换一个未保留的端口）即可，compose 的映射与 `scripts/test-stack.sh` 导出的连接串读同一个键，不会两边不同步。M2-UI3 TD-187c 就是踩了这条（2026-10-27）。
+7. **测试栈端口可配置**：主机端口取自 `deploy/.env.test`（gitignored，由 `deploy/.env.test.example` 复制），本机当前 Postgres=57432、Redis=56379、Qdrant=56333、MailHog API=58025（SMTP 见上条 51025）；被占用时改 `TEST_*_HOST_PORT` 后重跑 `test-stack.sh up`，测试侧一律用脚本导出的 `TEST_*` 连接串，不要写死端口。
+8. **Playwright 必须在 `frontend/` 根目录跑**（配置是 `frontend/playwright.config.ts`，用系统 Chrome + `webServer` 起 4173/4174 预览）。在 `frontend/e2e/` 里跑找不到配置 → 既没有 `baseURL`（`Cannot navigate to invalid URL`），又会退回未安装的 Playwright Chromium（`Executable doesn't exist ... chromium_headless_shell`）；本机装了系统 Chrome，正确做法是回根目录跑，不必下载浏览器。
+9. **`bandit -r app` 对任何 issue 都非零退出（含 Low）**，其中 B101（`assert` 用于运行时收窄类型）最容易踩：生产代码不要用 `assert` 做不变量守卫，改成把条件并入分支判断（`if x is not None and ...`）并由末尾的 `RuntimeError` 兜住落空分支。M1-D2 首次本地 CI 就是这条挂的。
+10. **别用 `pytest | tail` / `| tee` 判绿**：管道会返回 tail 的退出码，测试失败也可能显示成功。正确写法：`pytest -q > /tmp/pytest.log 2>&1; echo "PYTEST_EXIT=$?"`，再看日志末尾汇总。
+11. **禁止 `ruff format`**：CI 只跑 `ruff check`，格式化会制造大量与功能无关的 diff；只按 check 报错点修。
+12. **测试栈容器重启会导致角色口令漂移**：表现为集成测试成片 `InvalidPasswordError`（`campus_elf_test_platform`）。重跑 `bash scripts/test-stack.sh up`（幂等 `ALTER ROLE ... PASSWORD`）并确认 `TEST_DATABASE_URL`/`TEST_APP_DATABASE_URL`/`TEST_PLATFORM_DATABASE_URL` 三条都能连上，再信任任何全量结果。
+13. **取用例数用 `pytest --collect-only -q -o addopts=""`**：默认 `addopts` 里已有 `-q`，再叠一个会变成 `-qq`，跑完不打印“N passed”汇总；计数与最终门禁数字要分开取。
+14. **`test-postgres` 起不来、报 `bind: An attempt was made to access a socket in a way forbidden by its access permissions`**：Windows 的 Hyper-V 开机时会随机保留一整段 5xxxx 动态端口（`netsh interface ipv4 show excludedportrange protocol=tcp` 可查），撞上默认映射 55432 就失败。**不要去改 compose 的默认值**（CI 与其他机器用它）：在 git 忽略的 `deploy/.env.test` 里加一行 `TEST_PG_HOST_PORT=57432`（换一个未保留的端口）即可，compose 的映射与 `scripts/test-stack.sh` 导出的连接串读同一个键，不会两边不同步。M2-UI3 TD-187c 就是踩了这条（2026-10-27）。
 
 ### 2.1 接手时先做"环境自检"（新工具跑这几条，然后汇报，别猜）
 
@@ -235,4 +241,5 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 - [ ] `docs/handoff.md` §1 状态表与 README「当前状态」是最新的。
 - [ ] 未处置技术债清单已读（`docs/tech-debt.md`），知道哪些条目目标在下一个里程碑。
 - [ ] 待确认决策已列明（当前：无阻塞；M1-C2 四项细节已确认）。
+- [ ] GitHub 仓库 Settings 已开启 **Dependabot alerts** 与 **security updates**（`.github/dependabot.yml` 只声明策略，仓库级开关必须人工打开）；已有一次真实安全 PR 验证 `security` 工作流会随 PR 运行。
 - [ ] 本机环境可复现：测试栈起来、后端/前端测试全绿、`scripts/ci.sh` 全绿。

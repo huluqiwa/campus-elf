@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.writer import append_audit
 from app.auth.principal import Principal
+from app.core.metrics import record_audit_write_failure
 from app.db.session import db_session
 from app.rbac.catalog import PERMISSION_CATALOG, TENANT_MODULES, PermissionDef, permission_def
 from app.rbac.scopes import KNOWN_SCOPE_TYPES
@@ -299,6 +300,7 @@ async def _audit_denied(
     tenant_id = principal.tenant_id
     if tenant_id is None:
         return
+    flushed = False
     try:
         async with db_session(tenant_id=tenant_id) as session:
             await append_audit(
@@ -313,7 +315,11 @@ async def _audit_denied(
                 metadata={"reason": reason, **(extra or {})},
                 request_id=request_id,
             )
+            flushed = True
     except Exception as exc:
+        if flushed:
+            # append_audit 已成功 flush，异常只能来自事务提交；它记不到这里，补一次计数。
+            record_audit_write_failure(action)
         # 拒绝仍然生效，只是失去一次留痕机会。
         # 与 `personnel.service._audit_denied` 同口径：只记异常类型，不用 exc_info——
         # SQLAlchemy 会把 SQL 与参数拼进异常字符串，开 traceback 等于把参数写进日志（红线）。

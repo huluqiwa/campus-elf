@@ -57,6 +57,7 @@ from app.auth.tokens import (
     parse_password_reset_token,
 )
 from app.config import Settings, get_settings
+from app.core.metrics import record_login_failure
 from app.db.session import db_session
 from app.integrations.mail import build_mailer, render_password_reset_email
 from app.security.encryption import (
@@ -900,6 +901,7 @@ async def login_tenant(
         )
 
     if tenant_row is None or tenant_row["status"] != "active":
+        record_login_failure("tenant", "tenant_unavailable")
         async with db_session(platform=True) as audit_session:
             await append_audit(
                 audit_session,
@@ -1054,6 +1056,11 @@ async def login_tenant(
             )
 
     if outcome is None:
+        record_login_failure(
+            "tenant",
+            failure_reason,
+            lock_applied=failure_state is not None and failure_state.locked_until is not None,
+        )
         async with db_session(tenant_id=tenant_id) as audit_session:
             metadata: dict[str, object] = {
                 "login_masked": login[:1] + "***",
@@ -1246,6 +1253,11 @@ async def login_platform(
             )
 
     if outcome is None:
+        record_login_failure(
+            "platform",
+            failure_reason,
+            lock_applied=failure_state is not None and failure_state.locked_until is not None,
+        )
         async with db_session(platform=True) as audit_session:
             metadata: dict[str, object] = {
                 "realm": "platform",
@@ -1564,6 +1576,11 @@ async def _audit_mfa_login_failure(
 ) -> None:
     """MFA 登录失败审计（独立事务，避免随验证事务回滚丢失）。"""
 
+    record_login_failure(
+        realm,
+        reason,
+        lock_applied=state is not None and state.locked_until is not None,
+    )
     metadata: dict[str, object] = {
         "realm": realm,
         "mfa": True,

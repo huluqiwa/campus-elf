@@ -26,6 +26,7 @@ from tests.support.db import (
     upgrade_test_database,
 )
 from tests.support.dsn import assert_test_database_dsn
+from tests.support.metrics import counter_value
 
 pytestmark = [pytest.mark.integration, pytest.mark.business]
 
@@ -148,6 +149,11 @@ async def test_tenant_login_locks_after_five_failures(
         email="admin@school.test",
     )
 
+    failures_before = counter_value(
+        "campus_auth_login_failures_total", {"realm": "tenant", "reason": "invalid_password"}
+    )
+    lockouts_before = counter_value("campus_auth_account_lockouts_total", {"realm": "tenant"})
+
     for _ in range(5):
         with pytest.raises(service.AuthError) as failure:
             await service.login_tenant(
@@ -159,12 +165,35 @@ async def test_tenant_login_locks_after_five_failures(
     row = await _user_row(tenant_id, user_id)
     assert row["failed_login_attempts"] == 5
     assert row["locked_until"] is not None
+    assert (
+        counter_value(
+            "campus_auth_login_failures_total", {"realm": "tenant", "reason": "invalid_password"}
+        )
+        == failures_before + 5
+    )
+    # 锁定只记一次：本次失败跨过阈值时 +1
+    assert (
+        counter_value("campus_auth_account_lockouts_total", {"realm": "tenant"})
+        == lockouts_before + 1
+    )
 
+    locked_before = counter_value(
+        "campus_auth_login_failures_total", {"realm": "tenant", "reason": "locked"}
+    )
     with pytest.raises(service.AuthError):
         await service.login_tenant(
             school_code=SCHOOL_CODE, login_id="S-3001", password=TENANT_PASSWORD
         )
     assert (await _failed_reasons())[-1] == "locked"
+    assert (
+        counter_value("campus_auth_login_failures_total", {"realm": "tenant", "reason": "locked"})
+        == locked_before + 1
+    )
+    # 锁定期间再次尝试：失败计数照记，但"新锁定"不重复计数
+    assert (
+        counter_value("campus_auth_account_lockouts_total", {"realm": "tenant"})
+        == lockouts_before + 1
+    )
 
     # 模拟锁定到期：成功后计数与锁定字段清零
     async with admin_engine.begin() as conn:
@@ -228,6 +257,10 @@ async def test_platform_login_lockout(auth_env: None, admin_engine: AsyncEngine)
     """平台账号同样 5 次失败锁定，第 6 次正确密码仍拒绝，审计记录 locked。"""
 
     await seed_platform_user(admin_engine, account="ops-d1-lock", email="ops@example.test")
+    failures_before = counter_value(
+        "campus_auth_login_failures_total", {"realm": "platform", "reason": "invalid_password"}
+    )
+    lockouts_before = counter_value("campus_auth_account_lockouts_total", {"realm": "platform"})
 
     for _ in range(5):
         with pytest.raises(service.AuthError):
@@ -236,6 +269,24 @@ async def test_platform_login_lockout(auth_env: None, admin_engine: AsyncEngine)
     with pytest.raises(service.AuthError):
         await service.login_platform(account="ops-d1-lock", password=TEST_PLATFORM_PASSWORD)
     assert (await _failed_reasons())[-1] == "locked"
+
+    assert (
+        counter_value(
+            "campus_auth_login_failures_total",
+            {"realm": "platform", "reason": "invalid_password"},
+        )
+        == failures_before + 5
+    )
+    assert (
+        counter_value("campus_auth_account_lockouts_total", {"realm": "platform"})
+        == lockouts_before + 1
+    )
+    assert (
+        counter_value(
+            "campus_auth_login_failures_total", {"realm": "platform", "reason": "locked"}
+        )
+        >= 1
+    )
 
     async with db_session(platform=True) as session:
         row = (

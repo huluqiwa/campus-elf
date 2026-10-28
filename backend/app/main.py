@@ -5,6 +5,7 @@
 （M1 起替换为 PostgreSQL + JSONL 实现）。
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -16,6 +17,7 @@ from app.api.auth import router as auth_router
 from app.api.body_limit import BodySizeLimitMiddleware
 from app.api.campus_chat import router as campus_chat_router
 from app.api.health import router as health_router
+from app.api.metrics import router as metrics_router
 from app.api.platform_audit import router as platform_audit_router
 from app.api.platform_rbac import router as platform_rbac_router
 from app.api.platform_tenants import router as platform_tenants_router
@@ -25,9 +27,12 @@ from app.api.school_personnel import router as school_personnel_router
 from app.api.school_rbac import router as school_rbac_router
 from app.config import get_settings
 from app.core.logging import configure_logging
+from app.core.metrics import MetricsMiddleware
 from app.db.selfcheck import verify_runtime_database
 from app.harness.trace import InMemoryTraceSink, TraceSink
 from app.tenant.middleware import RequestContextMiddleware
+
+logger = logging.getLogger(__name__)
 
 # 10MB 资质文件 + multipart 边界/表单字段余量（仅注册路由）
 MAX_REGISTER_BODY_BYTES = 11 * 1024 * 1024
@@ -41,6 +46,12 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     if get_settings().app_env in {"staging", "production"}:
         await verify_runtime_database()
+    if get_settings().metrics_enabled:
+        # 端点本身没有鉴权（Prometheus 抓取不带业务令牌），安全性完全依赖网络策略。
+        logger.warning(
+            "METRICS_ENABLED=true：确认 /metrics 只对抓取端可达，禁止经 Nginx 对外暴露"
+            "（deploy/observability/README.md）"
+        )
     yield
 
 
@@ -93,9 +104,14 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
         },
     )
     application.add_middleware(RequestContextMiddleware)
+    if settings.metrics_enabled:
+        # 后添加的中间件在最外层：包住 RequestContext，413/500 与未匹配路由也能计数。
+        application.add_middleware(MetricsMiddleware)
 
     # 健康检查固定在根路径，供 Compose/Nginx/探针使用；业务路由挂 api_prefix。
+    # /metrics 始终注册，未开启 METRICS_ENABLED 时由处理器返回 404（默认不暴露）。
     application.include_router(health_router)
+    application.include_router(metrics_router)
     application.include_router(auth_router, prefix=settings.api_prefix)
     application.include_router(campus_chat_router, prefix=settings.api_prefix)
     application.include_router(platform_audit_router, prefix=settings.api_prefix)
