@@ -3,21 +3,24 @@ name: security
 # 安全扫描：机密泄漏（gitleaks）、Python 依赖漏洞（pip-audit）、静态安全分析（bandit）、
 # 前端依赖审计（pnpm audit）。
 #
-# 触发策略：推送 main 与 feature 分支都跑（安全扫描提前到功能分支，不再等到合并前才发现）；
+# 触发策略：面向 main 的 PR 与 main 推送都跑（安全扫描提前到合并前，不再等合并后才发现）；
 # 另每周一 03:00 定时复扫——代码不变时依赖漏洞也会新披露；支持手动触发。
-# `pull_request` 只面向 main：本仓库模式 A 不走人工 PR，PR 来源只有 Dependabot
-# （包生态安全更新与 Actions 周更），合并前必须完成同样的扫描（Dependabot 触发的
-# pull_request 不读取仓库 secrets，本工作流不依赖 secrets，因此可用）。
+# PR 来源包含功能分支 PR 与 Dependabot（包生态安全更新与 Actions 周更），合并前必须完成
+# 同样的扫描（Dependabot 触发的 pull_request 不读取仓库 secrets，本工作流不依赖 secrets，因此可用）。
 # 仓库内不含任何真实凭证（测试栈凭据由脚本运行时随机生成）。
 
 on:
   push:
-    branches: [main, "feature/**"]
+    branches: [main]
   pull_request:
     branches: [main]
   schedule:
     - cron: "0 3 * * 1"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

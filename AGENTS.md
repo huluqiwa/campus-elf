@@ -12,9 +12,9 @@
 4. **假设显式化**：技术选型、数据结构、边界行为、默认值必须列入 spec/design 的“决策记录”或“待确认假设”。
 5. **A1–A29、H1–H4、S1–S2、R1–R8、L1–L6、K1–K3** 已确认；新增/变更决策必须回写文档。
 6. **测试门禁**：单元/集成/业务场景测试通过后，必须做独立代码审查；审查问题修复后重跑受影响用例+业务场景测试，复审通过才能提交。
-   - **术语**：**功能点**＝一个 TD/子能力（提交粒度不变，仍单点单 commit）；**交付批次**＝一次可推送 main 的逻辑单元（通常是里程碑内的一组相邻 TD，如 M2-UI3 全部 187a–g）。
-   - **每点跑「受影响子集 + 静态门禁」**（`ruff`/`mypy`/`bandit`/`alembic check`），**全量后端 + 前端全量套件只在交付批次末跑一次**；业务场景用例不受"子集"豁免，每点都要跑自己那条链路。
-   - **审查粒度不降**：每个功能点仍做一轮独立审查，出 Blocker/Major 才复审；这条与本条无关，不许顺带放松。
+   - **功能点＝一个 PR**：一个 TD/子能力对应一个短分支、一个 PR；PR 合并即交付，不再攒"交付批次"统一推送。
+   - **本地每点跑「受影响子集 + 静态门禁」**（`ruff`/`mypy`/`bandit`/`alembic check`）；**受影响侧的全量套件由 PR 的远端 CI 跑**（backend/frontend 按路径过滤；纯文档 PR 由 security 兜底），本地不重复跑全量（排查问题时除外）。业务场景用例不受"子集"豁免，每点都要跑自己那条链路。
+   - **审查粒度不降**：每个 PR 一轮独立审查，出 Blocker/Major 才复审；审查结论贴到 PR 并写入 `docs/review-log.md`。
 7. **业务输出正确性**：不能只断言 HTTP 200/字段存在；必须断言数据库状态、状态机、审计、消息/通知、对象存储、Qdrant、AI 引用/拒答/兜底等业务结果。
 8. **一次只提交一个可运行逻辑单元**；提交前展示 `git status` / `git diff --staged`。
 
@@ -73,24 +73,26 @@
 - 性能：k6；核心 API、SSE、并发、发布/回滚。
 
 ### 6.2 代码审查
-- 测试通过后，使用独立 review agent/上下文审查 staged diff；输出 Blocker/Major/Minor。
+- 测试通过后，使用独立 review agent/上下文审查 `git diff --staged`；输出 Blocker/Major/Minor，结论写入 PR 与 `docs/review-log.md`。
 - 安全、租户隔离、权限、状态机、数据一致性、AI 护栏、Langfuse 脱敏问题一律 Blocker/Major。
-- 修复后重跑受影响用例 + 本功能点的业务场景链路；**全量单元/集成/业务场景在交付批次末跑一次**（定义见 §1.6）。前端每点跑受影响的单测/mock E2E 文件，批次末跑 `lint`+`typecheck`+`format:check`+全部单测与 Playwright；AI 补评估在里程碑边界跑。
-- 审查仍是**每个功能点一轮独立审查**，出 Blocker/Major 才复审；改成批次末一次审不属于本条授权范围。
-- 实质变更重新审查；无 Blocker/Major 后才 commit。
-- 审查记录写入 `docs/review-log.md`。
+- 修复后重跑受影响用例 + 本功能点的业务场景链路；**受影响侧的全量套件由 PR 的远端 CI 跑**（`.github/workflows/` 按路径过滤），前端每点本地跑受影响的单测/mock E2E 文件；AI 补评估在里程碑边界跑。
+- 每个 PR 一轮独立审查，出 Blocker/Major 才复审；**CI 未全绿不得合并**。
+- 实质变更重新审查；无 Blocker/Major 后才 commit、push、开 PR。
+- 审查记录写入 `docs/review-log.md`，PR 描述附结论摘要。
 
 ## 7. Git 规范
 
-- 模式 A：`main` + `feature/*` + `hotfix/*`；无人工 PR；**不在 `main` 上直接改代码提交**（`main` 只接受来自功能分支的快进合并）。唯一例外是 Dependabot 自动创建的依赖 PR（包生态安全更新；Actions 周更仅 minor/patch）：必须按 §2 逐条审查、CI 绿后手动合并，不在 PR 上开发功能。
-- **依赖自动更新**：`.github/dependabot.yml` 中包生态只开安全更新（`open-pull-requests-limit: 0` 关闭常规版本更新），Actions 周更分组只含 minor/patch；Dependabot 只开 PR，不自动合并，审查与合并仍按本节规则执行。
+- **主线工作流（2026-10-28 起）**：`main` + `feature/*` + `hotfix/*`；**所有改动走 PR**（含 Dependabot），`main` 只接受 PR 合并，禁止直推。单人项目没有第二个人审批，合并条件是「CI 全绿 + 独立审查无 Blocker/Major」；合并动作由用户或获授权代理执行。
+- **分支与 PR**：一个功能点一个短分支/PR，合并后删分支；PR 描述按 `.github/pull_request_template.md` 填写（TD/简报、测试证据、风险、回滚）。合并策略用 rebase（保持线性历史）或 squash（单点单 commit）。
+- **分支保护缺口**：私有库 + GitHub Free 无法启用 branch protection/ruleset（TD-219）。升级 GitHub Pro 前，“不直推 main、CI 绿才合并”靠纪律执行；升级后补 required checks。
+- **依赖自动更新**：`.github/dependabot.yml` 中包生态只开安全更新（`open-pull-requests-limit: 0` 关闭常规版本更新），Actions 周更分组只含 minor/patch；Dependabot 只开 PR，不自动合并，同样要过 PR 的 CI 与审查。
 - 分支命名：`<类型>/<任务号>-<简短描述>`，无任务号用日期。
 - Conventional Commits：`feat/fix/docs/style/refactor/perf/test/build/ci/chore/revert`。
 - 提交前必须：`git status`、`git diff --staged`；检查密钥/产物/临时调试代码/大文件。
 - 禁止 `git add .` / `git add -A`；禁止 force push、直接 push 共享分支、`reset --hard`、`clean -fd`、修改 hooks/GPG。
 - 误提交密钥：立即停止 push，`git rm --cached`，并告知密钥已泄露、必须轮换。
-- **远端与推送**：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 通道可用）。**推送粒度＝交付批次**（§1.6）：功能点各自 commit 在功能分支上累积，批次末统一执行 功能分支提交 → `git branch -f main <feature-branch>`（等价的快进合并）→ `git push origin main`；**CI 未绿不得视为该批次完成**。批次内每个功能点仍要完成「受影响子集+业务场景通过 + 独立审查通过」才能 commit，未通过的点不得混进批次推送。
-- **CI 查询**：`gh run list` / `gh run view <id> --log-failed`（新机器需 `winget install --id GitHub.cli` + `gh auth login`）；4 条工作流按目录路径过滤触发；security 在推送 main / feature 分支、面向 main 的 PR（Dependabot 安全更新）与每周一 03:00 运行。
+- **远端与推送**：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 通道可用）。**推送粒度＝功能点**：功能分支 push → 开 PR → 远端 CI 全绿 + 审查通过 → 合并（rebase/squash）→ 删分支；不再用 `git branch -f main` 直推。PR 的 CI 未绿不得合并；合并后 `main` 的 push CI 也必须全绿，失败按 hotfix 处理。
+- **CI 查询**：`gh run list` / `gh run view <id> --log-failed` / `gh pr checks <n> --watch`（新机器需 `winget install --id GitHub.cli` + `gh auth login`）；backend/frontend/evals 在面向 `main` 的 PR 与 `main` 推送时按目录路径过滤触发；security 在面向 `main` 的 PR、`main` 推送与每周一 03:00 运行；同一 PR 的新推送会取消旧运行（concurrency）。
 
 ## 8. 环境与运行
 

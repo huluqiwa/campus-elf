@@ -9,7 +9,7 @@
 | 项 | 目标 | 可验证的验收 |
 |---|---|---|
 | 覆盖率门槛 | 关键包（`app/rbac`、`app/auth`、`app/tenant`、`app/audit`）分支覆盖率不倒退 | CI 的 pytest 产出 `coverage.json`，再由 `backend/scripts/check_coverage.py` 逐包比较基线（`--cov-fail-under` 只看 TOTAL，会掩盖单包倒退）；改坏关键逻辑少测即红 |
-| 安全扫描时机 | 密钥/依赖/静态问题在功能分支推送时就发现，不等批次末 | `security` 工作流对 `feature/**` 推送触发 |
+| 安全扫描时机 | 密钥/依赖/静态问题在合并前发现 | `security` 工作流对面向 `main` 的 PR 触发（2026-10-28 工作流迁移后；原方案是 `feature/**` 推送） |
 | 依赖更新 | 漏洞版本有自动化 PR，且不违反「禁止擅自升降级」 | `.github/dependabot.yml` 存在；包生态仅安全更新，Actions 周更分组 |
 | 最小可观测 | 运行时有数据可查、有告警规则可接 | `/metrics` 端点（默认关闭，内网启用）+ 4 类 5 条 Prometheus 告警规则（5xx 比例 + 低流量 5xx 绝对量分开，避免低流量全 5xx 被比例规则吞掉） |
 
@@ -18,7 +18,7 @@
 1. **覆盖率**：A 全仓门槛（噪声大、为数字写废测试）／B 关键包门槛（选）／C 只报告不设门槛（拦不住倒退）。
    选 B：只对租户隔离、认证、RBAC、审计设门槛；先跑基线再定阈值，阈值取基线整数下取整，形成棘轮。
    落地方式：pytest 用 `--cov=app.rbac --cov=app.auth --cov=app.tenant --cov=app.audit --cov-branch --cov-report=json:coverage.json`，再由 `backend/scripts/check_coverage.py` 从 json 逐包汇总分支数并与阈值比较——`--cov-fail-under` 只比较 TOTAL，单包退 10 个点可被另一包涨 20 个点掩盖（审查 M1）。
-2. **安全扫描时机**：A `feature/**` 全跑（选）／B 只把 gitleaks 挪到功能分支（省额度，但依赖漏洞仍晚发现）／C 维持现状。
+2. **安全扫描时机（当时方案；2026-10-28 已改为面向 main 的 PR 触发）**：A `feature/**` 全跑（选）／B 只把 gitleaks 挪到功能分支（省额度，但依赖漏洞仍晚发现）／C 维持现状。
    选 A：代价是每次功能分支推送多几分钟 Actions；收益是泄漏与漏洞当次可见。保留 `main` 与每周一 03:00 定时不变。
 3. **依赖更新**：A 全量版本更新（违反「禁止擅自升级」纪律）／B 包生态只开安全更新 + GitHub Actions 周更分组（选）／C 不做。
    选 B：`open-pull-requests-limit: 0` 关闭版本更新、保留安全更新；Actions 周更分组（低风险、CI 全验）。
@@ -43,7 +43,7 @@
 
 ## 5. 预判技术债
 
-TD-207 全栈 E2E 进 CI/nightly（批次 B 末）、TD-208 变异测试抽查（M3 边界）、TD-209 备份恢复演练（M6）、TD-210 每批次威胁模型 diff（批次 B 起）、TD-211 DAST/镜像扫描/SBOM（M6）、TD-212 安全关键 diff 第二审查者（M3 起）、TD-213 文档表驱动校验（M3）、TD-214 Prometheus/Alertmanager 接入与告警通道（M6 随 OBS-02）。
+TD-207 全栈 E2E 进 CI/nightly（M2-UI3 剩余点完成后）、TD-208 变异测试抽查（M3 边界）、TD-209 备份恢复演练（M6）、TD-210 每个新增端点/权限码/跨租面 PR 的威胁模型 diff（自下一个 PR 起）、TD-211 DAST/镜像扫描/SBOM（M6）、TD-212 安全关键 diff 第二审查者（M3 起）、TD-213 文档表驱动校验（M3）、TD-214 Prometheus/Alertmanager 接入与告警通道（M6 随 OBS-02）。
 
 ## 6. 高风险确认
 
@@ -54,7 +54,7 @@ TD-207 全栈 E2E 进 CI/nightly（批次 B 末）、TD-208 变异测试抽查�
 
 ## 7. 实现结果（2026-10-28 回填）
 
-- 覆盖率基线（真实测试栈全量）：**755 passed / 1573.07s**（第二轮复审整改新增 2 条审计计数用例，未重跑全量；批次 A 末复跑），分支覆盖率
+- 覆盖率基线（真实测试栈全量）：**755 passed / 1573.07s**（第二轮复审整改新增 2 条审计计数用例，未重跑全量；PR #1 远端 CI 全量 **761 passed / 745.95s**），分支覆盖率
   `app/rbac` 73.87%（164/222）、`app/auth` 81.15%（409/504）、`app/tenant` 81.25%（13/16）、
   `app/audit` 66.67%（4/6）。原阈值取向下取整：73 / 81 / 81 / 66（auth 后经 CI 校准为 80，见下条），写在
   `backend/scripts/check_coverage.py`；`backend.yml` 与 `scripts/ci.sh` 的 pytest 步骤产出
@@ -74,13 +74,14 @@ TD-207 全栈 E2E 进 CI/nightly（批次 B 末）、TD-208 变异测试抽查�
 - 告警：4 类 **5 条**——5xx 比例（有流量时）、低流量 5xx 绝对量（审查 m4 补充）、审计写入失败、
   权限/范围拒绝激增、登录失败或锁定激增；阈值与抓取/通知通道随 TD-214 在 staging 校准。
 - Dependabot：包生态只开安全更新、Actions 周更分组 minor/patch；`security` 工作流补
-  `pull_request`（main）与 `permissions: contents: read`；AGENTS §7 写明 Dependabot 自动创建的
-  依赖 PR（安全更新 + Actions 周更）是「无人工 PR」的唯一例外。
+  `pull_request`（main）与 `permissions: contents: read`；AGENTS §7 写明 Dependabot PR
+  与其他 PR 一样要过 CI 与独立审查。
 - 仓库管理员操作：**Dependabot alerts** 与 **security updates** 已于 2026-10-28 开启（alerts 经
-  API 验证）。仍待完成的是「真实安全 PR 验证 `security` 工作流随 PR 运行」：需先把本分支
-  推送到 main（批次 A 末），`.github/dependabot.yml` 也需在默认分支才驱动 Actions 周更。
+  API 验证）。仍待完成的是「真实安全 PR 验证 `security` 工作流随 PR 运行」：PR #1 已合入
+  `main`（tip `ae8fa9c`），`security` 随 PR 与 main 推送已实测绿；待 Dependabot 安全 PR
+  出现后验证其 `pull_request` 触发。`.github/dependabot.yml` 已在默认分支，驱动 Actions 周更。
   交接清单见 `docs/handoff.md` §7。
 - 审查联动：两轮独立审查 1 Blocker / 7 Major / 5 Minor + 0 Blocker / 0 Major / 8 Minor 全部处置
   （第二轮含 count-once 回归用例 2 条、标签名白名单断言、用例数与 README/AGENTS/handoff 事实更正）；
   新增 TD-216（标签值收敛，已延后→M3），TD-214 增补多进程、反代拒绝与流错误可见性校准，
-  TD-206 已完成（commit `29de4ec` + `c8e60e1`）。
+  TD-206 已完成（commit `d29e243` + `ba35fb5`；覆盖率校准 `ae8fa9c`，TD-221）。

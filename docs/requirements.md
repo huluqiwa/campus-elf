@@ -352,13 +352,13 @@
 
 ### 6.1 Git 协作规范（AI Coding 强制执行）
 
-- **模式 A（已确认）**：`main` + `feature/*` + `hotfix/*`；无 `develop`/`release`/PR；`main` 受保护，不直接 push；单人远程时个人分支可 push。
+- **PR 流（2026-10-28 起；原模式 A 废止）**：`main` + `feature/*` + `hotfix/*`；所有改动走 PR，`main` 只接受 PR 合并，禁止直推；分支保护因私有库 + GitHub Free 暂未启用（TD-219），升级 Pro 后补 required checks。
 - 分支命名：`<类型>/<任务号>-<简短描述>`，全小写，单词连字符；无任务号用日期。
 - Conventional Commits：`feat/fix/docs/style/refactor/perf/test/build/ci/chore/revert`；subject 祈使句、≤50 字符、结尾不加句号；body 说明“为什么”；footer 关联任务/破坏性变更。
 - 原子提交：一次只做一件事；功能变更、格式化、无关文件不混提；可运行逻辑单元立即提交；重构与功能分开；新增依赖/配置单独提交。
 - 提交前检查：`git status`、`git diff --staged`；确认无密钥/Token/密码/.env、无产物/IDE 配置、无临时调试代码、无 >10MB 大文件。
 - 编码前确认分支；有远程时 `git pull --rebase`；在 main 上先建工作分支；`git log --oneline -5` 保持风格。
-- 合入前：lint、单测全绿；模式 B 才需要 PR；模式 A 确认全部提交、测试全绿、无遗留改动。
+- 合入前：PR 的 CI 全绿（lint / 类型 / 测试 / 安全扫描）+ 独立审查无 Blocker/Major；PR 描述按模板填写。
 - 安全红线：禁止 force push/直接 push 共享分支、`reset --hard` 他人提交、修改已推送共享历史、`git add .`/`-A`、提交凭证、`git clean -fd`/`checkout .`、修改 hooks/GPG。
 - 异常处理：冲突先分析再解决；误提交密钥立即停止 push、`git rm --cached`、告知密钥泄露并轮换；未 push 用 amend，已 push 个人分支用 revert。
 - 输出要求：git 操作先说明“要执行什么、为什么”，展示完整命令，经确认后执行；会话结束汇报分支状态、未提交改动、待办。
@@ -423,7 +423,7 @@
 ### 8.4 完成定义（DoD）
 
 - 功能点 = 测试全绿 + 评估集达标 + 文档同步 + 汇报完成 + 全部原子提交完成；并新增：业务场景测试通过 + 代码审查通过 + 问题修复复测。
-- 里程碑 = 全部功能点 DoD + 性能压测报告（如涉及）+ 模式 B PR 合入（模式 A 不适用）。
+- 里程碑 = 全部功能点 DoD + 性能压测报告（如涉及）+ PR 合入且合并后 `main` 的 push CI 全绿。
 
 ---
 
@@ -468,7 +468,7 @@
 | A8 | 外部依赖超时/重试/熔断 | 默认待确认：LLM 5s/30s/15s、2 次重试、熔断；嵌入/重排/ClamAV/MinerU 超时 |
 | A9 | 性能测量口径 | 已确认：500ms/3s；ReAct 5s 例外；发布零 5xx |
 | A10 | 并发基准 | 已确认：非 AI 200；AI 50 流，压测后回调 |
-| A11 | Git 模式 | 已确认：模式 A |
+| A11 | Git 模式 | 已确认：PR 流（2026-10-28 起；原模式 A 废止，见 6.1） |
 | A12 | LLM 评估阈值 | 已确认：85/100/90/95/80 |
 | A13 | 开发环境 | 已确认：Windows+Docker/WSL2 11GB；Python 3.13；Node 24；6GB GPU |
 | A14 | 部署目标 | 已确认：Linux+Compose+Nginx+HTTPS；Langfuse 独立主机；服务器/域名待提供 |
@@ -494,29 +494,9 @@
 
 见项目根目录 `.gitignore`（已按本技术栈增补 Python、Node、Docker、Playwright、Langfuse、模型权重、测试产物等条目）。
 
-## 附录 C：PR/MR 描述模板（模式 B 才使用）
+## 附录 C：PR/MR 描述模板（所有 PR 使用）
 
-```markdown
-## 变更背景
-为什么做这个改动（关联需求/缺陷链接）
-
-## 变更内容
-- 模块A：做了什么
-- 模块B：做了什么
-
-## 测试情况
-- [ ] 本地自测通过
-- [ ] 单元测试通过（新增 N 个用例）
-- [ ] 业务场景测试通过
-- [ ] 代码审查通过
-- [ ] lint 检查通过
-
-## 影响范围
-是否影响其他模块 / 是否有 BREAKING CHANGE
-
-## 关联任务
-Closes #123
-```
+仓库内模板：`.github/pull_request_template.md`（改了什么 / 为什么 / 验证 / 风险与回滚 / 安全 / 截图）。GitHub 创建 PR 时自动带入；用 `gh pr create` 时按同一结构填写 body。
 
 ## 附录 D：常用命令速查
 
