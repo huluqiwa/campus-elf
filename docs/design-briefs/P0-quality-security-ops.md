@@ -74,4 +74,4 @@ TD-207 全栈 E2E 进 CI/nightly（批次 B 末）、TD-208 变异测试抽查�
 - 审查联动：两轮独立审查 1 Blocker / 7 Major / 5 Minor + 0 Blocker / 0 Major / 8 Minor 全部处置
   （第二轮含 count-once 回归用例 2 条、标签名白名单断言、用例数与 README/AGENTS/handoff 事实更正）；
   新增 TD-216（标签值收敛，已延后→M3），TD-214 增补多进程、反代拒绝与流错误可见性校准，
-  TD-206 回填证据（提交后补 hash）。
+  TD-206 已完成（commit `29de4ec` + `c8e60e1`）。

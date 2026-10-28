@@ -591,7 +591,7 @@
   - `ruff check app tests` 通过；`mypy --no-incremental app tests` **197 文件 0 错误**（与 CI 冷缓存同口径）；`bandit -r app -x tests` 与 `-r alembic -s B608` 两条 **exit 0**；`uv lock --check` OK；`alembic check` → `No new upgrade operations detected`（head `d7a1c3e5b9f4` 未变）。
   - 前端未触碰（本单元仅后端与文档）。
 - 重点核对项结论：指标层只读 ASGI scope 与代码字面量，不查库、不改写请求/响应，租户隔离与鉴权路径未动；标签不含 tenant_id/user_id/角色名/登录名（有指标族 + 标签名白名单断言）；`METRICS_ENABLED` 默认 false、关闭时 404 且行为与该端点不存在一致；401/403/404/413/500 状态语义未变（既有集成用例全绿）；`recorded` 标志保证状态码只记一次，flush/commit 两层计数由 `flushed` 标志保证一次尝试只记一次；`security.yml` 仅 `contents: read`，Dependabot PR 不依赖 secrets；覆盖率门禁红/绿两侧均已实测。
-- TD 处置：**TD-206**（本 P0 主条目，提交后回填 hash → 已完成）、**TD-214**（Prometheus/Alertmanager/看板 + 多进程 + 反代拒绝，已采纳→M6）、**TD-215**（耗时直方图/SLO，已采纳→M6）、**TD-216**（标签值类型收敛，已延后→M3，附过渡控制）。
+- TD 处置：**TD-206**（本 P0 主条目，已完成，commit `29de4ec` + `c8e60e1`）、**TD-214**（Prometheus/Alertmanager/看板 + 多进程 + 反代拒绝，已采纳→M6）、**TD-215**（耗时直方图/SLO，已采纳→M6）、**TD-216**（标签值类型收敛，已延后→M3，附过渡控制）。
 - 第二轮复审（独立只读子智能体，不运行测试/uv/docker）：**可提交，0 Blocker / 0 Major / 8 Minor**；第一轮 13 条 findings 中 11 条判定「已修复」，M6 与 m2/m3 的残余各落为下述 Minor。8 条 Minor 处置：
   - ① 流错误 HELP/类 docstring 把「客户端断开」写成必然可见，而 `StreamingResponse` 可能在内层任务组消化断连、后台任务异常也会落到该计数：HELP 改为「响应头发出后请求以异常或取消结束（客户端断开 / 流生成器 / 后台任务）」，类 docstring 明确「只统计实际向上传播的取消/异常，可见性取决于 ASGI 服务器与响应实现」；不做 `http.disconnect` 探测（只能 monkeypatch 测替身），把 M6 校准项并入 TD-214。
   - ② count-once 缺回归用例（把 `flushed=True` 提前到 append 前仍全绿）：新增 `test_permission_denial_flush_failure_counts_exactly_once` 与 `test_data_scope_denial_flush_failure_counts_exactly_once`，走真实 `append_audit` 的 flush 失败，断言恰好 +1；提前置位会变 2 而红。
@@ -602,4 +602,4 @@
   - ⑦ `is_permission_free_allowed` docstring 仍写三类免鉴权，已含 `/metrics`：补「指标端点」。
   - ⑧ handoff 已知坑编号重复 7：顺延为 8–14。
 - 第二轮整改后复测：两个单元文件 **20 passed / 2.73s**；`ruff check app tests` 通过；`mypy --no-incremental app tests` **197 文件 0 错误**；`bandit`（app / alembic）两条 **exit 0**。生产逻辑仅改指标 HELP 文案与 docstring，无行为变更；全量后端与前端仍按批次规则在批次 A（+TD-187d）末复跑。
-- 结论：**P0 单元可提交**（两轮独立审查：第一轮 1B/7M/5m 全部整改；第二轮 0B/0M/8m 全部处置）。唯一不由代码完成的前置是 GitHub 仓库 Settings 开启 Dependabot alerts/security updates 并用真实安全 PR 验证（已写入 handoff §7 与本轮汇报）；`pull_request` 触发需推送远端后生效。本单元随分支提交、不推 main。
+- 结论：**P0 单元可提交**（两轮独立审查：第一轮 1B/7M/5m 全部整改；第二轮 0B/0M/8m 全部处置）。提交：`29de4ec`（门禁/CI/Dependabot）+ `c8e60e1`（指标/埋点/测试/文档）。唯一不由代码完成的前置是 GitHub 仓库 Settings 开启 Dependabot alerts/security updates 并用真实安全 PR 验证（已写入 handoff §7 与本轮汇报）；`pull_request` 触发需推送远端后生效。本单元随分支提交、不推 main。
