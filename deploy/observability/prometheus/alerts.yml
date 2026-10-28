@@ -1,0 +1,84 @@
+# 校园陪伴精灵应用指标告警规则（P0 最小集）。
+#
+# 重要：本文件只是规则定义，**不会自己触发告警**。Prometheus + Alertmanager 的部署、
+# 抓取配置与通知渠道随 TD-214（M6 生产观测，OBS-02）落地；阈值需在 staging 按真实
+# 流量校准后再用于生产。指标端点默认关闭，开启方式见本目录 README「应用指标与告警」。
+
+groups:
+  - name: campus-elf-app
+    rules:
+      - alert: CampusHigh5xxRate
+        # 只覆盖有正常流量的场景（>12 req/min）；低流量下比例会被 0 分母/单请求放大，
+        # 由下一条绝对量规则兜底。
+        expr: |
+          (
+            sum(rate(campus_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(campus_http_requests_total[5m])), 0.001)
+          ) > 0.05
+          and
+          sum(rate(campus_http_requests_total[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx 响应比例超过 5%（持续 10 分钟）"
+          description: >-
+            近 5 分钟 5xx 占比 {{ $value | humanizePercentage }}。先查 /health/ready 与日志中的
+            request_id，再按 route 标签（路由模板）定位出问题的接口。
+
+      - alert: Campus5xxErrorsLowTraffic
+        # 低流量兜底：比例规则在 <12 req/min 时不会触发，但少量 5xx 已说明有接口在报错。
+        # 10 分钟内 ≥5 次且持续 5 分钟——单个偶发错误不告警，连续错误立即可见。
+        expr: sum(increase(campus_http_requests_total{status=~"5.."}[10m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "10 分钟内 5xx 达到 5 次（低流量绝对量兜底）"
+          description: >-
+            按 route 标签（路由模板）与 status 定位；结合 request_id 查日志。若与
+            CampusHigh5xxRate 同时触发，按 critical 处理。
+
+      - alert: CampusAuditWriteFailure
+        expr: increase(campus_audit_write_failures_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "审计写入失败（10 分钟内 {{ $value | humanize }} 次）"
+          description: >-
+            审计写入失败等于该留痕的操作没有留痕。立即检查数据库可用性、审计触发器与
+            AUDIT_HASH_KEY 注入；按 action 标签定位受影响的操作类别。
+
+      - alert: CampusAccessDenialSpike
+        # 两侧都 `or vector(0)`：计数器在第一次自增前没有序列，缺一侧会让整个加法为空、
+        # 告警永远不触发。
+        expr: |
+          (
+            (sum(rate(campus_permission_denials_total[5m])) or vector(0))
+            +
+            (sum(rate(campus_data_scope_denials_total[5m])) or vector(0))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "权限/数据范围拒绝激增（超过 1 次/秒，持续 10 分钟）"
+          description: >-
+            可能是越权扫描，也可能是角色/范围配置收窄后的正常误伤。按 realm/reason 标签定位，
+            并与 auth.permission.denied、data_scope.denied 审计对照。
+
+      - alert: CampusLoginFailureOrLockoutSpike
+        expr: |
+          sum(increase(campus_auth_login_failures_total[10m])) > 20
+          or
+          sum(increase(campus_auth_account_lockouts_total[10m])) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "登录失败或账号锁定激增（10 分钟窗口）"
+          description: >-
+            可能是撞库/密码喷洒，也可能是校方批量误操作。按 realm/reason 标签定位，
+            必要时在网关限流并通知对应租户管理员。

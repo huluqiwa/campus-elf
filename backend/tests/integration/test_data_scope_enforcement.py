@@ -43,6 +43,7 @@ from tests.support.db import (
     upgrade_test_database,
 )
 from tests.support.dsn import assert_test_database_dsn
+from tests.support.metrics import counter_value
 
 pytestmark = [pytest.mark.integration]
 
@@ -288,8 +289,15 @@ async def test_detail_out_of_scope_is_404_and_audited(client: AsyncClient) -> No
     assert [UUID(item["id"]) for item in listed] == [await _id_of_login(A_SELF_VIEWER)]
 
     target = await _id_of_login(A_PLAIN_STUDENT)
+    denials_before = counter_value(
+        "campus_data_scope_denials_total", {"reason": "out_of_data_scope"}
+    )
     response = await client.get(f"/api/v1/school/personnel/{target}", headers=headers)
     assert response.status_code == 404, response.text
+    assert (
+        counter_value("campus_data_scope_denials_total", {"reason": "out_of_data_scope"})
+        == denials_before + 1
+    )
 
     audits = await _audits("data_scope.denied")
     assert len(audits) == 1, audits

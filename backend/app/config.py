@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     trusted_proxy_ips: str = ""
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     docs_enabled: bool = True
+    # Prometheus /metrics 开关：默认关闭（不新增默认暴露面）；开启后仍须由网络策略限制
+    # 到内网抓取端（见 deploy/observability/README.md）。指标标签不含租户/用户标识。
+    metrics_enabled: bool = False
 
     # 必填：无默认值，缺失即 fail-fast，禁止静默回退到无凭证的本机 Redis。
     redis_url: str

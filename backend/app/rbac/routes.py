@@ -57,11 +57,20 @@ PERMISSION_FREE_ROUTES: dict[tuple[str, str], str] = {
     # --- 探针：无业务数据 ---
     ("GET", "/health/live"): "存活探针：Compose/Nginx 无凭据探测，只回进程存活",
     ("GET", "/health/ready"): "就绪探针：只回依赖（PG/Redis 等）就绪状态，不含业务数据",
+    # --- 运维抓取：无业务数据，默认关闭；开启后必须由网络策略限制到内网抓取端 ---
+    ("GET", "/metrics"): (
+        "Prometheus 抓取端点：只输出有界标签的计数器（方法/路由模板/状态码/原因码），"
+        "不含租户/用户/登录名；METRICS_ENABLED=false 时返回 404。端点本身无鉴权"
+        "（Prometheus 不带业务令牌），开启后必须由网络策略限制到内网抓取端"
+    ),
 }
 
 # 免鉴权条目允许落的位置（超出这个范围的白名单条目视为越权放行，测试直接红）
 PERMISSION_FREE_PREFIX_ALLOWLIST: tuple[str, ...] = (f"{API_PREFIX}/auth/", "/health")
-PERMISSION_FREE_EXACT_ALLOWLIST: tuple[str, ...] = (f"{API_PREFIX}/platform/tenants/register",)
+PERMISSION_FREE_EXACT_ALLOWLIST: tuple[str, ...] = (
+    f"{API_PREFIX}/platform/tenants/register",
+    "/metrics",
+)
 
 
 def _walk(dependant: Dependant) -> Iterator[PermissionRequirement]:
@@ -111,7 +120,7 @@ def framework_routes(application: FastAPI) -> tuple[str, ...]:
 
 
 def is_permission_free_allowed(path: str) -> bool:
-    """该路径是否属于允许免鉴权的类别（认证自助 / 健康探针 / 公开登记）。"""
+    """该路径是否属于允许免鉴权的类别（认证自助 / 健康探针 / 公开登记 / 指标端点）。"""
 
     return path.startswith(PERMISSION_FREE_PREFIX_ALLOWLIST) or path in PERMISSION_FREE_EXACT_ALLOWLIST
 

@@ -36,6 +36,7 @@ from tests.support.db import (
     upgrade_test_database,
 )
 from tests.support.dsn import assert_test_database_dsn
+from tests.support.metrics import counter_value
 
 pytestmark = [pytest.mark.integration]
 
@@ -224,9 +225,19 @@ async def test_tenant_user_without_permission_is_forbidden_and_audited(
     client, sink = chat_env
     tenant_id, user_id = await _identity(SCHOOL_CODE, "S-1002")
     headers = await _token(client, "S-1002")
+    denials_before = counter_value(
+        "campus_permission_denials_total", {"realm": "tenant", "reason": "missing_permission"}
+    )
     response = await client.post(ENDPOINT, json={"message": "无权限提问"}, headers=headers)
 
     assert response.status_code == 403
+    assert (
+        counter_value(
+            "campus_permission_denials_total",
+            {"realm": "tenant", "reason": "missing_permission"},
+        )
+        == denials_before + 1
+    )
     assert CHAT_PERMISSION in response.json()["detail"]
     assert sink.turns == []
 
@@ -293,9 +304,19 @@ async def test_platform_token_cannot_use_campus_chat(
 
     client, sink = chat_env
     headers = await login_platform(client, "ops-chat")
+    denials_before = counter_value(
+        "campus_permission_denials_total", {"realm": "platform", "reason": "realm_mismatch"}
+    )
     response = await client.post(ENDPOINT, json={"message": "平台令牌提问"}, headers=headers)
 
     assert response.status_code == 403
+    assert (
+        counter_value(
+            "campus_permission_denials_total",
+            {"realm": "platform", "reason": "realm_mismatch"},
+        )
+        == denials_before + 1
+    )
     # realm 判定先于权限判定：该账号已被授予 `campus.chat.use`，
     # 若这里出现"缺少权限"说明测的是权限缺失而不是跨 realm 拦截。
     assert response.json()["detail"] != f"缺少权限：{CHAT_PERMISSION}"

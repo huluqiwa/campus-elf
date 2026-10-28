@@ -21,6 +21,7 @@ from tests.support.db import (
     upgrade_test_database,
 )
 from tests.support.dsn import assert_test_database_dsn
+from tests.support.metrics import counter_value
 from tests.support.mfa import (
     FIXED_STEP,
     INVALID_CODE,
@@ -124,9 +125,18 @@ async def test_mfa_challenge_then_totp_verify_with_replay_guard(
     assert await _refresh_rows(tenant_id) == []
     assert await _audit_metadata("auth.login.success") == []
 
+    mfa_failures_before = counter_value(
+        "campus_auth_login_failures_total", {"realm": "tenant", "reason": "invalid_mfa_code"}
+    )
     with pytest.raises(service.AuthError) as wrong:
         await service.verify_mfa(mfa_token=challenge.mfa_token, code=INVALID_CODE)
     assert wrong.value.code == "INVALID_CREDENTIALS"
+    assert (
+        counter_value(
+            "campus_auth_login_failures_total", {"realm": "tenant", "reason": "invalid_mfa_code"}
+        )
+        == mfa_failures_before + 1
+    )
 
     state = await _tenant_mfa_state(tenant_id, user_id)
     assert state["failed_login_attempts"] == 1
@@ -209,9 +219,25 @@ async def test_mfa_failures_lock_account(mfa_env: None, fixed_totp_step: int) ->
     settings = get_settings()
 
     challenge = await _tenant_login("S-MFA-3")
+    failures_before = counter_value(
+        "campus_auth_login_failures_total", {"realm": "tenant", "reason": "invalid_mfa_code"}
+    )
+    lockouts_before = counter_value("campus_auth_account_lockouts_total", {"realm": "tenant"})
     for _ in range(settings.auth_max_login_failures):
         with pytest.raises(service.AuthError):
             await service.verify_mfa(mfa_token=challenge.mfa_token, code=INVALID_CODE)
+
+    assert (
+        counter_value(
+            "campus_auth_login_failures_total", {"realm": "tenant", "reason": "invalid_mfa_code"}
+        )
+        == failures_before + settings.auth_max_login_failures
+    )
+    # MFA 失败与密码失败共用锁定：达到阈值的这一次记一条锁定，之前的不记
+    assert (
+        counter_value("campus_auth_account_lockouts_total", {"realm": "tenant"})
+        == lockouts_before + 1
+    )
 
     async with db_session(tenant_id=tenant_id) as session:
         locked_until = await session.scalar(
@@ -228,6 +254,17 @@ async def test_mfa_failures_lock_account(mfa_env: None, fixed_totp_step: int) ->
         )
     assert locked.value.code == "INVALID_CREDENTIALS"
     assert await _refresh_rows(tenant_id) == []
+    # 锁定期间的尝试只记失败（reason=locked），不重复记"新锁定"
+    assert (
+        counter_value(
+            "campus_auth_login_failures_total", {"realm": "tenant", "reason": "locked"}
+        )
+        >= 1
+    )
+    assert (
+        counter_value("campus_auth_account_lockouts_total", {"realm": "tenant"})
+        == lockouts_before + 1
+    )
 
 
 @pytest.mark.asyncio

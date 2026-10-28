@@ -382,7 +382,11 @@ async def _audit_denied(
     """记录一次权限拒绝（best-effort）。"""
 
     from app.audit.writer import append_audit
+    from app.core.metrics import record_audit_write_failure, record_permission_denial
 
+    # 指标先记：即使审计写失败，"拒绝发生了"这件事也要在 /metrics 上可见。
+    record_permission_denial(principal.realm, reason)
+    flushed = False
     try:
         if principal.realm == "platform":
             async with db_session(platform=True) as session:
@@ -397,6 +401,7 @@ async def _audit_denied(
                     metadata={"path": request.url.path, "reason": reason},
                     request_id=getattr(request.state, "request_id", None),
                 )
+                flushed = True
         elif principal.tenant_id is not None:
             async with db_session(tenant_id=principal.tenant_id) as session:
                 await append_audit(
@@ -411,7 +416,11 @@ async def _audit_denied(
                     metadata={"path": request.url.path, "reason": reason},
                     request_id=getattr(request.state, "request_id", None),
                 )
+                flushed = True
     except Exception as exc:  # 审计故障不得放行或阻断权限拒绝
+        if flushed:
+            # append_audit 已成功 flush，异常只能来自事务提交；它记不到这里，补一次计数。
+            record_audit_write_failure("auth.permission.denied")
         # 拒绝仍然生效，但"谁在什么时候被挡了"必须留下痕迹供运维排查——静默吞掉
         # 等于安全事件失去可观测性。
         # 只记异常类型，不用 exc_info：SQLAlchemy 会把 `[SQL: ...] [parameters: ...]` 拼进

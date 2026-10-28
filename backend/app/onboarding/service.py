@@ -30,6 +30,7 @@ from app.audit.redact import mask_email, truncate_text
 from app.audit.writer import append_audit
 from app.auth.passwords import generate_initial_password, hash_password
 from app.config import get_settings
+from app.core.metrics import record_audit_write_failure
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
 from app.db.models.tenant import Tenant
 from app.db.session import db_session
@@ -392,6 +393,7 @@ async def _deny_self_approval(denied: _SelfApprovalDenied) -> NoReturn:
     403/422；故障本身进日志（只记异常类型，不带 traceback 里的 SQL 参数）。
     """
 
+    flushed = False
     try:
         async with db_session(platform=True) as session:
             await append_audit(
@@ -405,7 +407,11 @@ async def _deny_self_approval(denied: _SelfApprovalDenied) -> NoReturn:
                 metadata={"code": denied.code},
                 request_id=denied.request_id,
             )
+            flushed = True
     except Exception as exc:
+        if flushed:
+            # append_audit 已成功 flush，异常只能来自事务提交；它记不到这里，补一次计数。
+            record_audit_write_failure("approval.self_approval.denied")
         logging.getLogger(__name__).warning(
             "自批拒绝审计写入失败：%s.%s",
             type(exc).__module__,

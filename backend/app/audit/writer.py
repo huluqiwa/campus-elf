@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics import record_audit_write_failure
 from app.db.models.audit import AuditLog
 
 
@@ -63,5 +64,11 @@ async def append_audit(
         created_at=datetime.now(UTC),
     )
     session.add(event)
-    await session.flush()
+    try:
+        await session.flush()
+    except Exception:
+        # 审计写失败意味着"该留痕的操作没有留痕"，必须让运维从指标上看得见；
+        # 计数后原样抛出，由调用方决定是否降级（如拒绝审计的 best-effort 分支）。
+        record_audit_write_failure(action)
+        raise
     return event

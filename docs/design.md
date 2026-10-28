@@ -356,7 +356,7 @@ audit_logs: 仅追加，prev_hash/hash 链
 
 ### 5.1 约定
 
-- Base path：业务 API 使用 `/api/v1`；健康检查例外，固定在根路径 `/health/live`、`/health/ready`，供 Compose/Nginx/探针使用。
+- Base path：业务 API 使用 `/api/v1`；健康检查例外，固定在根路径 `/health/live`、`/health/ready`，供 Compose/Nginx/探针使用；应用指标例外，固定在根路径 `/metrics`（`METRICS_ENABLED` 默认 false，关闭时 404；无业务鉴权，只允许抓取端经网络策略访问，见 §6.6）。
 - 身份：`Authorization: Bearer <access_token>`；平台/租户分 realm/audience。
 - 租户：只从 token 取 `tenant_id`；不接受 body/query 覆盖。
 - 错误信封：`{ "code": "...", "message": "...", "details": {...}, "request_id": "..." }`。
@@ -786,6 +786,11 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 - `TraceExporter` 接口：`LocalTraceExporter` 必选；`LangfuseExporter` 可选，异步批量、脱敏、故障隔离。
 - Langfuse 默认元数据+哈希；内容采集场景见 `docs/observability-langfuse.md`。
 - Ragas 独立跑批；结果本地 `evals/reports/`，可选同步 Langfuse dataset/experiment。
+- **应用指标（P0，2026-10-28）**：`GET /metrics`（Prometheus 文本格式，`METRICS_ENABLED` 默认 false，关闭时 404）只暴露 `campus_*` 计数器，使用私有 `CollectorRegistry`（不带 Python/进程默认采集器）。标签仅有界低敏维度：`method`（固定动词集，未知归一 `OTHER`）、`route`（路由模板，未匹配归一 `unmatched`）、`status`（含 `aborted`）、`realm`、`reason`、`action`；**禁止** tenant_id/user_id/角色名/登录名。
+  - 中间件 `MetricsMiddleware` 必须注册在 `RequestContextMiddleware` 之后（`add_middleware` 后注册者最外层），否则异常路径拿不到 request_id 上下文；计数发生在 `http.response.start`（SSE 在出首字节时即计数），响应头发出后的断流/异常记 `campus_http_stream_errors_total`，不再重复记 5xx。
+  - `/metrics` 自身不计入（含 `root_path` 前缀与尾斜杠变体），避免抓取流量污染 5xx 比例。
+  - 端点无业务鉴权（Prometheus 不带业务令牌），上线必须由网络策略只放行抓取端，不经 Nginx 公开；开启时启动日志告警提示。
+  - 多 worker 各进程独立计数，汇总需 `PROMETHEUS_MULTIPROC_DIR`，随 TD-214（M6，OBS-02）落地；告警规则文件 `deploy/observability/prometheus/alerts.yml` 本身不自动生效，抓取/通知渠道同随 TD-214。
 
 ### 6.7 恢复
 

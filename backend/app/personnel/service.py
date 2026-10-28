@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.writer import append_audit
 from app.auth.principal import Principal
+from app.core.metrics import record_audit_write_failure, record_data_scope_denial
 from app.db.models.identity import User
 from app.db.repository import ScopeBypass, ScopeDecision, TenantScopedRepository
 from app.db.session import db_session
@@ -220,6 +221,9 @@ async def _audit_denied(principal: Principal, personnel_id: UUID, request_id: st
     # 已保证非空，走到这里为 None 说明调用方用错了主体 realm，宁可审计不写也不能开无租户会话。
     if tenant_id is None:
         raise PersonnelError("PRINCIPAL_REALM_MISMATCH", "主体缺少租户上下文", 403)
+    # 指标先记：审计写失败时，"越权发生了"这件事仍要能在 /metrics 上看见。
+    record_data_scope_denial()
+    flushed = False
     try:
         async with db_session(tenant_id=tenant_id) as session:
             await append_audit(
@@ -237,7 +241,11 @@ async def _audit_denied(principal: Principal, personnel_id: UUID, request_id: st
                 },
                 request_id=request_id,
             )
+            flushed = True
     except Exception as exc:
+        if flushed:
+            # append_audit 已成功 flush，异常只能来自事务提交；它记不到这里，补一次计数。
+            record_audit_write_failure("data_scope.denied")
         # 与权限拒绝审计同一口径：只记异常类型，不带 traceback（避免 SQL 参数进日志）。
         logging.getLogger(__name__).warning(
             "数据范围拒绝审计写入失败：%s.%s",
