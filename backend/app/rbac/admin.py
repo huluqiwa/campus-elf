@@ -904,8 +904,10 @@ async def _affected_user_ids(
 
     sql = (
         "select user_id from public.user_roles "
+        "where role_id = :rid and tenant_id = :tid order by user_id for update"
+        if for_update
+        else "select user_id from public.user_roles "
         "where role_id = :rid and tenant_id = :tid order by user_id"
-        + (" for update" if for_update else "")
     )
     rows: list[Any] = list(
         (await session.execute(text(sql), {"rid": role_id, "tid": tenant_id}))
