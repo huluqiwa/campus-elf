@@ -41,6 +41,7 @@ dist/
 .coverage.*
 htmlcov/
 coverage.xml
+coverage.json
 *.sqlite3
 *.db
 

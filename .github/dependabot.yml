@@ -1,0 +1,45 @@
+# Dependabot 配置（P0）。
+#
+# 口径：
+# - Python（uv）与前端（pnpm）只开**安全更新**：`open-pull-requests-limit: 0` 关闭常规
+#   版本更新 PR（该上限不作用于安全更新，安全更新另有独立额度）。AGENTS.md §2 禁止
+#   擅自升级/降级技术栈版本，常规升级必须人工评估后显式改锁文件；安全 PR 也按此流程
+#   逐条审查（Dependabot 只开 PR，不会自动合并）。
+# - GitHub Actions 每周一组、一次 PR 汇总所有 action 的次版本/补丁更新，减少噪音。
+# - 分组只作用于版本更新；安全更新保持单个 PR，便于按 CVE 逐条审查与回滚。
+
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "uv"
+    directory: "/evals"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
