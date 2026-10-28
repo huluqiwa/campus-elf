@@ -43,3 +43,8 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # 分组过滤只决定"哪些能进组"，不匹配的 major 仍会单开 PR；这里显式禁止。
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"

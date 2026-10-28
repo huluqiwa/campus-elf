@@ -532,7 +532,7 @@
 ### M2-UI3 TD-187c：角色级数据范围编辑（2026-10-27）
 
 - 范围：`GET /school/roles/{id}/scopes`（含服务端下发的 `editable` 标记）、`POST /school/roles/{id}/scopes/preview`（差异 + 持有人数 + `retained_non_editable` + `empties_scope`，只读不审计）、`PUT /school/roles/{id}/scopes`（全量替换：`_require_tenant` → 未知类型 → `FOR UPDATE` 取角色 → 角色可编辑 → 不可手工授类型 → 版本 CAS → 范围版自扩权守卫 → `version+1` → 窄删除 → `unnest` 插入 → 审计）。判据层 `SENSITIVE_SCOPE_TYPES` + `evaluate_scope_self_grant`（复用 `evaluate_self_grant` 内核，`kind="scope"` 只改文案与 `metadata.kind`）。不含 TD-187d（用户↔角色绑定）/187e/187f/187g。四条已裁定口径：范围编辑**接**守卫、独立 `scopes` 端点、手工授 `class`/`course` 被拒**留痕**、**允许**空清单 + 预览提示持有人数。
-- commit/diff：`cd10d95`（工具链：`scripts/test-stack.sh`/`deploy/docker-compose.test.yml`/`deploy/.env.test.example`/`.gitleaks.toml`，+36/−9）与 `5c8abd9`（`backend/app/rbac/admin.py` +~479、`backend/app/rbac/self_grant.py` +~42、`backend/app/api/school_rbac.py` +~148、新增 `tests/integration/test_rbac_role_scope_edit.py`（18 例）/`tests/business/test_bs_m2ui3_role_scope.py`（5 例）、回改 `tests/test_self_grant_guard_unit.py`/`tests/integration/test_rbac_custom_role_constraints.py`、文档 `design.md` §5.12/简报 §13/`tech-debt.md` TD-203–205/`handoff.md`/`README.md`，13 文件 +2434/−29）。
+- commit/diff：`601d3f5`（工具链：`scripts/test-stack.sh`/`deploy/docker-compose.test.yml`/`deploy/.env.test.example`/`.gitleaks.toml`，+36/−9）与 `66f2646`（`backend/app/rbac/admin.py` +~479、`backend/app/rbac/self_grant.py` +~42、`backend/app/api/school_rbac.py` +~148、新增 `tests/integration/test_rbac_role_scope_edit.py`（18 例）/`tests/business/test_bs_m2ui3_role_scope.py`（5 例）、回改 `tests/test_self_grant_guard_unit.py`/`tests/integration/test_rbac_custom_role_constraints.py`、文档 `design.md` §5.12/简报 §13/`tech-debt.md` TD-203–205/`handoff.md`/`README.md`，13 文件 +2434/−29）。
 - 审查人/agent：独立审查子 agent **三轮已出**（只读、与实现者独立上下文、被硬性禁止跑测试以免污染共享测试栈；第二轮为修复后复审，第三轮针对定稿树并逐条核验前两轮整改落地）。测试栈数据与门禁数字由实现侧复跑提供。
 - 第一轮 Findings：**0 Blocker / 3 Major / 7 Minor**
   - **M-1** `admin.py` 的漂移兜底分支比对裸名 `"scope_type_valid"`，而 `app/db/base.py:22` 的 `NAMING_CONVENTION["ck"]` 会给模型声明的 CHECK 加 `ck_<table>_` 前缀，库与驱动的真实名字是 `ck_data_scopes_scope_type_valid`（迁移 `779f731db342:171` 以 `op.f(...)` 落库）→ 比对恒真、原样抛出，简报 §13.4/design.md/docstring 承诺的 `SCOPE_CATALOG_OUT_OF_SYNC`(409) 实际是 Starlette 纯文本 500。处置：常量 `_SCOPE_TYPE_CHECK_CONSTRAINT` 写全名并注释前缀来源；**并**新增 `test_data_scope_check_constraint_names_match_the_database` 直接查 `pg_constraint` 钉两个真实约束名（含反证：带 `gen_random_uuid()` 的合法 `class` 行能插入、`scope_id` 为 NULL 的 `class` 行必撞 CHECK），使"名字写错"从不可达分支变成会红的用例。同分支同时确认 `ck_data_scopes_scope_id_required_for_class_course`/`ck_data_scopes_scope_binding` 保持原样抛出、不被吞成 409。
@@ -591,7 +591,7 @@
   - `ruff check app tests` 通过；`mypy --no-incremental app tests` **197 文件 0 错误**（与 CI 冷缓存同口径）；`bandit -r app -x tests` 与 `-r alembic -s B608` 两条 **exit 0**；`uv lock --check` OK；`alembic check` → `No new upgrade operations detected`（head `d7a1c3e5b9f4` 未变）。
   - 前端未触碰（本单元仅后端与文档）。
 - 重点核对项结论：指标层只读 ASGI scope 与代码字面量，不查库、不改写请求/响应，租户隔离与鉴权路径未动；标签不含 tenant_id/user_id/角色名/登录名（有指标族 + 标签名白名单断言）；`METRICS_ENABLED` 默认 false、关闭时 404 且行为与该端点不存在一致；401/403/404/413/500 状态语义未变（既有集成用例全绿）；`recorded` 标志保证状态码只记一次，flush/commit 两层计数由 `flushed` 标志保证一次尝试只记一次；`security.yml` 仅 `contents: read`，Dependabot PR 不依赖 secrets；覆盖率门禁红/绿两侧均已实测。
-- TD 处置：**TD-206**（本 P0 主条目，已完成，commit `29de4ec` + `c8e60e1`）、**TD-214**（Prometheus/Alertmanager/看板 + 多进程 + 反代拒绝，已采纳→M6）、**TD-215**（耗时直方图/SLO，已采纳→M6）、**TD-216**（标签值类型收敛，已延后→M3，附过渡控制）。
+- TD 处置：**TD-206**（本 P0 主条目，已完成，commit `d29e243` + `ba35fb5`）、**TD-214**（Prometheus/Alertmanager/看板 + 多进程 + 反代拒绝，已采纳→M6）、**TD-215**（耗时直方图/SLO，已采纳→M6）、**TD-216**（标签值类型收敛，已延后→M3，附过渡控制）。
 - 第二轮复审（独立只读子智能体，不运行测试/uv/docker）：**可提交，0 Blocker / 0 Major / 8 Minor**；第一轮 13 条 findings 中 11 条判定「已修复」，M6 与 m2/m3 的残余各落为下述 Minor。8 条 Minor 处置：
   - ① 流错误 HELP/类 docstring 把「客户端断开」写成必然可见，而 `StreamingResponse` 可能在内层任务组消化断连、后台任务异常也会落到该计数：HELP 改为「响应头发出后请求以异常或取消结束（客户端断开 / 流生成器 / 后台任务）」，类 docstring 明确「只统计实际向上传播的取消/异常，可见性取决于 ASGI 服务器与响应实现」；不做 `http.disconnect` 探测（只能 monkeypatch 测替身），把 M6 校准项并入 TD-214。
   - ② count-once 缺回归用例（把 `flushed=True` 提前到 append 前仍全绿）：新增 `test_permission_denial_flush_failure_counts_exactly_once` 与 `test_data_scope_denial_flush_failure_counts_exactly_once`，走真实 `append_audit` 的 flush 失败，断言恰好 +1；提前置位会变 2 而红。
@@ -602,7 +602,7 @@
   - ⑦ `is_permission_free_allowed` docstring 仍写三类免鉴权，已含 `/metrics`：补「指标端点」。
   - ⑧ handoff 已知坑编号重复 7：顺延为 8–14。
 - 第二轮整改后复测：两个单元文件 **20 passed / 2.73s**；`ruff check app tests` 通过；`mypy --no-incremental app tests` **197 文件 0 错误**；`bandit`（app / alembic）两条 **exit 0**。生产逻辑仅改指标 HELP 文案与 docstring，无行为变更；全量后端与前端仍按批次规则在批次 A（+TD-187d）末复跑。
-- 结论：**P0 单元可提交**（两轮独立审查：第一轮 1B/7M/5m 全部整改；第二轮 0B/0M/8m 全部处置）。提交：`29de4ec`（门禁/CI/Dependabot）+ `c8e60e1`（指标/埋点/测试/文档）。Dependabot alerts/security updates 已于 2026-10-28 由仓库管理员开启（alerts 经 API 验证）；真实安全 PR 验证与 `pull_request` 触发需推送 main 后完成。本单元随分支提交、不推 main。
+- 结论：**P0 单元可提交**（两轮独立审查：第一轮 1B/7M/5m 全部整改；第二轮 0B/0M/8m 全部处置）。提交：`d29e243`（门禁/CI/Dependabot）+ `ba35fb5`（指标/埋点/测试/文档）。Dependabot alerts/security updates 已于 2026-10-28 由仓库管理员开启（alerts 经 API 验证）；真实安全 PR 验证与 `pull_request` 触发需推送 main 后完成。本单元随分支提交、不推 main。
 
 ### 流程迁移 PR #1：覆盖率门槛 CI 校准（2026-10-28）
 
@@ -615,3 +615,17 @@
   - 第二轮：**1 Major + 5 Minor**。Major：上一轮把两次 run 的差异误判为「本地 `.coverage` 合并/过期，2047–2050 组合不可能」——实际同 commit 两份 run 分别为 407/504 与 408/504，异常路径组合在审计调用抛错/取消时成立；删除「只有 407」「不可能组合」「合并数据」断言，文档统一为「读数漂移，按最低观测取整」。Minor：① P0 简报「恢复当时的 81%」未标注现阈值——补注；② TD-206 阈值未标「原阈值」——补；③ README/handoff 未拆开两次 run 读数、mypy 文件数未拆——改为 407/408 与 198+3；④ 本记录改动文件漏 `scripts/ci.sh`、处置只写 ruff 未写 mypy——已补；⑤ 单测缺 404/504 通过边界、生产阈值 80 与反斜杠路径明细断言——补齐。以上全部整改。
 - 复测（整改后）：`tests/test_check_coverage_unit.py` **4 passed / 0.84s**；`ruff check app tests scripts` 通过；`mypy --no-incremental app tests` **198 文件 0 错误**、`mypy --no-incremental scripts` **3 文件 0 错误**；`check_coverage.py` 对本地 `coverage.json`（auth 409/504）**exit 0**；临时把 auth 阈值抬到 82 → **exit 1** 并打印逐文件明细；`backend.yml` YAML 解析通过、`scripts/ci.sh` `bash -n` 通过。远端 CI 复跑结果待 PR #1 下一次 run 回填，CI 绿后才合入。
 - 结论：**可提交**（两轮独立审查全部整改；待 PR #1 远端 CI 复跑绿后合入）。
+
+### 流程迁移：批次直推 → 每功能点 PR（2026-10-28）
+
+- 设计简报：`docs/design-briefs/pr-workflow-20261028.md`（方案 A 批次直推 / B PR 流 + GitHub Free / C PR 流 + Pro；选 B，C 延后为 TD-219）。
+- 范围：四个 workflow 改为「面向 main 的 PR + main 推送」触发并加 `concurrency`（PR 新推送取消旧运行）；新增 PR 模板；Dependabot Actions 显式 `ignore` major；同步 AGENTS、requirements、handoff、README、tech-debt、P0 简报；回填 PR #1 合并后的实测数字与 rebase 后哈希。
+- 改动文件：`.github/workflows/{backend,evals,frontend,security}.yml`、`.github/pull_request_template.md`（新）、`.github/dependabot.yml`、`AGENTS.md`、`README.md`、`docs/{requirements,handoff,tech-debt,review-log}.md`、`docs/design-briefs/{P0-quality-security-ops,pr-workflow-20261028}.md`。
+- 独立审查（四轮，独立只读子智能体，不运行测试/uv/docker）：
+  - 第一轮：**0 Blocker / 4 Major / 3 Minor**。Major：① 文档引用 rebase 前的旧哈希——全部替换为 main 上树相同的哈希（旧→新用 `git rev-parse <rev>^{tree}` 逐一核对；对照表随本迁移 PR #7 描述留档，仓库内不保留 rebase 前哈希）；②「全量后端 + 前端套件由 PR CI 跑」与路径过滤矛盾——改为「受影响侧的全量套件由 PR 的远端 CI 跑（按路径过滤；纯文档 PR 由 security 兜底）」；③ README 前端数字过期——改为 PR #1 frontend CI 实测 85 单测 + 62 mock E2E，12 全栈 E2E 仍未跑（TD-183/192）；④ 存量 Dependabot Actions major PR（#2–#6）与新 ignore major 策略冲突——合并后关闭、不合并。Minor：① requirements 附录 C 旧模板改为指向仓库模板；② PR 模板补 CI 证据与迁移验证栏；③ handoff 的 security 触发表述改为「Dependabot 安全 PR 待真实安全 PR 验证」。
+  - 第二轮：**0 Blocker / 1 Major / 1 Minor**。Major：README/handoff 把「761 passed/auth 408」与「同 commit 另一次 407」错误绑定——761 的 run 共三份：校准提交（rebase 后为 `ae8fa9c`）的 PR run `40706098169`（auth 408）与 feature 推送 run `40706090163`（auth 407）、`ae8fa9c` 的 main 推送 run `40709052933`（auth 407）；该校准提交自身即同 commit 的 407/408 对，更早的 `8a5a2d3` 两次 run 是另一个同 commit 对（408/407）——改为分列读数并注明 commit 与 run id。Minor：历史 review-log 条目属当时规则、由本节说明取代；本 PR 自身条目在提交前补（即本节）。
+  - 第三轮：**0 Blocker / 1 Major / 0 Minor**。Major：修正稿仍漏了 `8a5a2d3` 同 commit 的 408 run、把 push 407 与 main 407 混在一起——按实测重写为「auth 读数 407–408/504 漂移：`8a5a2d3` 同 commit 两次 run 408/407；校准提交 PR run 408、push 与 main run 407」。
+  - 第四轮：**0 Blocker / 0 Major / 0 Minor，可提交**；逐条核对 run 与覆盖率读数后确认表述不再混绑。
+- 复测：5 个 YAML（4 workflow + Dependabot）PyYAML 解析通过；7 组旧/新哈希用 `git rev-parse <rev>^{tree}` 验证树相同且新哈希在 main；全仓 grep 无旧哈希、无 `feature/**` 活动触发；本迁移不改业务代码，单元/集成/业务场景不新增用例，由 PR #7 的远端 CI 复用现有全套验证触发与并发；合并后验证 main 推送 CI 只跑一次、`security` 仍触发。回滚：revert PR #7 恢复旧触发与旧文档，无数据库迁移。
+- TD 处置：**TD-219**（branch protection 缺口，已延后→升级 GitHub Pro 时；本 PR 不假装机器强制）；**TD-206**（触发口径更新为 PR/main，覆盖率校准事实保留）；**TD-207**（全栈 E2E nightly，目标改为 M2-UI3 剩余点完成后）；**TD-222**（Actions major 不再自动开 PR，改人工评估）；存量 Dependabot Actions major PR 关闭不合并。
+- 结论：**可提交**（四轮独立审查全部整改；工作流实际触发由 PR #7 的 CI 与合并后 main 推送验证，结果随 handoff 更新）。

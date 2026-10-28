@@ -29,15 +29,16 @@
 | M2 | M2-ORG06 入学年份与学年流转（班级模型修订） | ✅ 完成（独立审查两轮：第一轮 1M/5m 修复、第二轮 0B/0M PASS；迁移 `b9d3f7c1e5a9` classes 模型修订 + 流转批次表；简报 `docs/design-briefs/M2-ORG06-academic-year.md`） |
 | M2 | M2-UI1 B 端管理页面（人员/受控查看/班级课程/部门树/导入/学年流转 + TD-141） | ✅ 完成（远端 CI frontend #40231010987 / security #40231010964 / backend #40229631514 success；3 条全栈 E2E 因本机 8000 端口被占未跑，登记 TD-183；简报 `docs/design-briefs/M2-UI1-b-end-pages.md`） |
 | M2 | M2-UI2 角色权限配置后台（TD-150 `defaults_applied` + TD-137 角色↔权限接口/页 + TD-143 重置出厂 + TD-126 MFA 重置；权限目录 59→60 码） | ✅ 完成（本地门禁全绿：后端 661 passed / 前端 75 单测 + 57 mock E2E + build / ruff + mypy + alembic check + bandit×2；两轮独立审查 0B/2M/6m → 复审 PASS 0B/0M/6m，见 `docs/review-log.md`；远端 CI backend #40316861186 / frontend #40316861247 / security #40318461683 success（security 首跑被 gitleaks 对测试种子口令误报，按 TD-052 精确白名单修复后重跑绿）；UI 侧真实后端全栈 E2E 因本机 8000 端口被占未跑，登记 TD-192；简报 `docs/design-briefs/M2-UI2-rbac-admin.md`，迁移 head `c3f7a9d1e5b2`） |
-| M2 | M2-UI3 自定义角色 / 多角色绑定 / 权限账号 | 🔄 进行中（用户 2026-10-26 决策 D2 从 M2-UI2 裁出；简报 `docs/design-briefs/M2-UI3-custom-roles-accounts.md`，§11 六项决策已逐条拍板）。**第一批已交付**：TD-187a（`roles` 两条 CHECK + 迁移 `d7a1c3e5b9f4` + 新码 `school.role.delete`，目录 60→61）+ TD-191 打断层（`app/rbac/self_grant.py` 判据 + `PUT /school/roles/{id}/permissions` 接线：结果集触达本人且净增敏感码须 `self_grant_ack`+理由，超管免打断不免留痕，`school.role.self_grant` 放行与打断都写；前端确认条）——本地门禁全绿（后端 687 passed / ruff+mypy187+bandit×2+alembic check 无漂移 / 前端 lint+format+typecheck+31 单测+14 mock E2E），独立审查 0B/1M/5m（Major=gitleaks 漏放行接线口令已补、Minor 注释与测试 uuid 已修，其余 TD-193~197 处置），见 `docs/review-log.md`。**第二批已交付（commit `15037d3` 之后，本地门禁全绿、随 PR #1 推送并跑远端 CI）**：TD-187b 自定义角色创建/删除——`POST /school/roles` + `POST /school/roles/{id}/delete/{preview,}`（删除走独立码 `school.role.delete`，逐字确认 + 理由 ≥10 + 版本 CAS，CASCADE 前把码集与受影响用户数快照进 `school.role.deleted`；自定义角色翻成可编辑/可删除/**不可重置出厂** `ROLE_DEFAULTS_UNAVAILABLE`，前端重置入口改跟 `is_system` 走）；三轮独立审查（0B/2M/9m：M-1 创建路径未接自扩权守卫**经用户 2026-10-27 裁定改判据口径**、M-1(三轮) 审查记录与 m-2 落点补齐；Minor 含并发兜底只认 `uq_roles_tenant_id_code`、删除返回被删行版本号而非 `+1`、`name` 全空格拦截、留痕口径与格式校验层数两处文档纠偏、跨租复制源留 `copy_from_role_id`），处置见 `docs/review-log.md` 与 TD-194/197/198/199/200/201；复测后端 **706 passed**（398 单元/145 集成/163 业务场景）+ ruff/mypy190/bandit×2 + 前端 lint/typecheck/format/31 单测/`admin-roles` E2E 15 passed。**第三批已交付（本地 commit，随 PR #1 推送；首跑 backend 因 auth 覆盖率红，校准后待重跑）**：TD-187c 角色级数据范围编辑——`GET /school/roles/{id}/scopes`（服务端下发 `editable`）、`POST …/scopes/preview`（差异 + 持有人数 + `retained_non_editable` + `empties_scope`，只读不审计）、`PUT …/scopes`（判据顺序：`_require_tenant` → 未知类型 → 行锁取角色 → 可编辑 → 不可手工授 → 版本 CAS → 范围版自扩权守卫 → `version+1` → **窄删除**（只碰 `school`/`self`）→ `unnest` 插入 → `school.role.scopes.updated`）；可编辑集 `{school,self}`，手工授 `class`/`course` 一律拒授**并留安全审计**（真原因是本端点没有 `scope_id` 入参通道，写下去是缺 id 的脏行、解析层 `ValueError` 会让该角色每个持有人 500；`course` 另本期不贡献可见性）；敏感范围 `SENSITIVE_SCOPE_TYPES={school}` 与权限侧共用同一判据内核（`kind="scope"` 只改文案与审计 metadata），空清单合法并由预览提示"N 名持有人将看不到任何数据"；**重置出厂是这条判据的第 4 个入口、本点未接**（可达路径与收口时点见 TD-194），注册 `school_super_admin` 免打断不免留痕。三轮独立审查（0B/5M/14m，全部整改：约束名写错的死代码分支、对运营错误的拒授理由、`reset_role` docstring 与文档相反、接口层残留假陈述、范围并集查询副本无登记/无用例），处置见 `docs/review-log.md` 与 TD-194/195/202/203/204/205。本点复测：本点四文件 **51 passed**（23 单元 / 18 集成 / 5 库层不变量 / 5 业务场景）、RBAC 受影响子集 **192 passed**、ruff + mypy（192 文件 0 错误）+ bandit（app/alembic 两条）+ `alembic check` 无漂移；全量后端与前端套件由 PR 的远端 CI 跑。**待做**：TD-187d 用户↔多角色绑定（含自绑禁令与守卫接线，**并须一并收口 TD-194 三条前置与 TD-199**）、TD-187e 权限账号启停、TD-187f 业务场景/集成测试补全（含 auth 分支覆盖率补测：抬回 ≥81、目标 82，TD-221）、TD-187g 前端角色/权限账号页（含 TD-198 `name` CHECK、TD-200 `resettable` 下发） |
-| 质量/安全/运维 P0（跨里程碑） | 关键包分支覆盖率门槛 + `security` 覆盖功能分支/PR + Dependabot + `/metrics` 与告警规则 | ✅ 完成（两轮独立审查：1 Blocker / 7 Major / 5 Minor + 0 Blocker / 0 Major / 8 Minor 全部处置，commit `29de4ec` + `c8e60e1`；本地全量后端 755 passed/1573s（第二轮新增 2 条用例后未重跑）；CI 首跑同 commit 两次 run 均 757 passed，auth 407/504 与 408/504（读数漂移待 TD-221/187f 定位），四包阈值按 CI 最低观测取整 73/80/81/66 且反证会红；`METRICS_ENABLED` 默认 false；简报 `docs/design-briefs/P0-quality-security-ops.md` §7，详见 `docs/review-log.md`）。Dependabot alerts/security updates 已于 2026-10-28 开启（alerts 经 API 验证）；真实安全 PR 与 `pull_request` 触发需推送 main 后再验证。不含 TD-214（Prometheus/Alertmanager/多进程/反代拒绝，M6） |
+| M2 | M2-UI3 自定义角色 / 多角色绑定 / 权限账号 | 🔄 进行中（用户 2026-10-26 决策 D2 从 M2-UI2 裁出；简报 `docs/design-briefs/M2-UI3-custom-roles-accounts.md`，§11 六项决策已逐条拍板）。**第一批已交付**：TD-187a（`roles` 两条 CHECK + 迁移 `d7a1c3e5b9f4` + 新码 `school.role.delete`，目录 60→61）+ TD-191 打断层（`app/rbac/self_grant.py` 判据 + `PUT /school/roles/{id}/permissions` 接线：结果集触达本人且净增敏感码须 `self_grant_ack`+理由，超管免打断不免留痕，`school.role.self_grant` 放行与打断都写；前端确认条）——本地门禁全绿（后端 687 passed / ruff+mypy187+bandit×2+alembic check 无漂移 / 前端 lint+format+typecheck+31 单测+14 mock E2E），独立审查 0B/1M/5m（Major=gitleaks 漏放行接线口令已补、Minor 注释与测试 uuid 已修，其余 TD-193~197 处置），见 `docs/review-log.md`。**第二批已交付（commit `f45a64a` 之后，本地门禁全绿、已随 PR #1 合入 main）**：TD-187b 自定义角色创建/删除——`POST /school/roles` + `POST /school/roles/{id}/delete/{preview,}`（删除走独立码 `school.role.delete`，逐字确认 + 理由 ≥10 + 版本 CAS，CASCADE 前把码集与受影响用户数快照进 `school.role.deleted`；自定义角色翻成可编辑/可删除/**不可重置出厂** `ROLE_DEFAULTS_UNAVAILABLE`，前端重置入口改跟 `is_system` 走）；三轮独立审查（0B/2M/9m：M-1 创建路径未接自扩权守卫**经用户 2026-10-27 裁定改判据口径**、M-1(三轮) 审查记录与 m-2 落点补齐；Minor 含并发兜底只认 `uq_roles_tenant_id_code`、删除返回被删行版本号而非 `+1`、`name` 全空格拦截、留痕口径与格式校验层数两处文档纠偏、跨租复制源留 `copy_from_role_id`），处置见 `docs/review-log.md` 与 TD-194/197/198/199/200/201；复测后端 **706 passed**（398 单元/145 集成/163 业务场景）+ ruff/mypy190/bandit×2 + 前端 lint/typecheck/format/31 单测/`admin-roles` E2E 15 passed。**第三批已交付（随 PR #1 合入 main；首跑 backend 曾因 auth 覆盖率红，校准后复跑绿）**：TD-187c 角色级数据范围编辑——`GET /school/roles/{id}/scopes`（服务端下发 `editable`）、`POST …/scopes/preview`（差异 + 持有人数 + `retained_non_editable` + `empties_scope`，只读不审计）、`PUT …/scopes`（判据顺序：`_require_tenant` → 未知类型 → 行锁取角色 → 可编辑 → 不可手工授 → 版本 CAS → 范围版自扩权守卫 → `version+1` → **窄删除**（只碰 `school`/`self`）→ `unnest` 插入 → `school.role.scopes.updated`）；可编辑集 `{school,self}`，手工授 `class`/`course` 一律拒授**并留安全审计**（真原因是本端点没有 `scope_id` 入参通道，写下去是缺 id 的脏行、解析层 `ValueError` 会让该角色每个持有人 500；`course` 另本期不贡献可见性）；敏感范围 `SENSITIVE_SCOPE_TYPES={school}` 与权限侧共用同一判据内核（`kind="scope"` 只改文案与审计 metadata），空清单合法并由预览提示"N 名持有人将看不到任何数据"；**重置出厂是这条判据的第 4 个入口、本点未接**（可达路径与收口时点见 TD-194），注册 `school_super_admin` 免打断不免留痕。三轮独立审查（0B/5M/14m，全部整改：约束名写错的死代码分支、对运营错误的拒授理由、`reset_role` docstring 与文档相反、接口层残留假陈述、范围并集查询副本无登记/无用例），处置见 `docs/review-log.md` 与 TD-194/195/202/203/204/205。本点复测：本点四文件 **51 passed**（23 单元 / 18 集成 / 5 库层不变量 / 5 业务场景）、RBAC 受影响子集 **192 passed**、ruff + mypy（192 文件 0 错误）+ bandit（app/alembic 两条）+ `alembic check` 无漂移；受影响侧的全量套件由 PR 的远端 CI 跑。**待做**：TD-187d 用户↔多角色绑定（含自绑禁令与守卫接线，**并须一并收口 TD-194 三条前置与 TD-199**）、TD-187e 权限账号启停、TD-187f 业务场景/集成测试补全（含 auth 分支覆盖率补测：抬回 ≥81、目标 82，TD-221）、TD-187g 前端角色/权限账号页（含 TD-198 `name` CHECK、TD-200 `resettable` 下发） |
+| 质量/安全/运维 P0（跨里程碑） | 关键包分支覆盖率门槛 + `security` 覆盖 PR/main + Dependabot + `/metrics` 与告警规则 | ✅ 完成（两轮独立审查：1 Blocker / 7 Major / 5 Minor + 0 Blocker / 0 Major / 8 Minor 全部处置，commit `d29e243` + `ba35fb5`；覆盖率校准 `ae8fa9c`（TD-221）；本地全量后端 755 passed/1573s（第二轮新增 2 条用例后未重跑）；PR #1 远端 CI **761 passed/745.95s**，auth 读数在 407–408/504 间漂移（`8a5a2d3` 同一 commit 两次 run 为 408/407；校准提交 PR run 408、push 与 main run 407；TD-221/187f 跟进定位），四包阈值按 CI 最低观测取整 73/80/81/66 且反证会红；`METRICS_ENABLED` 默认 false；简报 `docs/design-briefs/P0-quality-security-ops.md` §7，详见 `docs/review-log.md`）。Dependabot alerts/security updates 已于 2026-10-28 开启（alerts 经 API 验证）；Dependabot 安全 PR 的 `pull_request` 触发待真实安全 PR 出现后验证。不含 TD-214（Prometheus/Alertmanager/多进程/反代拒绝，M6） |
 | M3/M4 | 知识库闭环 / AI 与 C 端 | ⏳ 未开始（已含 SC-01 新增 KB-09/KB-10、AI-10） |
 
 - **建议的下一步顺序**：M2-UI3（自定义角色 / 多角色绑定 / 权限账号，TD-187/191；用户决策 D2 从 M2-UI2 裁出）→ M3 知识库闭环 → M4 AI 与 C 端。全栈 E2E 复跑：`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6（M2-UI1/M2-UI2 新增用例见 TD-183/192；本机 8000 端口被另一项目容器占用时不可强杀）。
 - **数据库迁移 head**：`d7a1c3e5b9f4`（M2-UI3 第一批：`roles` 加 `ck_roles_code_format_valid` + `ck_roles_builtin_code_is_system` 两条 CHECK、权限目录新增 `school.role.delete`）；上一 head 为 `c3f7a9d1e5b2`（M2-UI2：`defaults_applied` + `roles.version` 乐观锁 + `school.personnel.mfa.reset`）；`alembic check` 应无漂移。
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
-- 远端 CI：4 条工作流（backend / frontend / evals / security）。前三条按目录路径过滤触发；`security` 在推送 `main` 与 `feature/**`、面向 `main` 的 PR（含 Dependabot）、每周一 03:00 定时运行；**CI 未绿不得视为交付批次完成**（推送粒度见 AGENTS.md §7）。
+- 远端 CI：4 条工作流（backend / frontend / evals / security）。backend/frontend/evals 在面向 `main` 的 PR 与 `main` 推送时按目录路径过滤触发；`security` 在面向 `main` 的 PR、`main` 推送与每周一 03:00 定时运行；同一 PR 的新推送会取消旧运行。**PR 的 CI 未全绿不得合并**（工作流见 AGENTS.md §7）。
+- **工作流迁移（2026-10-28，随流程迁移 PR 合并生效）**：从「批次末直推 main」改为「每个功能点一个 PR，CI 绿 + 独立审查通过后合并」。私有库 + GitHub Free 暂不能开分支保护，required checks 与禁止直推只能靠纪律执行（TD-219）；升级 GitHub Pro 后补机器强制。
 
 ---
 
@@ -115,25 +116,27 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 
 ---
 
-## 3. 工作流门禁（每个功能点都必须走完，顺序不可省；标「批次末」的两处按交付批次执行）
+## 3. 工作流门禁（每个功能点都必须走完，顺序不可省；远端 CI 是 PR 的合并门禁）
 
 1. **先写设计简报**：`docs/design-briefs/<ID>.md`，含目标与验收编号、**≥2 个候选方案**、选择结论与理由、实现顺序（数据→接口→界面）、TDD 红→绿清单、测试策略、预判技术债、高风险确认；**高风险功能（认证/租户隔离/权限/状态机/删除/发布/加密/AI 护栏）必须等用户确认后再编码**。
 2. **TDD 实现**：先写失败测试，再实现；分层跑：单元 → 集成（真实 PG/Redis/MinIO/Qdrant，外部 LLM/嵌入/重排 mock）→ **业务场景**（从 Given/When/Then 跑完整链路，断言业务输出与副作用，不只看 HTTP 200）。
-3. **独立代码审查**：**另起一个独立上下文/子 agent** 审查 `git diff --staged`，输出 Blocker/Major/Minor；安全、租户隔离、权限、状态机、数据一致性、AI 护栏、Langfuse 脱敏问题一律按 Blocker/Major。
-4. **修复 + 复测（每点）**：修完重跑"受影响用例 + 本功能点的业务场景链路"；**全量后端 + 前端全量套件（`lint`/`typecheck`/`format:check`/全部单测/Playwright）只在交付批次末跑一次**（口径见 AGENTS.md §1.6：**功能点**＝单个 TD/子能力，**交付批次**＝一次可推 main 的一组相邻 TD）。实质变更要再复审，直到无 Blocker/Major。**审查频次不随全量降频**——每点一轮独立审查是硬门禁。
-5. **提交（每点）→ 推送 + 远端 CI 绿（批次末）**：
+3. **独立代码审查**：**另起一个独立上下文/子 agent** 审查 `git diff --staged`，输出 Blocker/Major/Minor；安全、租户隔离、权限、状态机、数据一致性、AI 护栏、Langfuse 脱敏问题一律按 Blocker/Major。审查结论要贴到 PR 描述/评论。
+4. **修复 + 复测（每点）**：修完重跑"受影响用例 + 本功能点的业务场景链路"；**受影响侧的全量套件由 PR 的远端 CI 跑**（backend/frontend/evals 按路径过滤，security 每个 PR 都跑），本地不重复跑全量（排查问题时除外）。实质变更要再复审，直到无 Blocker/Major。**每个 PR 一轮独立审查是硬门禁**。
+5. **提交 → 推送分支 → 开 PR → CI 全绿 → 合并（每点）**：
    ```bash
    # 每个功能点
    git add <明确路径...>            # 禁止 git add . / -A
    git status && git diff --staged  # 检查密钥/产物/调试代码/大文件
    git commit -m "feat(<scope>): ..."   # Conventional Commits
-   # 交付批次末（全量门禁通过 + 整批审查结论落 review-log 后）
-   git branch -f main feature/M0-foundation && git push origin main
-   gh run list --limit 4 && gh run view <id> --log-failed   # 必须看到 success
+   git push -u origin <branch>
+   gh pr create --base main --head <branch> \
+     --title "feat(<scope>): ..." --body-file <pr-body.md>
+   gh pr checks <n> --watch         # 必须全绿
+   gh pr merge <n> --rebase --delete-branch
    ```
-   批次内未推 main 的 commit 只算"该点已落地"，不算"该批次已交付"；批次中途不许把未过审的点混进推送。
-   禁止：`--force`、`reset --hard`、`clean -fd`、直接 push 共享分支（本项目 main 只接受来自功能分支的快进合并）。
-6. **汇报**：按 `AGENTS.md` §9 的 7 段格式（实现了什么 / 文件清单 / 测试与业务场景对照 / 审查 findings 与修复复测 / Spec 完成度与下一步 / Git 状态 / 为什么这样写与更好的做法）。
+   PR 描述按 `.github/pull_request_template.md` 填写；合并后 `main` 的 push CI 也必须全绿，失败按 hotfix 处理。
+   禁止：`--force`、`reset --hard`、`clean -fd`、直接 push `main`（分支保护未开时靠纪律，见 TD-219）。
+6. **汇报**：按 `AGENTS.md` §9 的 8 段格式（实现了什么 / 文件清单 / 测试与业务场景对照 / 审查 findings 与修复复测 / Spec 完成度与下一步 / Git 状态 / 为什么这样写与更好的做法 / 规范差距）。
 7. **技术债闭环**：任何"更好的做法"必须登记 `docs/tech-debt.md` 并给处置（已完成/已采纳/已延后/已拒绝）；里程碑边界要评审台账。
 8. **回写文档**：更新 `docs/design-briefs/<ID>.md` 实现结果、`docs/review-log.md`、`docs/tech-debt.md`、相应设计/规格章节，以及本文件 §1 与 README 的「当前状态」。
 
@@ -208,9 +211,9 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 铁律（不要偏离）：
 - 先设计简报（≥2 候选方案 + 风险 + 技术债），高风险功能必须等我确认后再编码；
 - TDD：先写失败测试，分层跑单元/集成/业务场景（业务场景断言数据库状态、审计、状态机、对象存储、Qdrant、AI 引用/拒答等业务输出，不能只断言 HTTP 200）；
-- 每个功能点完成后：跑受影响用例 + 本点业务场景链路 → 用**独立上下文/子 agent** 审查 staged diff（输出 Blocker/Major/Minor）→ 修复并复测 → 复审通过 → 提交（明确路径，禁止 git add .）；**跑全量后端/前端套件、快进合并 main 并推送、用 gh 确认远端 CI 全绿，这三件事在交付批次末做一次**（不是每个 TD 一次）；
-- 每个功能点完成后按 AGENTS.md §9 的 7 段格式汇报，并回写 docs/（简报实现结果、review-log、tech-debt、README「当前状态」、handoff 状态表）；
-- 不得提交密钥/凭证；不得 force push / reset --hard；生产开关不得默认放行。
+- 每个功能点完成后：跑受影响用例 + 本点业务场景链路 → 用**独立上下文/子 agent** 审查 staged diff（输出 Blocker/Major/Minor）→ 修复并复测 → 复审通过 → 提交（明确路径，禁止 git add .）→ **推送功能分支、开 PR、等远端 CI 全绿、合并并删分支**；全量后端/前端套件由 PR 的远端 CI 按路径过滤跑，本地不重复；
+- 每个功能点完成后按 AGENTS.md §9 的 8 段格式汇报，并回写 docs/（简报实现结果、review-log、tech-debt、README「当前状态」、handoff 状态表）；
+- 不得提交密钥/凭证；不得 force push / reset --hard；不得直推 main；生产开关不得默认放行。
 
 环境提示：跑测试或工具链前先 `export NO_PROXY="127.0.0.1,localhost,::1,*"`（本机代理会劫持 127.0.0.1）；
 起测试栈 `bash scripts/test-stack.sh up` 并 `eval "$(bash scripts/test-stack.sh env)"`；一键 CI `bash scripts/ci.sh`。
@@ -237,10 +240,11 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 ## 7. 交接检查清单（交接前逐条确认）
 
 - [ ] 工作树干净（`git status`），无未提交改动、无临时文件。
-- [ ] `main` 已推送且**触发的** CI 工作流全绿（未触发的按路径过滤说明原因）。
+- [ ] 功能点 PR 已合并，合并后 `main` 的 push CI 全绿（未触发的按路径过滤说明原因）。
+- [ ] 分支保护：当前因私有库 + GitHub Free 无法开启（TD-219）；升级 Pro 后补 required checks，并做一次"直推被拒"验证。
 - [ ] `docs/handoff.md` §1 状态表与 README「当前状态」是最新的。
 - [ ] 未处置技术债清单已读（`docs/tech-debt.md`），知道哪些条目目标在下一个里程碑。
 - [ ] 待确认决策已列明（当前：无阻塞；M1-C2 四项细节已确认）。
 - [x] GitHub 仓库 Settings 已开启 **Dependabot alerts** 与 **security updates**（2026-10-28；alerts 经 API `vulnerability-alerts` 返回 204 验证）。
-- [ ] 已用一次真实安全 PR 验证 `security` 工作流随 PR 运行（需 main 先带上工作流；`.github/dependabot.yml` 也要在 main 才驱动 Actions 周更）。
+- [ ] 已用一次真实安全 PR 验证 `security` 工作流随 PR 运行（工作流与 `.github/dependabot.yml` 已在 main；`security` 已随 PR #1 与 main 推送实测绿，待 Dependabot 安全 PR 出现后验证其 `pull_request` 触发）。
 - [ ] 本机环境可复现：测试栈起来、后端/前端测试全绿、`scripts/ci.sh` 全绿。

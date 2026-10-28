@@ -1,19 +1,24 @@
 name: frontend
 
 # 前端质量门禁：ESLint / Prettier / vue-tsc / Vitest / 构建 / Playwright / 依赖审计。
-# 触发范围（省 Actions 额度）：只改前端或本工作流时运行（e2e 另见 paths 说明）。
+# 触发范围：面向 main 的 PR 与 main 推送，且只改前端或本工作流时运行（省 Actions 额度；e2e 另见 paths 说明）。
 
 on:
   push:
-    branches: [main, "feature/**"]
+    branches: [main]
     paths:
       - "frontend/**"
       - ".github/workflows/frontend.yml"
   pull_request:
+    branches: [main]
     paths:
       - "frontend/**"
       - ".github/workflows/frontend.yml"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   frontend:

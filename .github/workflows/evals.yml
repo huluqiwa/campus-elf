@@ -5,17 +5,22 @@ name: evals
 
 on:
   push:
-    branches: [main, "feature/**"]
+    branches: [main]
     paths:
       - "evals/**"
       - "scripts/check_eval_cases.py"
       - ".github/workflows/evals.yml"
   pull_request:
+    branches: [main]
     paths:
       - "evals/**"
       - "scripts/check_eval_cases.py"
       - ".github/workflows/evals.yml"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   evals:
