@@ -626,6 +626,7 @@
   - 第二轮：**0 Blocker / 1 Major / 1 Minor**。Major：README/handoff 把「761 passed/auth 408」与「同 commit 另一次 407」错误绑定——761 的 run 共三份：校准提交（rebase 后为 `ae8fa9c`）的 PR run `40706098169`（auth 408）与 feature 推送 run `40706090163`（auth 407）、`ae8fa9c` 的 main 推送 run `40709052933`（auth 407）；该校准提交自身即同 commit 的 407/408 对，更早的 `8a5a2d3` 两次 run 是另一个同 commit 对（408/407）——改为分列读数并注明 commit 与 run id。Minor：历史 review-log 条目属当时规则、由本节说明取代；本 PR 自身条目在提交前补（即本节）。
   - 第三轮：**0 Blocker / 1 Major / 0 Minor**。Major：修正稿仍漏了 `8a5a2d3` 同 commit 的 408 run、把 push 407 与 main 407 混在一起——按实测重写为「auth 读数 407–408/504 漂移：`8a5a2d3` 同 commit 两次 run 408/407；校准提交 PR run 408、push 与 main run 407」。
   - 第四轮：**0 Blocker / 0 Major / 0 Minor，可提交**；逐条核对 run 与覆盖率读数后确认表述不再混绑。
+  - 第五轮（提交前微审，针对本节与设计简报）：**0 Blocker / 2 Major / 3 Minor**，全部整改。Major：① 迁移 PR 编号误写为 #2（#2–#6 已是 Dependabot PR）——统一为 #7；② 761 的 run 只记两次——补为三份（校准提交 PR 408 / feature 推送 407 / main 推送 407）并注明该校准提交自身即同 commit 的 407/408 对。Minor：① 旧→新对照表原指向未创建的 PR——改为随 PR #7 描述留档；② Actions major 被 ignore 却无 TD——登记 TD-222；③ 简报「每个 PR 至少跑一侧全量」与纯文档 PR 矛盾、触发列表漏 `workflow_dispatch`、测试策略缺 E2E/评估/性能 N/A——逐条修正。
 - 复测：5 个 YAML（4 workflow + Dependabot）PyYAML 解析通过；7 组旧/新哈希用 `git rev-parse <rev>^{tree}` 验证树相同且新哈希在 main；全仓 grep 无旧哈希、无 `feature/**` 活动触发；本迁移不改业务代码，单元/集成/业务场景不新增用例，由 PR #7 的远端 CI 复用现有全套验证触发与并发；合并后验证 main 推送 CI 只跑一次、`security` 仍触发。回滚：revert PR #7 恢复旧触发与旧文档，无数据库迁移。
 - TD 处置：**TD-219**（branch protection 缺口，已延后→升级 GitHub Pro 时；本 PR 不假装机器强制）；**TD-206**（触发口径更新为 PR/main，覆盖率校准事实保留）；**TD-207**（全栈 E2E nightly，目标改为 M2-UI3 剩余点完成后）；**TD-222**（Actions major 不再自动开 PR，改人工评估）；存量 Dependabot Actions major PR 关闭不合并。
-- 结论：**可提交**（四轮独立审查全部整改；工作流实际触发由 PR #7 的 CI 与合并后 main 推送验证，结果随 handoff 更新）。
+- 结论：**可提交**（五轮独立审查全部整改；工作流实际触发由 PR #7 的 CI 与合并后 main 推送验证，结果随 handoff 更新）。
