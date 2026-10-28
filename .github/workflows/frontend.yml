@@ -97,7 +97,7 @@ jobs:
 
       - name: 上传失败产物（截图/trace 落在 test-results/）
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-test-results
           path: frontend/test-results/
