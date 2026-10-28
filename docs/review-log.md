@@ -602,4 +602,4 @@
   - ⑦ `is_permission_free_allowed` docstring 仍写三类免鉴权，已含 `/metrics`：补「指标端点」。
   - ⑧ handoff 已知坑编号重复 7：顺延为 8–14。
 - 第二轮整改后复测：两个单元文件 **20 passed / 2.73s**；`ruff check app tests` 通过；`mypy --no-incremental app tests` **197 文件 0 错误**；`bandit`（app / alembic）两条 **exit 0**。生产逻辑仅改指标 HELP 文案与 docstring，无行为变更；全量后端与前端仍按批次规则在批次 A（+TD-187d）末复跑。
-- 结论：**P0 单元可提交**（两轮独立审查：第一轮 1B/7M/5m 全部整改；第二轮 0B/0M/8m 全部处置）。提交：`29de4ec`（门禁/CI/Dependabot）+ `c8e60e1`（指标/埋点/测试/文档）。唯一不由代码完成的前置是 GitHub 仓库 Settings 开启 Dependabot alerts/security updates 并用真实安全 PR 验证（已写入 handoff §7 与本轮汇报）；`pull_request` 触发需推送远端后生效。本单元随分支提交、不推 main。
+- 结论：**P0 单元可提交**（两轮独立审查：第一轮 1B/7M/5m 全部整改；第二轮 0B/0M/8m 全部处置）。提交：`29de4ec`（门禁/CI/Dependabot）+ `c8e60e1`（指标/埋点/测试/文档）。Dependabot alerts/security updates 已于 2026-10-28 由仓库管理员开启（alerts 经 API 验证）；真实安全 PR 验证与 `pull_request` 触发需推送 main 后完成。本单元随分支提交、不推 main。

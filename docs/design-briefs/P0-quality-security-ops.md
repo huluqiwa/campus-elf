@@ -68,9 +68,10 @@ TD-207 全栈 E2E 进 CI/nightly（批次 B 末）、TD-208 变异测试抽查�
 - Dependabot：包生态只开安全更新、Actions 周更分组 minor/patch；`security` 工作流补
   `pull_request`（main）与 `permissions: contents: read`；AGENTS §7 写明 Dependabot 自动创建的
   依赖 PR（安全更新 + Actions 周更）是「无人工 PR」的唯一例外。
-- 未由代码完成、需仓库管理员操作：在 GitHub 仓库 Settings 打开 **Dependabot alerts** 与
-  **security updates**，并用一次真实安全 PR 验证 `security` 工作流随 PR 运行；已写入
-  `docs/handoff.md` §7 交接清单。`pull_request` 触发需推送远端后才生效。
+- 仓库管理员操作：**Dependabot alerts** 与 **security updates** 已于 2026-10-28 开启（alerts 经
+  API 验证）。仍待完成的是「真实安全 PR 验证 `security` 工作流随 PR 运行」：需先把本分支
+  推送到 main（批次 A 末），`.github/dependabot.yml` 也需在默认分支才驱动 Actions 周更。
+  交接清单见 `docs/handoff.md` §7。
 - 审查联动：两轮独立审查 1 Blocker / 7 Major / 5 Minor + 0 Blocker / 0 Major / 8 Minor 全部处置
   （第二轮含 count-once 回归用例 2 条、标签名白名单断言、用例数与 README/AGENTS/handoff 事实更正）；
   新增 TD-216（标签值收敛，已延后→M3），TD-214 增补多进程、反代拒绝与流错误可见性校准，
