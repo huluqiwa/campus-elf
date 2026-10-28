@@ -26,7 +26,7 @@ jobs:
   secrets-and-deps:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # gitleaks 需要完整历史
 

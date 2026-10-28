@@ -25,7 +25,7 @@ jobs:
         working-directory: evals
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 uv
         uses: astral-sh/setup-uv@v5
