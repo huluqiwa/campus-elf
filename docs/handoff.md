@@ -38,7 +38,7 @@
 - 最近提交：`main` 已含 M1-D2 MFA、M1-E1 鉴权内核与 M1-E2 数据范围/职责分离交付（不写具体哈希，避免每次提交后自相矛盾）；工作树应保持干净。
 - 远端：`origin = git@github.com:huluqiwa/campus-elf.git`（SSH；本机 github.com 的 HTTPS 被重置，SSH 的 22/443 可用）。
 - 远端 CI：4 条工作流（backend / frontend / evals / security）。backend/frontend/evals 在面向 `main` 的 PR 与 `main` 推送时按目录路径过滤触发；`security` 在面向 `main` 的 PR、`main` 推送与每周一 03:00 定时运行；同一 PR 的新推送会取消旧运行。**PR 的 CI 未全绿不得合并**（工作流见 AGENTS.md §7）。
-- **工作流迁移（2026-10-28，随流程迁移 PR 合并生效）**：从「批次末直推 main」改为「每个功能点一个 PR，CI 绿 + 独立审查通过后合并」。私有库 + GitHub Free 暂不能开分支保护，required checks 与禁止直推只能靠纪律执行（TD-219）；升级 GitHub Pro 后补机器强制。
+- **工作流迁移（2026-10-28 决策，PR #7 于 2026-10-28 23:55（+08:00）合入，合入提交 `5966bbf`）**：从「批次末直推 main」改为「每个功能点一个 PR，CI 绿 + 独立审查通过后合并」。PR #7 CI：backend 761 passed/682.30s（auth 407/504）、frontend 85 单测 + 62 mock E2E、evals 2 passed + 用例集校验、security 绿；合并后 main 推送四条工作流全绿，feature 分支 push 事件不再触发 run；存量 Actions major PR #2–#6 已由 Dependabot 自动关闭（2026-10-28T15:55:53Z，未合并）。私有库 + GitHub Free 暂不能开分支保护，required checks 与禁止直推只能靠纪律执行（TD-219）；升级 GitHub Pro 后补机器强制。
 
 ---
 
@@ -245,6 +245,6 @@ env | grep -i proxy | sed 's/=.*/=<set>/'   # 是否有系统代理（会劫持 
 - [ ] `docs/handoff.md` §1 状态表与 README「当前状态」是最新的。
 - [ ] 未处置技术债清单已读（`docs/tech-debt.md`），知道哪些条目目标在下一个里程碑。
 - [ ] 待确认决策已列明（当前：无阻塞；M1-C2 四项细节已确认）。
-- [x] GitHub 仓库 Settings 已开启 **Dependabot alerts** 与 **security updates**（2026-10-28；alerts 经 API `vulnerability-alerts` 返回 204 验证）。
-- [ ] 已用一次真实安全 PR 验证 `security` 工作流随 PR 运行（工作流与 `.github/dependabot.yml` 已在 main；`security` 已随 PR #1 与 main 推送实测绿，待 Dependabot 安全 PR 出现后验证其 `pull_request` 触发）。
+- 仓库级：Dependabot alerts 与 security updates 已开启（2026-10-28；alerts 经 API `vulnerability-alerts` 返回 204 验证）。
+- [ ] 待用一次真实安全 PR 验证 `security` 工作流随 PR 运行（工作流与 `.github/dependabot.yml` 已在 main；`security` 已随 PR #1、PR #7 与 main 推送实测绿，待 Dependabot 安全 PR 出现后验证其 `pull_request` 触发）。
 - [ ] 本机环境可复现：测试栈起来、后端/前端测试全绿、`scripts/ci.sh` 全绿。
