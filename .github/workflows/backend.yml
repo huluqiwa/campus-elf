@@ -64,8 +64,18 @@ jobs:
           uv run ruff check app tests
           uv run mypy app tests
 
-      - name: 测试（单元 + 集成 + 业务场景）
-        run: uv run pytest
+      - name: 测试（单元 + 集成 + 业务场景 + 关键包分支覆盖率）
+        # `--cov-fail-under` 只比较 TOTAL，会把四个关键包的平均值当门槛、掩盖单包倒退；
+        # 因此只产出 coverage.json，逐包阈值由下一步脚本检查。
+        run: |
+          uv run pytest \
+            --cov=app.rbac --cov=app.auth --cov=app.tenant --cov=app.audit \
+            --cov-branch \
+            --cov-report=json:coverage.json \
+            --cov-report=term-missing:skip-covered
+
+      - name: 关键包分支覆盖率门槛
+        run: uv run python scripts/check_coverage.py
 
       - name: 测试栈日志（失败时）
         if: failure()

@@ -84,7 +84,9 @@ if has_cmd uv; then
   # 与 CI 一致：缺少测试服务时硬失败，而不是静默 skip 安全用例
   export REQUIRE_TEST_SERVICES=1
   # 不加 -q：addopts 已含 -q，叠加会导致汇总行被跳过（CI 日志看不到通过数）。
-  step "backend: pytest（单元+集成+业务场景）" bash -c "cd backend && uv run pytest"
+  # 覆盖率 json 由下一步逐包比较：--cov-fail-under 只能看 TOTAL，会掩盖单包倒退。
+  step "backend: pytest（单元+集成+业务场景+关键包覆盖率）" bash -c "cd backend && uv run pytest --cov=app.rbac --cov=app.auth --cov=app.tenant --cov=app.audit --cov-branch --cov-report=json:coverage.json --cov-report=term-missing:skip-covered"
+  step "backend: 关键包分支覆盖率门槛" bash -c "cd backend && uv run python scripts/check_coverage.py"
 else
   skip "backend" "未找到 uv"
 fi
