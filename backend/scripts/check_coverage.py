@@ -8,7 +8,8 @@
 
 只对租户隔离、认证、RBAC、审计四个关键包设门槛：全仓门槛会被外围代码稀释，
 为数字写废测试没有意义。阈值是**棘轮**——等于基线向下取整；要调低必须先补测，
-确需下调须在 `docs/tech-debt.md` 登记理由与复查时点。
+确需下调须在 `docs/tech-debt.md` 登记理由与复查时点。基线不可复现时，可按 TD
+以 CI 实测取整并限期抬回，不得无 TD 下调。
 """
 
 import json
@@ -16,11 +17,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# 基线：2026-10-28 全量后端套件实测（真实测试栈，755 passed / 1573s，分支覆盖率）。
-# 数值为向下取整的棘轮；{包: (基线百分比, 覆盖分支/总分支)}。
+# 基线：以 CI（Linux）全量实测为准——2026-10-28 PR #1 同一 commit 两次 run 均 757 passed，
+# app/auth 分别为 407/504=80.75%（run 40681833037）与 408/504=80.95%（run 40681807497），
+# 本地 Windows 为 409/504=81.15%；读数在 407–409 间漂移，缺口集中在 service.py 的
+# 1342–1343 与 2047–2050 两段异常路径（非确定性待 TD-221/TD-187f 定位）。
+# 按最低观测向下取整，{包: (基线百分比, 覆盖分支/总分支)}。
 THRESHOLDS: dict[str, float] = {
-    "app/rbac": 73,  # 73.87%（164/222）
-    "app/auth": 81,  # 81.15%（409/504）
+    "app/rbac": 73,  # 73.87%（164/222；CI 与本地一致）
+    "app/auth": 80,  # 80.75%（407/504；CI 最低观测，见 TD-221）
     "app/tenant": 81,  # 81.25%（13/16）
     "app/audit": 66,  # 66.67%（4/6；分支总数少，掉一条即 -16.7 个点）
 }
@@ -39,6 +43,21 @@ def _branch_totals(files: dict[str, Any], package: str) -> tuple[int, int]:
         covered += int(summary["covered_branches"])
         total += int(summary["num_branches"])
     return covered, total
+
+
+def _print_breakdown(files: dict[str, Any], package: str) -> None:
+    """失败时逐文件打印分支数与缺失条数，缩小定位范围（完整明细见 coverage 产物）。"""
+
+    prefix = f"{package}/"
+    for name, entry in sorted(files.items()):
+        normalized = name.replace("\\", "/")
+        if not (normalized == f"{package}.py" or normalized.startswith(prefix)):
+            continue
+        summary = entry["summary"]
+        covered = int(summary["covered_branches"])
+        total = int(summary["num_branches"])
+        missing = len(entry.get("missing_branches") or [])
+        print(f"[coverage]   {normalized}：{covered}/{total} 分支，缺口 {missing}", file=sys.stderr)
 
 
 def main() -> int:
@@ -69,6 +88,7 @@ def main() -> int:
             file=stream,
         )
         if status == "FAIL":
+            _print_breakdown(files, package)
             failures += 1
 
     if failures:
