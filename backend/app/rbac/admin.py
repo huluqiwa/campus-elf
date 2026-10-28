@@ -9,10 +9,15 @@
   `ROLE_DEFAULTS_UNAVAILABLE`（从 M2-UI2 的"待 M2-UI3"改为明确语义）；
 - 自定义角色可创建（空集或复制自同租户可编辑角色）与硬删（预览影响面 + 逐字确认 + 理由 + 版本 CAS，
   删除前把完整权限码集快照进审计）；内置角色不可删（409 `ROLE_NOT_DELETABLE`）；
+  删除契约同时带 `version` 与**影响面指纹**（TD-199）：前者挡"预览后角色权限/范围被改"，
+  后者挡"预览后持有人集合被改"（绑定不推进 `roles.version`），两套判据各管一件事；
 - `school.role.manage` 只能由校方超管本人授出（转授即等于无条件把本校全部权限交出去）；
 - 自扩权（TD-191 收口）：结果集触达操作者自己所在角色、且净增敏感码时，必须带
   `self_grant_ack=true` + 理由（超管免打断）。`school.role.self_grant` 审计**放行与打断都写**
-  ——放行时同事务，被打断时走独立事务（外层回滚会带走同事务的留痕）；
+  ——放行时同事务，被打断时走独立事务（外层回滚会带走同事务的留痕）。
+  TD-194 起判据/打断/两侧留痕收在 `_guard_self_grant` + `_audit_self_grant_applied` 一处，
+  三个入口共用：角色权限替换、角色范围替换、**重置出厂（权限 + 范围两个维度）**；
+  用户↔角色绑定**不接**（改的是别人的绑定，且自绑被禁，判据无可达分支，简报 §14.5）；
 - 角色级数据范围（TD-187c）：`school`/`self` 可全量替换，与权限替换**共享同一列 `roles.version`**
   （一列版本覆盖两条写路径，避免出现"权限已更新、范围更新失败"的半更新态，代价见 TD-202）；
   `class`/`course` **不可手工授**且被拒要留痕——这两类必须绑定到具体班级/课程 id（库 CHECK
@@ -28,6 +33,7 @@
   同事务写的拒绝留痕跟着一起消失。
 """
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -104,12 +110,16 @@ class RoleAdminError(RuntimeError):
         http_status: int,
         *,
         latest: "RoleSummary | None" = None,
+        latest_preview: "RoleDeletionPreview | None" = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.http_status = http_status
         self.latest = latest
+        # 删除预览过期时回带的**最新影响面**（人数 + 指纹 + 版本）：调用方据此刷新确认框，
+        # 不必先跳一次 GET 再回来重试（简报 §14.3）。
+        self.latest_preview = latest_preview
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +136,9 @@ class RoleSummary:
     defaults_applied: bool
     user_count: int
     permission_codes: tuple[str, ...]
+    #: 能否经绑定接口授给账号（TD-187d）。只有超管角色为 false——它由平台开通流程管理，
+    #: 允许租户内绑定等于让持 `permission_account.manage` 的人把任意账号提成超管。
+    bindable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +159,9 @@ class RoleDeletionPreview:
 
     `permission_codes` 是**删除前**的完整码集快照——CASCADE 之后 `role_permissions` 行即消失，
     只能靠这份快照复盘"被删的角色当时能干什么"（简报 §4.2：删除留完整码集审计是硬要求，不是可选）。
+
+    `fingerprint` 是**持有人集合**的哈希（TD-199）：绑定不推进 `roles.version`，预览→确认之间
+    多绑或少绑一个人不会被版本 CAS 挡下，由指纹负责。只回哈希、不回显持有人清单（简报 §14.3）。
     """
 
     role_code: str
@@ -153,6 +169,7 @@ class RoleDeletionPreview:
     version: int
     affected_users: int
     permission_codes: tuple[str, ...]
+    fingerprint: str
 
 
 def _require_tenant(principal: Principal) -> UUID:
@@ -209,6 +226,16 @@ order by r.is_system desc, r.code
 """
 
 
+def role_is_bindable(code: str) -> bool:
+    """该角色能否经绑定接口授出（TD-187d）：只有超管角色为 false。
+
+    `RoleSummary.bindable` 与 `BoundRole.bindable` 共用这一处判据——两边各写一次
+    `code != SUPER_ADMIN_ROLE_CODE` 迟早会分叉（例如将来"平台角色"也进禁授名单时只改一边）。
+    """
+
+    return code != SUPER_ADMIN_ROLE_CODE
+
+
 def _to_summary(row: Any) -> RoleSummary:
     is_system = bool(row["is_system"])
     code = str(row["code"])
@@ -223,6 +250,7 @@ def _to_summary(row: Any) -> RoleSummary:
         defaults_applied=bool(row["defaults_applied"]),
         user_count=int(row["user_count"]),
         permission_codes=tuple(str(code) for code in row["permission_codes"]),
+        bindable=role_is_bindable(code),
     )
 
 
@@ -529,12 +557,114 @@ def _assert_self_grant(
             f"{detail}；请显式确认（self_grant_ack）并填写理由",
             422,
         )
-    # 理由在这里再 strip 一次而不是信任调用方的归一化：本守卫按简报 §6/§13.2 由三条写路径共用
-    # （角色权限全量替换、角色范围全量替换、TD-187d 的绑定替换；创建自定义角色**不接**——新角色 id
-    # 必不在操作者所在角色集合里，判据无可达分支，2026-10-27 用户裁定见简报 §12 与 TD-194），
+    # 理由在这里再 strip 一次而不是信任调用方的归一化：本判据由 `_guard_self_grant` 统一调用，
+    # 覆盖角色权限替换、角色范围替换、重置出厂（两个维度）四个入口；创建自定义角色与用户绑定
+    # **不接**（前者新角色 id 必不在操作者所在角色集合里；后者改的是别人的绑定且自绑被禁，
+    # 判据均无可达分支——2026-10-27/29 用户裁定，见简报 §12、§14.5 与 TD-194），
     # "空白理由等于没写" 属于安全判据本身，不能取决于某条路径先做没做规范化。
     if not (reason or "").strip():
         raise RoleAdminError("SELF_GRANT_REASON_REQUIRED", "自扩权必须填写理由", 422)
+
+
+async def _guard_self_grant(
+    principal: Principal,
+    *,
+    role: dict[str, Any],
+    exposures: list[tuple[Literal["permission", "scope"], SelfGrantExposure]],
+    self_grant_ack: bool,
+    reason: str | None,
+    denied_action: str,
+    request_id: str | None,
+) -> list[tuple[Literal["permission", "scope"], SelfGrantExposure]]:
+    """自扩权守卫的**唯一入口**（TD-194）：校验 → 打断并双侧留痕 → 返回命中项。
+
+    `exposures` 是 `(kind, 判定)` 列表：权限替换传一项、范围替换传一项、重置出厂传两项
+    （重置同时重种权限与范围，两个维度都要过；任一未确认即 422）。命中的维度由调用方在写事务
+    提交前交给 `_audit_self_grant_applied` 记成功侧留痕——那一条必须和写操作同一个事务。
+
+    被打断时写两类拒绝审计：调用方自己的 `*.denied`（说明"哪条写路径被拒"）与每个命中维度
+    一条 `school.role.self_grant`（说明"哪几个敏感能力差点流向本人"）。两者都走独立事务，
+    外层回滚带不走它们；审计故障不改变拒绝结果。
+    """
+
+    hits = [item for item in exposures if item[1].requires_confirmation]
+    if not hits:
+        return []
+    if SUPER_ADMIN_ROLE_CODE not in principal.roles:
+        try:
+            for kind, exposure in hits:
+                _assert_self_grant(
+                    principal,
+                    exposure,
+                    self_grant_ack=self_grant_ack,
+                    reason=reason,
+                    kind=kind,
+                )
+        except RoleAdminError as exc:
+            await _audit_denied(
+                principal,
+                action=denied_action,
+                resource_id=str(role["id"]),
+                reason=exc.code,
+                request_id=request_id,
+            )
+            for kind, exposure in hits:
+                await _audit_denied(
+                    principal,
+                    action="school.role.self_grant",
+                    resource_id=str(role["id"]),
+                    reason=exc.code,
+                    request_id=request_id,
+                    extra={
+                        "role_code": str(role["code"]),
+                        "kind": kind,
+                        "newly_reaching_self": list(exposure.newly_reaching_self),
+                        "self_grant_ack": self_grant_ack,
+                    },
+                )
+            raise
+    return hits
+
+
+async def _audit_self_grant_applied(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    tenant_id: UUID,
+    role: dict[str, Any],
+    hits: list[tuple[Literal["permission", "scope"], SelfGrantExposure]],
+    reason: str | None,
+    request_id: str | None,
+) -> None:
+    """放行侧留痕：每个命中维度一条 `school.role.self_grant`（与写操作同事务）。
+
+    独立动作便于报警与事后撤销：`*.updated`/`school.role.reset` 是所有配置都会写的流水，
+    混在里面等于没有信号；这里只关心"能力面流向操作者本人"的那几次。
+    消费方注意：同一 action 在放行/打断两侧的 `reason` 含义不同（自由文本 vs 判据码），按 `result` 分流。
+    """
+
+    for kind, exposure in hits:
+        await append_audit(
+            session,
+            action="school.role.self_grant",
+            resource_type="role",
+            resource_id=str(role["id"]),
+            actor_realm="tenant",
+            actor_id=principal.user_id,
+            tenant_id=tenant_id,
+            metadata={
+                "role_code": str(role["code"]),
+                "kind": kind,
+                "newly_reaching_self": list(exposure.newly_reaching_self),
+                "confirmed_by": (
+                    "super_admin"
+                    if SUPER_ADMIN_ROLE_CODE in principal.roles
+                    else "self_grant_ack"
+                ),
+                "reason": reason,
+            },
+            request_id=request_id,
+        )
 
 
 async def replace_role_permissions(
@@ -612,38 +742,15 @@ async def replace_role_permissions(
                 session, tenant_id, principal.user_id
             ),
         )
-        try:
-            _assert_self_grant(
-                principal, exposure, self_grant_ack=self_grant_ack, reason=normalized_reason
-            )
-        except RoleAdminError as exc:
-            await _audit_denied(
-                principal,
-                action="school.role.permissions.denied",
-                resource_id=str(role_id),
-                reason=exc.code,
-                request_id=request_id,
-            )
-            if exposure.requires_confirmation:
-                # 打断本身也是安全事件：`*.denied` 只说明"有人被拒"，报警要盯的是
-                # "谁在试图给自己加敏感码、被拒了几次"。放行时留痕、拒绝时不留痕，
-                # 等于只能统计成功案例，看不出有人在反复试探。
-                # 消费方注意：同一 action 在两侧的 `reason` 含义不同——成功侧是操作者填写的
-                # 理由（自由文本），拒绝侧是判据码（与所有 `*.denied` 一致）；按 `result` 分流。
-                await _audit_denied(
-                    principal,
-                    action="school.role.self_grant",
-                    resource_id=str(role_id),
-                    reason=exc.code,
-                    request_id=request_id,
-                    extra={
-                        "role_code": str(role["code"]),
-                        "kind": "permission",
-                        "newly_reaching_self": list(exposure.newly_reaching_self),
-                        "self_grant_ack": self_grant_ack,
-                    },
-                )
-            raise
+        hits = await _guard_self_grant(
+            principal,
+            role=role,
+            exposures=[("permission", exposure)],
+            self_grant_ack=self_grant_ack,
+            reason=normalized_reason,
+            denied_action="school.role.permissions.denied",
+            request_id=request_id,
+        )
 
         updated = await session.execute(
             text(
@@ -707,25 +814,13 @@ async def replace_role_permissions(
         if exposure.requires_confirmation:
             # 独立一条动作便于报警与事后撤销：`*.updated` 是所有配置都会写的流水，
             # 混在里面等于没有信号；这里只关心"能力面流向操作者本人"的那几次。
-            await append_audit(
+            await _audit_self_grant_applied(
                 session,
-                action="school.role.self_grant",
-                resource_type="role",
-                resource_id=str(role_id),
-                actor_realm="tenant",
-                actor_id=principal.user_id,
+                principal,
                 tenant_id=tenant_id,
-                metadata={
-                    "role_code": str(role["code"]),
-                    "kind": "permission",
-                    "newly_reaching_self": list(exposure.newly_reaching_self),
-                    "confirmed_by": (
-                        "super_admin"
-                        if SUPER_ADMIN_ROLE_CODE in principal.roles
-                        else "self_grant_ack"
-                    ),
-                    "reason": normalized_reason,
-                },
+                role=role,
+                hits=hits,
+                reason=normalized_reason,
                 request_id=request_id,
             )
         return await _summary(session, tenant_id, role_id)
@@ -793,6 +888,46 @@ async def _affected_users(session: AsyncSession, tenant_id: UUID, role_id: UUID)
     return int(value or 0)
 
 
+async def _affected_user_ids(
+    session: AsyncSession, tenant_id: UUID, role_id: UUID, *, for_update: bool = False
+) -> list[UUID]:
+    """角色当前持有人（按 id 排序，指纹的输入）。
+
+    `for_update=True` 只给删除执行路径用：锁住持有人行，让「重算指纹 → CASCADE 删除」之间
+    不再有解绑落库。解绑是对 `user_roles` 行做 DELETE，会被这把行锁挡住；不锁时并发解绑
+    可以在这段窗口里提交，删除响应与审计的 `affected_users` 就会多算一个已经解绑的人。
+    预览不锁：它本来就是快照，把一次只读点击变成持有全部持有人行锁没有必要。
+
+    锁序仍是 `roles → user_roles`（CASCADE 自己也是这个顺序），绑定路径是
+    `users → roles → user_roles`，不存在环。
+    """
+
+    sql = (
+        "select user_id from public.user_roles "
+        "where role_id = :rid and tenant_id = :tid order by user_id"
+        + (" for update" if for_update else "")
+    )
+    rows: list[Any] = list(
+        (await session.execute(text(sql), {"rid": role_id, "tid": tenant_id}))
+        .scalars()
+        .all()
+    )
+    return [UUID(str(item)) for item in rows]
+
+
+def _deletion_fingerprint(role_id: UUID, user_ids: list[UUID]) -> str:
+    """删除影响面指纹 = SHA-256(role_id ∪ 排序后的持有人 id) 的十六进制（TD-199，简报 §14.3）。
+
+    只覆盖**持有人集合**，不覆盖权限码与人数以外的任何状态：权限/范围在预览后被改由
+    `roles.version` 挡，两套判据各管一件事，避免同一次变化触发两条错误码。
+    集合语义：`[a, b]` 与 `[b, a]` 同哈希；空集合仍带 `role_id`，所以"把 A 的所有持有人搬给 B"
+    不会让两个角色的指纹撞成同一个。不做过期时间——它绑定的是状态而不是时间。
+    """
+
+    material = f"{role_id}|{','.join(sorted(str(item) for item in user_ids))}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 async def _preview(session: AsyncSession, tenant_id: UUID, role: dict[str, Any]) -> ResetPreview:
     role_id = UUID(str(role["id"]))
     defaults_permissions = await _default_permissions(session, str(role["code"]))
@@ -833,25 +968,24 @@ async def reset_role(
     reason: str,
     version: int,
     request_id: str | None,
+    self_grant_ack: bool = False,
 ) -> ResetPreview:
     """把角色恢复出厂：撤销现有权限与角色数据范围后按定义表重种。
 
-    本路径**不接自扩权守卫**（`replace_role_permissions` / `replace_role_scopes` 那条），依据只在
-    **权限这一侧**成立：出厂默认权限码与 `SENSITIVE_SELF_GRANT_CODES` 互不相交，已由
-    `tests/test_self_grant_guard_unit.py`（代码侧 `seeds.py`）与
-    `tests/integration/test_rbac_custom_role_constraints.py`（库侧 `rbac_builtin_role_defaults`）
-    双向钉住。
-    **范围这一侧的前提已经破了**（TD-187c）：`SENSITIVE_SCOPE_TYPES = {school}`，而 `school_admin`
-    的出厂范围就含 `school`（`test_factory_defaults_of_editable_roles_do_hold_the_sensitive_scope`
-    钉住）。于是这是一条**可达路径**，不是理论风险：同租的另一名管理员把 `school_admin` 收窄成
-    `self`（走本文件的 `replace_role_scopes`）→ 该角色的持有者点一次「恢复出厂」→ 范围净增回
-    `school`、静默拿回全校可见，全程无 ack、无 `school.role.self_grant` 留痕。本函数因此是 TD-194
-    抽 `_guard_self_grant(..., kind=...)` helper 时必须覆盖的**第 4 个入口、且要覆盖两个维度**，
-    随 TD-187d 收口。在那之前，「重置一次自己的角色」是范围侧一条已知的未受守卫通道（TD-194）。
-    哪天必须给某个可编辑角色配一个敏感码作默认，同样先接守卫再改默认。
+    自 TD-194 起**接自扩权守卫，且权限与范围两个维度都过**（`_guard_self_grant`）：
+    - 权限侧：出厂默认与 `SENSITIVE_SELF_GRANT_CODES` 互不相交，这条不变量仍由
+      `tests/test_self_grant_guard_unit.py`（代码侧）与
+      `tests/integration/test_rbac_custom_role_constraints.py`（库侧）双向钉住，判据通常不触发；
+    - 范围侧是**可达路径**：`SENSITIVE_SCOPE_TYPES = {school}`，而 `school_admin` 的出厂范围
+      就含 `school`。同租的另一名管理员把 `school_admin` 收窄成 `self` → 该角色的持有人点一次
+      「恢复出厂」→ 范围净增回 `school`、拿回全校可见。没有 ack 的这次重置现在 422
+      `SELF_GRANT_CONFIRMATION_REQUIRED`，带 ack 则放行并写 `school.role.self_grant`。
+    超管主体免打断不免留痕（与另外两个入口同口径）。
+    哪天必须给某个可编辑角色配一个敏感码作默认，先接守卫再改默认（这条路径已接，无需再改）。
 
     异常:
-        RoleAdminError: 404、409（锁定/版本冲突/无出厂定义）、422（角色名或理由不合格）。
+        RoleAdminError: 404、409（锁定/版本冲突/无出厂定义）、
+            422（角色名或理由不合格、自扩权未确认/未填理由）。
     """
 
     tenant_id = _require_tenant(principal)
@@ -892,6 +1026,32 @@ async def reset_role(
         # 放在后面也能靠事务回滚抹掉版本增量，但"这单根本不该进写路径"的判断留在顺序里比留在
         # 回滚里好读，也不用在每次拒绝时去抢行锁、推一次版本再撤销（并发同事会看到无谓的 409）。
         preview = await _preview(session, tenant_id, role)
+        # 重置的结果集 = 定义表里的出厂权限与范围，两个维度都要过守卫（TD-194）。
+        # 判定同样排在版本 CAS 之前：被拒的重置不得推高 `roles.version`。
+        principal_role_ids = await _principal_role_ids(session, tenant_id, principal.user_id)
+        permission_exposure = evaluate_self_grant(
+            role_id=str(role_id),
+            resulting_codes=await _default_permissions(session, str(role["code"])),
+            principal_role_ids=principal_role_ids,
+            principal_permissions=await _principal_permission_codes(
+                session, tenant_id, principal.user_id
+            ),
+        )
+        scope_exposure = evaluate_scope_self_grant(
+            role_id=str(role_id),
+            resulting_scopes=await _default_scopes(session, str(role["code"])),
+            principal_role_ids=principal_role_ids,
+            principal_scopes=await _principal_scope_types(session, tenant_id, principal.user_id),
+        )
+        hits = await _guard_self_grant(
+            principal,
+            role=role,
+            exposures=[("permission", permission_exposure), ("scope", scope_exposure)],
+            self_grant_ack=self_grant_ack,
+            reason=normalized_reason,
+            denied_action="school.role.reset_denied",
+            request_id=request_id,
+        )
         # 与全量替换同口径：先做 compare-and-set 占住版本，之后的删/种都在这把锁内。
         bumped = await session.execute(
             text(
@@ -988,6 +1148,15 @@ async def reset_role(
                 "affected_users": preview.affected_users,
                 "reason": normalized_reason,
             },
+            request_id=request_id,
+        )
+        await _audit_self_grant_applied(
+            session,
+            principal,
+            tenant_id=tenant_id,
+            role=role,
+            hits=hits,
+            reason=normalized_reason,
             request_id=request_id,
         )
         return ResetPreview(
@@ -1216,9 +1385,9 @@ async def create_role(
 async def preview_role_deletion(principal: Principal, role_id: UUID) -> RoleDeletionPreview:
     """只读预览删除自定义角色的影响面（不写库、不审计；与重置预览同口径）。
 
-    `affected_users` 是**预览时刻**的数：绑定关系（`user_roles`）的写入不推进 `roles.version`，
-    所以预览→确认之间新绑的人不会被 CAS 挡下，执行侧快照与审计记的是删除当时的真实数（事前
-    失守、事后可查）。收口要等 TD-187d 决定"绑定是否 bump 版本"，见 TD-199。
+    `affected_users` 与 `fingerprint` 都是**预览时刻**的值：绑定关系（`user_roles`）的写入不推进
+    `roles.version`，所以预览→确认之间新绑的人不会被版本 CAS 挡下；执行侧重新计算指纹并比对，
+    不一致即 409 `ROLE_DELETE_PREVIEW_STALE` 并回带最新预览（TD-199，简报 §14.3）。
 
     异常:
         RoleAdminError: 404（不存在/跨租）、409（内置角色不可删）。
@@ -1231,14 +1400,16 @@ async def preview_role_deletion(principal: Principal, role_id: UUID) -> RoleDele
             raise RoleAdminError("ROLE_NOT_FOUND", "角色不存在", 404)
         if bool(role["is_system"]):
             raise RoleAdminError("ROLE_NOT_DELETABLE", "内置角色不可删除", 409)
+        affected_ids = await _affected_user_ids(session, tenant_id, role_id)
         return RoleDeletionPreview(
             role_code=str(role["code"]),
             name=str(role["name"]),
             version=int(role["version"]),
-            affected_users=await _affected_users(session, tenant_id, role_id),
+            affected_users=len(affected_ids),
             permission_codes=tuple(
                 sorted(await _role_permission_codes(session, tenant_id, role_id))
             ),
+            fingerprint=_deletion_fingerprint(role_id, affected_ids),
         )
 
 
@@ -1249,20 +1420,27 @@ async def delete_role(
     confirm_role_code: str,
     reason: str,
     version: int,
+    fingerprint: str,
     request_id: str | None,
 ) -> RoleDeletionPreview:
-    """硬删自定义角色（简报 §4.2 方案 A）：预览影响面 → 逐字确认码 + 理由 ≥10 + 版本 CAS。
+    """硬删自定义角色（简报 §4.2 方案 A）：预览影响面 → 逐字确认码 + 理由 ≥10 + 双判据 CAS。
+
+    两套判据各管一件事（TD-199，简报 §14.3）：
+    - `version`：预览后角色的权限/范围被改（`roles.version` 在那些写路径上递增）；
+    - `fingerprint`：预览后持有人集合被改（绑定不推进角色版本，只能靠指纹）。
+    两者任一不匹配都拒绝，`ROLE_VERSION_CONFLICT` / `ROLE_DELETE_PREVIEW_STALE` 分流，
+    后者回带最新删除预览。指纹在 `FOR UPDATE` 行锁之后重算——绑定插入会因外键的
+    `FOR KEY SHARE` 锁等待或先行提交，不会出现"按旧人数删掉、绑定同时成功"。
 
     子表 `role_permissions`/`data_scopes`/`user_roles` 由复合外键 `ON DELETE CASCADE` 清理，
     所以"删除一个角色"是单条 `DELETE`，但**必须在删除前把权限码集与受影响用户数快照进审计**
-    （CASCADE 之后取不回）。这里的 `affected_users` 取的是**本事务内**的数（行锁已挡住并发绑定），
-    与操作者当初看到的预览可能不一致——预览之后新绑的人不会被版本 CAS 挡下，见 TD-199。
+    （CASCADE 之后取不回）。
     内置角色一律 409 `ROLE_NOT_DELETABLE`（只能重置或改配置）。
     响应里的 `version` 是**被删那一行的最后版本号**，不是 `+1`：行已经不在了，报一个从未存在过的
     版本只会诱导前端拿它去做下一次乐观锁。
 
     异常:
-        RoleAdminError: 404（不存在/跨租）、409（内置角色不可删/版本冲突）、
+        RoleAdminError: 404（不存在/跨租）、409（内置角色不可删/版本冲突/影响面已变化）、
             422（确认码不符/理由过短）。
     """
 
@@ -1304,7 +1482,24 @@ async def delete_role(
         role_name = str(role["name"])
         # 删除前快照：CASCADE 之后权限与绑定都消失，审计是唯一的复盘来源。
         before = await _role_permission_codes(session, tenant_id, role_id)
-        affected_users = await _affected_users(session, tenant_id, role_id)
+        affected_ids = await _affected_user_ids(session, tenant_id, role_id, for_update=True)
+        current_fingerprint = _deletion_fingerprint(role_id, affected_ids)
+        if current_fingerprint != fingerprint:
+            # 并发绑定不是安全事件（同事在正常配置权限账号），只回 409 + 最新影响面，
+            # 不写拒绝审计——与 ROLE_VERSION_CONFLICT 同口径。
+            raise RoleAdminError(
+                "ROLE_DELETE_PREVIEW_STALE",
+                "删除影响面已变化（持有人集合与预览不一致），请刷新后重新确认",
+                409,
+                latest_preview=RoleDeletionPreview(
+                    role_code=role_code,
+                    name=role_name,
+                    version=int(role["version"]),
+                    affected_users=len(affected_ids),
+                    permission_codes=tuple(sorted(before)),
+                    fingerprint=current_fingerprint,
+                ),
+            )
         # 已持 FOR UPDATE 行锁，同事务内并发不可能改走版本或删除该行，故 WHERE 只按 id+tenant。
         # rowcount 仍要断言 1：RLS 的 USING 子句若挡下这条 DELETE，语句会**静默影响 0 行**，
         # 而下一步的审计会写成"已删除"——库里角色还在，审计却说没了，这是最坏的一致性组合。
@@ -1327,7 +1522,7 @@ async def delete_role(
                 "role_code": role_code,
                 "name": role_name,
                 "removed_permission_codes": sorted(before),
-                "affected_users": affected_users,
+                "affected_users": len(affected_ids),
                 "reason": normalized_reason,
             },
             request_id=request_id,
@@ -1336,8 +1531,9 @@ async def delete_role(
             role_code=role_code,
             name=role_name,
             version=int(role["version"]),
-            affected_users=affected_users,
+            affected_users=len(affected_ids),
             permission_codes=tuple(sorted(before)),
+            fingerprint=current_fingerprint,
         )
 
 
@@ -1572,37 +1768,15 @@ async def replace_role_scopes(
             principal_role_ids=await _principal_role_ids(session, tenant_id, principal.user_id),
             principal_scopes=await _principal_scope_types(session, tenant_id, principal.user_id),
         )
-        try:
-            _assert_self_grant(
-                principal,
-                exposure,
-                self_grant_ack=self_grant_ack,
-                reason=normalized_reason,
-                kind="scope",
-            )
-        except RoleAdminError as exc:
-            await _audit_denied(
-                principal,
-                action="school.role.scopes.denied",
-                resource_id=str(role_id),
-                reason=exc.code,
-                request_id=request_id,
-            )
-            if exposure.requires_confirmation:
-                await _audit_denied(
-                    principal,
-                    action="school.role.self_grant",
-                    resource_id=str(role_id),
-                    reason=exc.code,
-                    request_id=request_id,
-                    extra={
-                        "role_code": str(role["code"]),
-                        "kind": "scope",
-                        "newly_reaching_self": list(exposure.newly_reaching_self),
-                        "self_grant_ack": self_grant_ack,
-                    },
-                )
-            raise
+        hits = await _guard_self_grant(
+            principal,
+            role=role,
+            exposures=[("scope", exposure)],
+            self_grant_ack=self_grant_ack,
+            reason=normalized_reason,
+            denied_action="school.role.scopes.denied",
+            request_id=request_id,
+        )
 
         updated = await session.execute(
             text(
@@ -1685,25 +1859,13 @@ async def replace_role_scopes(
             request_id=request_id,
         )
         if exposure.requires_confirmation:
-            await append_audit(
+            await _audit_self_grant_applied(
                 session,
-                action="school.role.self_grant",
-                resource_type="role",
-                resource_id=str(role_id),
-                actor_realm="tenant",
-                actor_id=principal.user_id,
+                principal,
                 tenant_id=tenant_id,
-                metadata={
-                    "role_code": str(role["code"]),
-                    "kind": "scope",
-                    "newly_reaching_self": list(exposure.newly_reaching_self),
-                    "confirmed_by": (
-                        "super_admin"
-                        if SUPER_ADMIN_ROLE_CODE in principal.roles
-                        else "self_grant_ack"
-                    ),
-                    "reason": normalized_reason,
-                },
+                role=role,
+                hits=hits,
+                reason=normalized_reason,
                 request_id=request_id,
             )
         return await _summary(session, tenant_id, role_id)
@@ -1735,4 +1897,5 @@ __all__ = [
     "replace_role_permissions",
     "replace_role_scopes",
     "reset_role",
+    "role_is_bindable",
 ]

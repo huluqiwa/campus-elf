@@ -140,7 +140,11 @@ async def _seed_extra_user(school_code: str, label: str, expected_tenant_id: UUI
 
 
 async def _bind_user(tenant_id: UUID, user_id: UUID, role_id: UUID) -> None:
-    """用 SQL 直接建绑定：本仓还没有绑定接口（TD-187d），这里模拟"同事在预览之后绑了人"。"""
+    """用 SQL 直接建绑定，模拟"同事在预览之后绑了人"。
+
+    绑定接口（TD-187d）已存在，但这里要的是**绕过服务层**的并发窗口：走接口就会带上它自己的
+    校验与版本推进，测不到"另一个写入者只碰 `user_roles`、不碰 `roles.version`"这种情形。
+    """
 
     engine = make_test_engine("admin")
     try:
@@ -382,17 +386,21 @@ async def test_role_code_is_unique_per_tenant_not_globally(stack: None) -> None:
             confirm_role_code=ROLE_CODE,
             reason="别校同名角色删不掉（集成用例）",
             version=0,
+            # 跨租在取到角色行时就 404，指纹永远走不到比对；随便给一个非空值即可。
+            fingerprint="0" * 64,
             request_id=None,
         )
     assert (caught.value.code, caught.value.http_status) == ("ROLE_NOT_FOUND", 404)
     assert len(await _role_rows(school_a["tenant_id"], ROLE_CODE)) == 1
 
+    own_preview = await admin.preview_role_deletion(school_b["principal"], role_b.id)
     await admin.delete_role(
         school_b["principal"],
         role_b.id,
         confirm_role_code=ROLE_CODE,
         reason="本校自建角色可删（集成用例）",
         version=0,
+        fingerprint=own_preview.fingerprint,
         request_id=None,
     )
     assert await _role_rows(school_b["tenant_id"], ROLE_CODE) == []
@@ -435,14 +443,20 @@ async def test_other_integrity_errors_are_not_relabelled_as_code_taken(stack: No
     assert await _audits("school.role.created") == []
 
 
-async def test_preview_affected_users_is_not_protected_by_the_version_cas(stack: None) -> None:
-    """预览之后同事再绑一个人：`roles.version` 原地不动，CAS 放行，确认打在陈旧的影响面上。
+async def test_preview_then_rebind_makes_the_delete_stale(stack: None) -> None:
+    """预览之后同事再绑一个人：`roles.version` 原地不动，但指纹变了 → 409（TD-199 收口）。
 
-    这是 TD-199 的**现状钉桩**，不是"这样对"。删除事务自己是一致的：拿到 `FOR UPDATE` 行锁后，
-    并发 `insert into user_roles` 会因外键的 `FOR KEY SHARE` 阻塞到本事务结束，所以执行侧响应
-    与审计里的 `affected_users` 是删除当时的真数——事前失守、事后可查。
-    TD-187d 若采纳"绑定 bump 版本"，第 4 步会从成功变成 409：那时把这条改成断言
-    `ROLE_VERSION_CONFLICT` 并把 TD-199 置为已完成，不要删掉它。
+    版本 CAS 看不见绑定（绑定刻意不推进 `roles.version`，否则一次改绑会让所有人的角色编辑草稿
+    失效），所以新鲜度由影响面指纹负责。三步：
+
+    1. 预览 1 人 → 再绑 1 人 → 删除 = 409 `ROLE_DELETE_PREVIEW_STALE`，并回带最新预览
+       （2 人 + 新指纹），库里角色**还在**；
+    2. 带着新指纹重试 → 成功，响应与审计里的 `affected_users` 是 2；
+    3. 另一条：预览 1 人 → 再绑 → 又解回原集合 → 指纹回到预览时那个值 → 删除成功。
+       "人数没变"不等于"集合没变"，这条钉住按集合而非按人数比对。
+
+    第 3 步是这套判据存在的意义：如果把指纹换成 `affected_users` 比较（看起来很自然），
+    "换一个人"这种最危险的变化会被当成没变。
     """
 
     del stack
@@ -457,25 +471,89 @@ async def test_preview_affected_users_is_not_protected_by_the_version_cas(stack:
     preview = await admin.preview_role_deletion(principal, role.id)
     assert preview.affected_users == 1, preview
 
-    # 预览与确认之间的第二次绑定：不加任何锁、不碰 `roles.version`，所以 CAS 看不见它
+    # 预览与确认之间的第二次绑定：不加任何锁、不碰 `roles.version`
     second = await _seed_extra_user(school_code, "2", tenant_id)
     await _bind_user(tenant_id, second, role.id)
     rows = await _role_rows(tenant_id, ROLE_CODE)
     assert len(rows) == 1 and int(rows[0]["version"]) == 0, rows
 
+    with pytest.raises(RoleAdminError) as stale:
+        await admin.delete_role(
+            principal,
+            role.id,
+            confirm_role_code=ROLE_CODE,
+            reason="拿旧影响面删角色，必须被指纹挡下（集成用例）",
+            version=0,
+            fingerprint=preview.fingerprint,
+            request_id=None,
+        )
+    assert (stale.value.code, stale.value.http_status) == ("ROLE_DELETE_PREVIEW_STALE", 409)
+    latest = stale.value.latest_preview
+    assert latest is not None, "409 必须回带最新影响面，否则前端只能整页重来"
+    assert (latest.affected_users, latest.version) == (2, 0)
+    assert latest.fingerprint != preview.fingerprint
+    # 拒绝发生在 DELETE 之前：角色与两条绑定都还在
+    assert len(await _role_rows(tenant_id, ROLE_CODE)) == 1
+    assert await _audits("school.role.deleted") == []
+    # 并发绑定不是安全事件：不写拒绝审计（与 ROLE_VERSION_CONFLICT 同口径）
+    assert await _audits("school.role.delete_denied") == []
+
     deleted = await admin.delete_role(
         principal,
         role.id,
         confirm_role_code=ROLE_CODE,
-        reason="预览后又被绑走一个人，CAS 仍然放行（集成用例）",
-        version=0,
+        reason="刷新后按最新影响面重试删除（集成用例）",
+        version=latest.version,
+        fingerprint=latest.fingerprint,
         request_id=None,
     )
-    assert deleted.affected_users == 2, "执行侧取的是删除当时的真实数，不是预览数"
+    assert deleted.affected_users == 2
     assert deleted.version == 0
 
     deleted_audit = await _audits("school.role.deleted")
     assert [(e["result"], e["metadata"].get("affected_users")) for e in deleted_audit] == [
         ("success", 2)
     ], deleted_audit
+
+
+async def test_rebinding_back_to_the_same_set_keeps_the_preview_valid(stack: None) -> None:
+    """预览后有人被解绑、又有人补回原集合：人数与集合都没变 → 指纹相同 → 删除正常放行。
+
+    指纹是**集合**的哈希，不是"某个人的绑定动作"的日志：中间发生过写入、但最终影响面与预览
+    一致时，不该逼运营重新确认一遍（多出来的 409 只会训练用户无脑点"刷新再试"）。
+    """
+
+    del stack
+    school_code = f"SCH-RACC{uuid4().hex[:6].upper()}"
+    seeded = await _seed_tenant(school_code)
+    principal: Principal = seeded["principal"]
+    tenant_id = seeded["tenant_id"]
+    role = await _create(principal)
+
+    first = await _seed_extra_user(school_code, "1", tenant_id)
+    await _bind_user(tenant_id, first, role.id)
+    preview = await admin.preview_role_deletion(principal, role.id)
+    assert preview.affected_users == 1, preview
+
+    # 解绑再绑回同一人（真实接口是"全量替换"，两步之间集合短暂为空）
+    async with db_session(tenant_id=tenant_id) as session:
+        await session.execute(
+            text(
+                "delete from public.user_roles "
+                "where tenant_id = :tid and role_id = :rid"
+            ),
+            {"tid": tenant_id, "rid": role.id},
+        )
+    await _bind_user(tenant_id, first, role.id)
+
+    deleted = await admin.delete_role(
+        principal,
+        role.id,
+        confirm_role_code=ROLE_CODE,
+        reason="集合已回到预览时的样子，指纹未变（集成用例）",
+        version=preview.version,
+        fingerprint=preview.fingerprint,
+        request_id=None,
+    )
+    assert deleted.affected_users == 1
 

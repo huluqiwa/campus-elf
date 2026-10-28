@@ -27,7 +27,9 @@ from app.rbac.admin import (
     LOCKED_ROLE_REASONS,
     RESERVED_TENANT_ROLE_CODES,
     ROLE_CODE_PATTERN,
+    SUPER_ADMIN_ROLE_CODE,
     RoleAdminError,
+    _deletion_fingerprint,
     _lock_reason,
     _to_summary,
 )
@@ -172,6 +174,7 @@ async def test_platform_principal_cannot_create_or_delete_roles() -> None:
             confirm_role_code="cross_realm",
             reason="平台主体试图删租户角色",
             version=0,
+            fingerprint="0" * 64,
             request_id=None,
         ),
     ):
@@ -212,3 +215,36 @@ def test_role_create_payload_rejects_blank_name() -> None:
     for blank in ("", "   ", "\t\n"):
         with pytest.raises(ValidationError):
             RoleCreatePayload(code="library_keeper", name=blank)
+
+
+def test_deletion_fingerprint_is_a_set_hash_scoped_to_the_role() -> None:
+    """影响面指纹只由「角色 + 持有人集合」决定（TD-199）。
+
+    三条性质各自挡住一类误判：顺序无关（数据库返回顺序不是契约）、人员搬走后集合相同即
+    同指纹（"改绑又解回原集合"必须能正常删除）、`role_id` 入哈希（把 A 的所有人搬给 B 后
+    两个角色的指纹不能撞——否则拿着 A 的预览能删 B）。
+    """
+
+    role_a = uuid4()
+    role_b = uuid4()
+    first = uuid4()
+    second = uuid4()
+
+    baseline = _deletion_fingerprint(role_a, [first, second])
+    assert baseline == _deletion_fingerprint(role_a, [second, first])
+    assert baseline == _deletion_fingerprint(role_a, [first, second])
+    assert len(baseline) == 64 and set(baseline) <= set("0123456789abcdef")
+
+    assert _deletion_fingerprint(role_a, [first]) != baseline
+    assert _deletion_fingerprint(role_a, []) != baseline
+    assert _deletion_fingerprint(role_b, [first, second]) != baseline
+    # 空集合也带 role_id：两个都没有持有人的角色不能共用同一个指纹
+    assert _deletion_fingerprint(role_a, []) != _deletion_fingerprint(role_b, [])
+
+
+def test_role_summary_bindable_flags_only_the_super_admin_role() -> None:
+    """`bindable` 是派生字段而不是库列：只由角色码决定，自定义角色即使与内置码同名也照常可绑。"""
+
+    assert _to_summary(_row(SUPER_ADMIN_ROLE_CODE, is_system=True)).bindable is False
+    assert _to_summary(_row("school_admin", is_system=True)).bindable is True
+    assert _to_summary(_row("library_keeper", is_system=False)).bindable is True

@@ -1,17 +1,21 @@
-"""校方侧角色权限配置、自定义角色与 MFA 管理员重置（M2-UI2 + M2-UI3 部分）。
+"""校方侧角色权限配置、自定义角色、用户↔角色绑定与 MFA 管理员重置（M2-UI2 + M2-UI3 部分）。
 
 本模块只做鉴权、请求/响应形状与错误映射；判定与落库在
-`app/rbac/admin.py` 与 `app/personnel/mfa_admin.py`：
+`app/rbac/admin.py`、`app/rbac/binding.py` 与 `app/personnel/mfa_admin.py`：
 
-- 角色配置要求 `school.role.manage`；MFA 重置要求 `school.personnel.mfa.reset`，
-  两者都是租户域权限（`realm="tenant"`）；
-- 删除角色另要 `school.role.delete`（决策 #6：拆角色与配权限分离，
-  能改配置的人不一定能让人失去角色）；删除预览只读，仍走 `school.role.manage`；
+- 角色配置要求 `school.role.manage`；删除角色另要 `school.role.delete`（决策 #6：拆角色与
+  配权限分离，能改配置的人不一定能让人失去角色），删除预览只读仍走 `school.role.manage`；
+- 用户↔角色绑定要求 `school.permission_account.manage`（TD-187d）：读/写同一个码；绑定/解绑
+  下一请求即生效、不作废在线会话；操作者不能改自己的绑定（403 `BINDING_SELF_FORBIDDEN`），
+  目标不许是超管账号、提交的角色不许含超管角色；
+- MFA 重置要求 `school.personnel.mfa.reset`，三者都是租户域权限（`realm="tenant"`）；
 - 角色数据范围编辑（TD-187c）与权限替换同用 `school.role.manage`、同一列 `roles.version`；
   范围只可手工授 `school`/`self`——`class`/`course` 必须绑定到具体 id 而本端点没有「选哪个班」的
   入参通道，一律拒授并留痕（`course` 本期还不贡献可见性，TD-151）。
   关系同步维护的是**用户级**行，角色级同型行今天没有合法写入方；
-- 错误统一返回 `{code, message}`；版本冲突额外带最新角色快照，前端据此刷新而不是静默覆盖；
+- 删除自定义角色的契约同时带 `version` 与 `fingerprint`（TD-199）：前者挡"预览后角色权限/范围
+  被改"、后者挡"预览后持有人集合被改"（绑定不推进角色版本）；
+- 错误统一返回 `{code, message}`；版本冲突额外带最新角色/绑定快照，前端据此刷新而不是静默覆盖；
 - 响应不回显登录名/邮箱/身份证/MFA 密钥等敏感字段。
 """
 
@@ -24,7 +28,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.auth.principal import Principal, require_permission
 from app.personnel import mfa_admin
 from app.personnel.mfa_admin import MfaAdminError
-from app.rbac import admin
+from app.rbac import admin, binding
 from app.rbac.admin import (
     ROLE_CODE_PATTERN,
     ResetPreview,
@@ -33,6 +37,7 @@ from app.rbac.admin import (
     RoleSummary,
     ScopeChangePreview,
 )
+from app.rbac.binding import BindingAdminError, BindingUpdate, UserBindings
 from app.rbac.self_grant import SENSITIVE_SELF_GRANT_CODES
 
 router = APIRouter(prefix="/school", tags=["school"])
@@ -41,6 +46,8 @@ RoleManagerDep = require_permission("school.role.manage", realm="tenant")
 # 删除角色与配置权限分离（决策 #6）：`school.role.manage` 只到建/改/绑定，删角色要专用码。
 RoleDeleterDep = require_permission("school.role.delete", realm="tenant")
 MfaResetterDep = require_permission("school.personnel.mfa.reset", realm="tenant")
+# 权限账号管理（TD-187d）：绑定/解绑与（TD-187e 的）启停共用这一个码。
+AccountManagerDep = require_permission("school.permission_account.manage", realm="tenant")
 
 
 class RoleResponse(BaseModel):
@@ -56,6 +63,8 @@ class RoleResponse(BaseModel):
     defaults_applied: bool
     user_count: int
     permission_codes: list[str]
+    # 能否经绑定接口授出（TD-187d）：超管角色为 false。服务端下发，前端不按 code 硬编码。
+    bindable: bool
 
 
 class PermissionResponse(BaseModel):
@@ -140,11 +149,14 @@ class ResetPreviewResponse(BaseModel):
 
 
 class RoleResetPayload(BaseModel):
-    """重置出厂请求：输入角色 code 二次确认 + 理由 + 版本。"""
+    """重置出厂请求：输入角色 code 二次确认 + 理由 + 版本 + 自扩权确认。"""
 
     confirm_role_code: str = Field(min_length=1, max_length=64)
     reason: str = Field(min_length=1, max_length=500)
     version: int = Field(ge=0)
+    # 自扩权显式确认（TD-194）：重置会同时重种权限与范围，范围侧对 `school_admin` 的持有人
+    # 是可达路径（出厂范围含 `school`）。默认 false —— 缺省不确认即 422，不静默放行。
+    self_grant_ack: bool = False
 
 
 class RoleCreatePayload(BaseModel):
@@ -175,7 +187,11 @@ class RoleCreatePayload(BaseModel):
 
 
 class RoleDeletePayload(BaseModel):
-    """删除自定义角色请求：逐字确认角色 code + 理由（服务层再校验 ≥10）+ 版本 CAS。"""
+    """删除自定义角色请求：逐字确认角色 code + 理由（服务层再校验 ≥10）+ 双判据 CAS。
+
+    `version` 挡"预览后角色权限/范围被改"，`fingerprint` 挡"预览后持有人集合被改"（TD-199）。
+    指纹原样回传预览值即可——它是 SHA-256 十六进制，服务端只做相等比较，不解析内容。
+    """
 
     # 有意比 `code` 的上界（63）宽：这个字段只做逐字相等比较，超长必然是"用错了"，要让它走到
     # 服务层才有 `{code,message}` 形状的 `ROLE_CODE_MISMATCH`；收成 63 会先撞 Pydantic 的数组形
@@ -183,6 +199,8 @@ class RoleDeletePayload(BaseModel):
     confirm_role_code: str = Field(min_length=1, max_length=64)
     reason: str = Field(min_length=1, max_length=500)
     version: int = Field(ge=0)
+    # 必填：漏传就 422（Pydantic），而不是让服务层把 None 当成"指纹不匹配"给一个语义模糊的 409。
+    fingerprint: str = Field(min_length=1, max_length=128)
 
 
 class RoleDeletionPreviewResponse(BaseModel):
@@ -193,6 +211,51 @@ class RoleDeletionPreviewResponse(BaseModel):
     version: int
     affected_users: int
     permission_codes: list[str]
+    fingerprint: str
+
+
+class BoundRoleResponse(BaseModel):
+    """账号当前绑定的一个角色。"""
+
+    id: UUID
+    code: str
+    name: str
+    is_system: bool
+    bindable: bool
+
+
+class UserBindingsResponse(BaseModel):
+    """一个账号的绑定快照 + 生效权限并集。"""
+
+    user_id: UUID
+    display_name: str | None
+    user_type: str
+    status: str
+    roles_version: int
+    roles: list[BoundRoleResponse]
+    permission_codes: list[str]
+
+
+class BindingUpdatePayload(BaseModel):
+    """全量替换账号角色绑定。
+
+    `role_ids` 的元素类型由 Pydantic 收窄（非 UUID 是类型错误，不是业务判据）；
+    跨租/不存在的 id 是业务判据，交给服务层给同形 404 与拒绝审计。
+    空清单合法（"收回全部权限"）；`version` 是读到的账号绑定版本（`users.roles_version`）。
+    """
+
+    role_ids: list[UUID]
+    version: int = Field(ge=0)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class BindingUpdateResponse(UserBindingsResponse):
+    """全量替换的结果：最新快照 + 角色/权限码差异。"""
+
+    added_role_codes: list[str]
+    removed_role_codes: list[str]
+    added_permission_codes: list[str]
+    removed_permission_codes: list[str]
 
 
 class UserLookupResponse(BaseModel):
@@ -224,6 +287,7 @@ def _role_response(summary: RoleSummary) -> RoleResponse:
         defaults_applied=summary.defaults_applied,
         user_count=summary.user_count,
         permission_codes=list(summary.permission_codes),
+        bindable=summary.bindable,
     )
 
 
@@ -245,6 +309,39 @@ def _deletion_response(preview: RoleDeletionPreview) -> RoleDeletionPreviewRespo
         version=preview.version,
         affected_users=preview.affected_users,
         permission_codes=list(preview.permission_codes),
+        fingerprint=preview.fingerprint,
+    )
+
+
+def _bindings_response(bindings: UserBindings) -> UserBindingsResponse:
+    return UserBindingsResponse(
+        user_id=bindings.user_id,
+        display_name=bindings.display_name,
+        user_type=bindings.user_type,
+        status=bindings.status,
+        roles_version=bindings.roles_version,
+        roles=[
+            BoundRoleResponse(
+                id=role.id,
+                code=role.code,
+                name=role.name,
+                is_system=role.is_system,
+                bindable=role.bindable,
+            )
+            for role in bindings.roles
+        ],
+        permission_codes=list(bindings.permission_codes),
+    )
+
+
+def _binding_update_response(update: BindingUpdate) -> BindingUpdateResponse:
+    snapshot = _bindings_response(update.bindings)
+    return BindingUpdateResponse(
+        **snapshot.model_dump(),
+        added_role_codes=list(update.added_role_codes),
+        removed_role_codes=list(update.removed_role_codes),
+        added_permission_codes=list(update.added_permission_codes),
+        removed_permission_codes=list(update.removed_permission_codes),
     )
 
 
@@ -265,6 +362,17 @@ def _role_error(exc: RoleAdminError) -> HTTPException:
     detail: dict[str, Any] = {"code": exc.code, "message": exc.message}
     if exc.latest is not None:
         detail["latest"] = _role_response(exc.latest).model_dump(mode="json")
+    if exc.latest_preview is not None:
+        # 删除预览过期（TD-199）：回带最新影响面，调用方刷新确认框后重试，
+        # 不必先跳一次 GET 再回来。
+        detail["latest_preview"] = _deletion_response(exc.latest_preview).model_dump(mode="json")
+    return HTTPException(status_code=exc.http_status, detail=detail)
+
+
+def _binding_error(exc: BindingAdminError) -> HTTPException:
+    detail: dict[str, Any] = {"code": exc.code, "message": exc.message}
+    if exc.latest is not None:
+        detail["latest"] = _bindings_response(exc.latest).model_dump(mode="json")
     return HTTPException(status_code=exc.http_status, detail=detail)
 
 
@@ -452,8 +560,12 @@ async def reset_role(
 ) -> ResetPreviewResponse:
     """把角色恢复出厂：权限与数据范围一并重种，写审计后返回执行后的影响面。
 
+    权限与范围两个维度都过自扩权守卫（TD-194）：重置 `school_admin` 会把它自己的范围
+    净增回 `school`（出厂范围含全校），未带 `self_grant_ack` 的重置现在 422。
+
     异常:
-        HTTPException: 404、409（锁定/版本冲突/无出厂定义）、422（角色名或理由不合格）。
+        HTTPException: 404、409（锁定/版本冲突/无出厂定义）、
+            422（角色名或理由不合格、`SELF_GRANT_CONFIRMATION_REQUIRED`）。
     """
 
     try:
@@ -464,6 +576,7 @@ async def reset_role(
             reason=payload.reason,
             version=payload.version,
             request_id=getattr(request.state, "request_id", None),
+            self_grant_ack=payload.self_grant_ack,
         )
     except RoleAdminError as exc:
         raise _role_error(exc) from exc
@@ -531,10 +644,12 @@ async def delete_role(
 
     删除前的权限码集与受影响用户数先快照进审计——CASCADE 之后取不回，
     没有这份快照就无法回答「谁在什么时候失去了哪些权限」。
+    `version` 与 `fingerprint` 是两套判据（TD-199）：前者挡预览后角色配置被改，
+    后者挡预览后持有人集合被改；指纹过期回 409 `ROLE_DELETE_PREVIEW_STALE` + 最新影响面。
 
     异常:
         HTTPException: 403（缺 `school.role.delete`）、404（不存在/跨租）、
-            409（内置角色不可删/版本冲突）、422（确认码不符或理由不足 10 字符）。
+            409（内置角色不可删/版本冲突/影响面已变化）、422（确认码不符或理由不足 10 字符）。
     """
 
     try:
@@ -544,6 +659,7 @@ async def delete_role(
             confirm_role_code=payload.confirm_role_code,
             reason=payload.reason,
             version=payload.version,
+            fingerprint=payload.fingerprint,
             request_id=getattr(request.state, "request_id", None),
         )
     except RoleAdminError as exc:
@@ -577,6 +693,60 @@ async def lookup_user(
         mfa_enabled=user.mfa_enabled,
         roles=list(user.roles),
     )
+
+
+@router.get("/users/{user_id}/roles", response_model=UserBindingsResponse)
+async def get_user_roles(
+    user_id: UUID,
+    account_manager: Annotated[Principal, AccountManagerDep],
+) -> UserBindingsResponse:
+    """该账号当前绑定的角色与生效权限并集（只读，不审计成功查询）。
+
+    `roles_version` 是下一次 `PUT` 必须回传的绑定版本；`roles[].bindable` 由服务端下发
+    （超管角色为 false），绑定页据此过滤，避免"能选中、提交必 422"的死胡同。
+
+    异常:
+        HTTPException: 403（缺 `school.permission_account.manage`）、404（不存在/跨租/已删除）。
+    """
+
+    try:
+        snapshot = await binding.get_user_bindings(account_manager, user_id)
+    except BindingAdminError as exc:
+        raise _binding_error(exc) from exc
+    return _bindings_response(snapshot)
+
+
+@router.put("/users/{user_id}/roles", response_model=BindingUpdateResponse)
+async def replace_user_roles(
+    user_id: UUID,
+    payload: BindingUpdatePayload,
+    request: Request,
+    account_manager: Annotated[Principal, AccountManagerDep],
+) -> BindingUpdateResponse:
+    """全量替换账号的角色绑定集（`users.roles_version` CAS + 差异审计）。
+
+    绑定/解绑**下一个请求即生效**，不作废在线会话（权限每请求从库里重读）。
+    操作者不能改自己的绑定（403 `BINDING_SELF_FORBIDDEN`）；目标不许是超管账号、
+    提交的角色不许含超管角色；空清单合法（收回全部权限）。
+
+    异常:
+        HTTPException: 403（缺权限码/自绑/目标超管）、404（目标或角色不存在/跨租）、
+            409（`BINDING_VERSION_CONFLICT`，带最新绑定快照）、
+            422（目标账号类型不可绑/超管角色不可绑）。
+    """
+
+    try:
+        update = await binding.replace_user_bindings(
+            account_manager,
+            user_id,
+            role_ids=list(payload.role_ids),
+            version=payload.version,
+            reason=payload.reason,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except BindingAdminError as exc:
+        raise _binding_error(exc) from exc
+    return _binding_update_response(update)
 
 
 @router.post("/users/{user_id}/mfa/reset", status_code=status.HTTP_204_NO_CONTENT)
