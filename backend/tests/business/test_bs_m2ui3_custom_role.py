@@ -1,4 +1,4 @@
-"""业务场景 BS-M2UI3-A / BS-M2UI3-E（节选）：自定义角色的创建与删除（TD-187b）。
+"""业务场景 BS-M2UI3-A / B / D / E（节选）：自定义角色的创建、绑定与删除（TD-187b / TD-187d）。
 
 Given 校方超管、一名尚无任何角色的馆员账号，
 When 建自定义角色（初始权限或复制同租户可编辑角色）、把角色绑给人、再删掉它，
@@ -7,16 +7,19 @@ Then 每条断言都落在**库与业务结果**上，不是 HTTP 200：
 - 建：`roles.is_system=false`、`defaults_applied=false`、`version=0`，`role_permissions` 逐码相等；
   列表里 `editable=true` 且无 `lock_reason`；跑一次 RBAC 同步后**分毫不动**
   （自定义角色永不参与补种，否则运营配置会被"恢复默认"）；
-- 生效：把角色绑给馆员后，同一条 access token 下一请求从 403 翻成 200（能力来自库里的角色，
-  不来自令牌快照）；
-- 删：预览只读不审计；确认码/理由/版本三类错误各自不删数据、不推版本；内置角色 409 且留痕；
-  成功那次 `role_permissions`/`data_scopes`/`user_roles` 随复合外键 CASCADE 清空，馆员下一请求
-  重新 403，且审计带着**删除前**的完整权限码集（CASCADE 之后这是唯一的复盘来源）。
+- 生效（BS-M2UI3-A/B）：绑定/解绑后，**同一条 access token 的下一请求**从 403 翻成 200、再翻回
+  403（能力来自库里的角色，不来自令牌快照），会话不被撤销；
+- 拒绑（BS-M2UI3-D）：自绑 403、超管角色 422、超管目标 403——三类拒绝都留痕且库里绑定不变；
+- 删（BS-M2UI3-E）：预览只读不审计；确认码/理由/版本/影响面指纹四类错误各自不删数据、不推版本；
+  内置角色 409 且留痕；成功那次 `role_permissions`/`data_scopes`/`user_roles` 随复合外键 CASCADE
+  清空，馆员下一请求重新 403，且审计带着**删除前**的完整权限码集（CASCADE 之后这是唯一的复盘
+  来源）。预览后有人被改绑 → 指纹不匹配 409，刷新重试才放行（TD-199）。
 
 创建入参的边界（保留码、复制源、平台域码、转授禁令、双输入歧义）与删除权限的分离（决策 #6）
 写在同一文件：它们都是"建/删角色"这一步的可观察行为，拆到别处只会把一条链路切碎。
 """
 
+import hashlib
 import os
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -199,13 +202,38 @@ async def _sql_exec(statement: str, params: dict[str, Any]) -> None:
         await engine.dispose()
 
 
-async def _bind_user_role(tenant_id: UUID, user_id: UUID, role_id: UUID) -> None:
-    """用户↔角色绑定：TD-187d 才开放接口，这里走同一条真实 SQL 链路。"""
+async def _bindings(client: AsyncClient, headers: dict[str, str], user_id: UUID) -> Any:
+    return await client.get(f"/api/v1/school/users/{user_id}/roles", headers=headers)
 
-    await _sql_exec(
-        "insert into user_roles (tenant_id, user_id, role_id) values (:tid, :uid, :rid)",
-        {"tid": str(tenant_id), "uid": str(user_id), "rid": str(role_id)},
+
+async def _bind(
+    client: AsyncClient,
+    headers: dict[str, str],
+    user_id: UUID,
+    role_ids: list[UUID],
+    *,
+    version: int,
+    reason: str | None = None,
+) -> Any:
+    """调真实绑定接口（TD-187d）：`version` 是读到的 `users.roles_version`。"""
+
+    body: dict[str, Any] = {"role_ids": [str(item) for item in role_ids], "version": version}
+    if reason is not None:
+        body["reason"] = reason
+    return await client.put(
+        f"/api/v1/school/users/{user_id}/roles", json=body, headers=headers
     )
+
+
+def _expected_fingerprint(role_id: UUID, user_ids: list[UUID]) -> str:
+    """按契约重算删除影响面指纹（TD-199）：SHA-256(`role_id|排序后的持有人 id`)。
+
+    在测试里重写一遍而不是调服务层函数：这是**对外契约**的一部分（前端原样回传），
+    实现若改了拼接口径，别处的调用方（含 187g 的删除确认框）会静默失配。
+    """
+
+    material = f"{role_id}|{','.join(sorted(str(item) for item in user_ids))}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 async def _role_exists(tenant_id: UUID, role_id: UUID) -> bool:
@@ -354,6 +382,7 @@ async def _delete(
     role_id: UUID | str,
     *,
     confirm_role_code: str,
+    fingerprint: str,
     reason: str = DELETION_REASON,
     version: int,
 ) -> Any:
@@ -363,6 +392,7 @@ async def _delete(
             "confirm_role_code": confirm_role_code,
             "reason": reason,
             "version": version,
+            "fingerprint": fingerprint,
         },
         headers=headers,
     )
@@ -408,6 +438,8 @@ async def test_create_custom_role_grants_capability_and_survives_sync(
         "defaults_applied": False,
         "user_count": 0,
         "permission_codes": LIBRARIAN_CODES,
+        # 服务端派生：自定义角色可绑定（只有超管角色为 false，见 BS-M2UI3-D）
+        "bindable": True,
     }
 
     # Then 库里的权限映射逐码相等（断言的是"表里有什么"，不是"接口回显了什么"）
@@ -467,8 +499,27 @@ async def test_create_custom_role_grants_capability_and_survives_sync(
     assert int(row_after_sync["version"]) == version_before_sync
     assert row_after_sync["defaults_applied"] is False
 
-    # When 把角色绑给馆员（绑定接口是 TD-187d；这里走同一条 SQL 链路）
-    await _bind_user_role(tenant_id, seeded["keeper_id"], role_id)
+    # When 超管把角色绑给馆员（TD-187d 的真实接口）
+    before_binding = await _bindings(client, super_headers, seeded["keeper_id"])
+    assert before_binding.status_code == 200, before_binding.text
+    assert before_binding.json()["roles_version"] == 0
+    assert before_binding.json()["permission_codes"] == []
+    bound = await _bind(
+        client,
+        super_headers,
+        seeded["keeper_id"],
+        [role_id],
+        version=0,
+        reason="把图书馆岗位角色授给馆员（业务场景 BS-M2UI3-A）",
+    )
+    assert bound.status_code == 200, bound.text
+    bound_body = bound.json()
+    assert [item["code"] for item in bound_body["roles"]] == ["library_keeper"]
+    assert bound_body["roles_version"] == 1
+    assert bound_body["added_role_codes"] == ["library_keeper"]
+    assert bound_body["removed_role_codes"] == []
+    assert set(bound_body["added_permission_codes"]) == set(LIBRARIAN_CODES)
+    assert bound_body["removed_permission_codes"] == []
 
     # Then 同一条 access token 下一请求即生效，会话没有被撤销
     assert (
@@ -492,6 +543,19 @@ async def test_create_custom_role_grants_capability_and_survives_sync(
     assert metadata["permission_codes"] == LIBRARIAN_CODES
     assert metadata["copy_from_role_id"] is None
     assert "BS-M2UI3-A" in str(metadata["reason"])
+
+    # 绑定留痕：谁在什么时候给了哪些角色/权限。权限码 diff 是"这个人为什么突然能看人员"的唯一
+    # 事后证据——绑定行本身被删掉后就只剩这条审计（BS-M2UI3-B 的解绑同理）。
+    binding_audit = await _audit_entries("school.user.roles.updated")
+    assert [(e["result"], e["resource_id"]) for e in binding_audit] == [
+        ("success", str(seeded["keeper_id"]))
+    ], binding_audit
+    binding_metadata = binding_audit[0]["metadata"]
+    assert binding_metadata["role_codes_before"] == []
+    assert binding_metadata["role_codes_after"] == ["library_keeper"]
+    assert set(binding_metadata["added_permission_codes"]) == set(LIBRARIAN_CODES)
+    assert binding_metadata["removed_permission_codes"] == []
+    assert "BS-M2UI3-A" in str(binding_metadata["reason"])
 
 
 async def test_copy_from_and_initial_codes_are_exclusive(client: AsyncClient) -> None:
@@ -700,10 +764,16 @@ async def test_delete_requires_its_own_permission_code(client: AsyncClient) -> N
         "version": 0,
         "affected_users": 0,
         "permission_codes": LIBRARIAN_CODES,
+        "fingerprint": _expected_fingerprint(role_id, []),
     }
 
     denied = await _delete(
-        client, manager_headers, role_id, confirm_role_code="doomed_role", version=0
+        client,
+        manager_headers,
+        role_id,
+        confirm_role_code="doomed_role",
+        version=0,
+        fingerprint=preview.json()["fingerprint"],
     )
     assert denied.status_code == 403, denied.text
     # 服务端门禁，不是前端按钮禁用：角色与其权限映射都还在
@@ -732,7 +802,15 @@ async def test_delete_custom_role_cascades_and_snapshots_into_audit(
         client, super_headers, code="temp_keeper", permission_codes=LIBRARIAN_CODES
     )
     role_id = UUID(created.json()["id"])
-    await _bind_user_role(tenant_id, seeded["keeper_id"], role_id)
+    bound = await _bind(
+        client,
+        super_headers,
+        seeded["keeper_id"],
+        [role_id],
+        version=0,
+        reason="删除前先绑人，验证 CASCADE 与影响面（业务场景 BS-M2UI3-E）",
+    )
+    assert bound.status_code == 200, bound.text
     # 数据范围行（TD-187c 才开放接口，这里直接建）：验证它也随 CASCADE 消失
     await _sql_exec(
         "insert into data_scopes (tenant_id, role_id, scope_type, scope_id) "
@@ -769,13 +847,21 @@ async def test_delete_custom_role_cascades_and_snapshots_into_audit(
         "version": 2,
         "affected_users": 1,
         "permission_codes": LIBRARIAN_CODES,
+        # 指纹只覆盖"角色 + 持有人集合"：库里的 holder 就是那个馆员，重算值必须逐字相同
+        "fingerprint": _expected_fingerprint(role_id, [seeded["keeper_id"]]),
     }
     assert await _audit_entries("school.role.deleted") == []
     assert await _role_exists(tenant_id, role_id)
+    fingerprint = preview.json()["fingerprint"]
 
     # 确认码打错 → 422，不删（"用错了"，不落安全审计）
     mismatch = await _delete(
-        client, super_headers, role_id, confirm_role_code="temp-keeper", version=2
+        client,
+        super_headers,
+        role_id,
+        confirm_role_code="temp-keeper",
+        version=2,
+        fingerprint=fingerprint,
     )
     assert mismatch.status_code == 422, mismatch.text
     assert _detail_code(mismatch) == "ROLE_CODE_MISMATCH"
@@ -789,23 +875,51 @@ async def test_delete_custom_role_cascades_and_snapshots_into_audit(
         confirm_role_code="temp_keeper",
         reason="不用了",
         version=2,
+        fingerprint=fingerprint,
     )
     assert short_reason.status_code == 422, short_reason.text
     assert _detail_code(short_reason) == "ROLE_DELETE_REASON_REQUIRED"
 
     # 版本过期 → 409 + 最新快照，不删
     stale = await _delete(
-        client, super_headers, role_id, confirm_role_code="temp_keeper", version=7
+        client,
+        super_headers,
+        role_id,
+        confirm_role_code="temp_keeper",
+        version=7,
+        fingerprint=fingerprint,
     )
     assert stale.status_code == 409, stale.text
     assert _detail_code(stale) == "ROLE_VERSION_CONFLICT"
     assert stale.json()["detail"]["latest"]["version"] == 2
     assert await _role_exists(tenant_id, role_id)
 
+    # 指纹过期 → 409 + 最新影响面（两套判据互不替代：这里版本是对的，只有持有人集合对不上）
+    stale_preview = await _delete(
+        client,
+        super_headers,
+        role_id,
+        confirm_role_code="temp_keeper",
+        version=2,
+        fingerprint=_expected_fingerprint(role_id, []),
+    )
+    assert stale_preview.status_code == 409, stale_preview.text
+    assert _detail_code(stale_preview) == "ROLE_DELETE_PREVIEW_STALE"
+    assert stale_preview.json()["detail"]["latest_preview"]["fingerprint"] == fingerprint
+    assert stale_preview.json()["detail"]["latest_preview"]["affected_users"] == 1
+    assert await _role_exists(tenant_id, role_id)
+    # 并发绑定不是安全事件：不写拒绝审计（与 ROLE_VERSION_CONFLICT 同口径）
+    assert await _audit_entries("school.role.delete_denied") == []
+
     # 内置角色不可删：409 且留痕（只能重置或改配置）
     builtin_id = await _role_id_by_code(tenant_id, "school_admin")
     builtin_delete = await _delete(
-        client, super_headers, builtin_id, confirm_role_code="school_admin", version=0
+        client,
+        super_headers,
+        builtin_id,
+        confirm_role_code="school_admin",
+        version=0,
+        fingerprint=fingerprint,
     )
     assert builtin_delete.status_code == 409, builtin_delete.text
     assert _detail_code(builtin_delete) == "ROLE_NOT_DELETABLE"
@@ -814,20 +928,35 @@ async def test_delete_custom_role_cascades_and_snapshots_into_audit(
     # 不存在 / 别人家的同名角色：同形 404，不区分「没有」与「不是你的」
     missing_id = uuid4()
     missing_delete = await _delete(
-        client, super_headers, missing_id, confirm_role_code="ghost", version=0
+        client,
+        super_headers,
+        missing_id,
+        confirm_role_code="ghost",
+        version=0,
+        fingerprint=fingerprint,
     )
     assert missing_delete.status_code == 404, missing_delete.text
     foreign = await _seed_bare_school(f"SCH-CRY{uuid4().hex[:6].upper()}")
     foreign_role_id = await _role_id_by_code(foreign["tenant_id"], "school_admin")
     foreign_delete = await _delete(
-        client, super_headers, foreign_role_id, confirm_role_code="school_admin", version=0
+        client,
+        super_headers,
+        foreign_role_id,
+        confirm_role_code="school_admin",
+        version=0,
+        fingerprint=fingerprint,
     )
     assert foreign_delete.status_code == 404, foreign_delete.text
     assert await _role_exists(foreign["tenant_id"], foreign_role_id)
 
     # When 正式删除
     deleted = await _delete(
-        client, super_headers, role_id, confirm_role_code="temp_keeper", version=2
+        client,
+        super_headers,
+        role_id,
+        confirm_role_code="temp_keeper",
+        version=2,
+        fingerprint=fingerprint,
     )
     assert deleted.status_code == 200, deleted.text
     # 与预览同形同值：`version` 是被删行的**最后版本号**，不是 `+1`——行已不在了，
@@ -872,3 +1001,245 @@ async def test_delete_custom_role_cascades_and_snapshots_into_audit(
         str(missing_id),
         str(foreign_role_id),
     ], denied
+
+
+async def test_unbinding_revokes_capability_without_touching_the_session(
+    client: AsyncClient,
+) -> None:
+    """BS-M2UI3-B：解绑后**同一条 token** 的下一请求立刻 403，会话不被撤销。
+
+    "撤权限"与"踢下线"是两件事：绑定走的是每请求读库，令牌不必作废；若这里顺手撤销会话，
+    一次岗位调整会把人的所有设备踢掉，运营就会因为怕影响人而不敢收回权限。
+    """
+
+    school_code = f"SCH-CR{uuid4().hex[:6].upper()}"
+    seeded = await _seed_school(school_code)
+    super_headers = await login_tenant(
+        client, school_code=school_code, login_id=SUPER_LOGIN, password=SUPER_PASSWORD
+    )
+    keeper_headers = await login_tenant(
+        client, school_code=school_code, login_id=KEEPER_LOGIN, password=KEEPER_PASSWORD
+    )
+    created = await _create(
+        client, super_headers, code="library_keeper", permission_codes=LIBRARIAN_CODES
+    )
+    role_id = UUID(created.json()["id"])
+
+    bound = await _bind(
+        client,
+        super_headers,
+        seeded["keeper_id"],
+        [role_id],
+        version=0,
+        reason="先授岗位角色（业务场景 BS-M2UI3-B）",
+    )
+    assert bound.status_code == 200, bound.text
+    assert (
+        await client.get("/api/v1/school/personnel?limit=5", headers=keeper_headers)
+    ).status_code == 200
+
+    # 解绑 = 全量替换成空集（不是"删一条绑定行"的专用接口）
+    unbound = await _bind(
+        client,
+        super_headers,
+        seeded["keeper_id"],
+        [],
+        version=bound.json()["roles_version"],
+        reason="岗位撤销，收回全部角色（业务场景 BS-M2UI3-B）",
+    )
+    assert unbound.status_code == 200, unbound.text
+    body = unbound.json()
+    assert body["roles"] == [] and body["permission_codes"] == []
+    assert body["removed_role_codes"] == ["library_keeper"]
+    assert set(body["removed_permission_codes"]) == set(LIBRARIAN_CODES)
+    assert body["added_role_codes"] == [] and body["added_permission_codes"] == []
+
+    # 下一请求即失权；令牌与会话都还活着（会话在，能力不在）
+    assert (
+        await client.get("/api/v1/school/personnel?limit=5", headers=keeper_headers)
+    ).status_code == 403
+    assert (await client.get("/api/v1/auth/me", headers=keeper_headers)).status_code == 200
+
+    audits = await _audit_entries("school.user.roles.updated")
+    assert len(audits) == 2, audits
+    assert audits[1]["metadata"]["role_codes_before"] == ["library_keeper"]
+    assert audits[1]["metadata"]["role_codes_after"] == []
+    assert set(audits[1]["metadata"]["removed_permission_codes"]) == set(LIBRARIAN_CODES)
+
+
+async def test_binding_rejections_are_audited_and_change_nothing(client: AsyncClient) -> None:
+    """BS-M2UI3-D：自绑 / 超管角色 / 超管目标 / 学生目标，四类拒绝各自留痕，库里绑定不变。
+
+    自绑禁令是"建含敏感码的角色 → 绑给自己"这条链的唯一承重墙（简报 §14.5）：它必须在任何
+    数据库读写之前生效。其余三条把"谁能被绑定"收在服务端，前端过滤 `bindable` 只是体验。
+    """
+
+    school_code = f"SCH-CR{uuid4().hex[:6].upper()}"
+    seeded = await _seed_school(school_code)
+    tenant_id = seeded["tenant_id"]
+    super_headers = await login_tenant(
+        client, school_code=school_code, login_id=SUPER_LOGIN, password=SUPER_PASSWORD
+    )
+    engine = make_test_engine("admin")
+    try:
+        _, student_id = await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id="cust-role-student",
+            password="CustRole-Student-Pass-1",
+            user_type="student",
+        )
+        await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id="cust-role-account-manager",
+            password="CustRole-Account-Pass-1",
+            permissions=("school.permission_account.manage",),
+        )
+    finally:
+        await engine.dispose()
+    operator_headers = await login_tenant(
+        client,
+        school_code=school_code,
+        login_id="cust-role-account-manager",
+        password="CustRole-Account-Pass-1",
+    )
+
+    super_role_id = await _role_id_by_code(tenant_id, "school_super_admin")
+    admin_role_id = await _role_id_by_code(tenant_id, "school_admin")
+
+    # ① 自绑：超管改自己的绑定 → 403（不是 422、也不是"允许但无效果"）
+    self_bind = await _bind(
+        client, super_headers, seeded["super_id"], [], version=0, reason="尝试改自己的绑定"
+    )
+    assert self_bind.status_code == 403, self_bind.text
+    assert _detail_code(self_bind) == "BINDING_SELF_FORBIDDEN"
+
+    # ② 超管角色不能经绑定接口授出（否则持 permission_account.manage 的人可自行提权）
+    super_role = await _bind(
+        client, operator_headers, seeded["keeper_id"], [super_role_id], version=0
+    )
+    assert super_role.status_code == 422, super_role.text
+    assert _detail_code(super_role) == "ROLE_NOT_BINDABLE"
+
+    # ③ 超管账号的绑定由平台开通流程管理：租户内任何改动都拒
+    super_target = await _bind(
+        client, operator_headers, seeded["super_id"], [admin_role_id], version=0
+    )
+    assert super_target.status_code == 403, super_target.text
+    assert _detail_code(super_target) == "BINDING_SUPER_ADMIN_FORBIDDEN"
+
+    # ④ 学生账号不可绑（C 端权限不走 B 端角色）
+    student_target = await _bind(
+        client, operator_headers, student_id, [admin_role_id], version=0
+    )
+    assert student_target.status_code == 422, student_target.text
+    assert _detail_code(student_target) == "BINDING_TARGET_NOT_ALLOWED"
+
+    # 库里绑定一条没变：馆员仍为空，超管仍只有超管角色
+    keeper_bindings = await _bindings(client, operator_headers, seeded["keeper_id"])
+    assert keeper_bindings.json()["roles"] == []
+    assert keeper_bindings.json()["roles_version"] == 0
+    super_bindings = await _bindings(client, operator_headers, seeded["super_id"])
+    assert [item["code"] for item in super_bindings.json()["roles"]] == ["school_super_admin"]
+    assert super_bindings.json()["roles_version"] == 0
+
+    # 四类拒绝各留一条痕，按发生顺序；资源指向被操作账号
+    denied = await _audit_entries("school.user.roles.denied")
+    assert [
+        (entry["result"], entry["resource_id"], entry["metadata"].get("reason"))
+        for entry in denied
+    ] == [
+        ("denied", str(seeded["super_id"]), "BINDING_SELF_FORBIDDEN"),
+        ("denied", str(seeded["keeper_id"]), "ROLE_NOT_BINDABLE"),
+        ("denied", str(seeded["super_id"]), "BINDING_SUPER_ADMIN_FORBIDDEN"),
+        ("denied", str(student_id), "BINDING_TARGET_NOT_ALLOWED"),
+    ], denied
+    assert denied[3]["metadata"]["target_user_type"] == "student"
+    assert await _audit_entries("school.user.roles.updated") == []
+
+    # 角色列表把 bindable 下发：前端不必按 code 硬编码
+    roles = (await client.get("/api/v1/school/roles", headers=super_headers)).json()
+    by_code = {item["code"]: item for item in roles}
+    assert by_code["school_super_admin"]["bindable"] is False
+    assert by_code["school_admin"]["bindable"] is True
+
+
+async def test_delete_preview_goes_stale_when_bindings_change(client: AsyncClient) -> None:
+    """BS-M2UI3-E（TD-199）：预览 → 有人被改绑 → 删除 409；刷新后按新影响面删除成功。
+
+    绑定的写入**不推进** `roles.version`（否则一次改绑会让所有人的角色编辑草稿失效），所以
+    版本 CAS 看不见它；指纹是这条时间差上唯一的新鲜度判据。第 3 步用旧版本号 + 旧指纹去删：
+    若指纹判据被误删或写成"比人数"，这里会成功删掉一个已经影响 2 人的角色。
+    """
+
+    school_code = f"SCH-CR{uuid4().hex[:6].upper()}"
+    seeded = await _seed_school(school_code)
+    tenant_id = seeded["tenant_id"]
+    super_headers = await login_tenant(
+        client, school_code=school_code, login_id=SUPER_LOGIN, password=SUPER_PASSWORD
+    )
+    created = await _create(
+        client, super_headers, code="temp_keeper", permission_codes=LIBRARIAN_CODES
+    )
+    role_id = UUID(created.json()["id"])
+    first = await _bind(
+        client, super_headers, seeded["keeper_id"], [role_id], version=0,
+        reason="预览前先绑一人（业务场景 BS-M2UI3-E）",
+    )
+    assert first.status_code == 200, first.text
+
+    preview = await client.post(
+        f"/api/v1/school/roles/{role_id}/delete/preview", headers=super_headers
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["affected_users"] == 1
+
+    # 预览之后：第二名教师被绑上同一角色（roles.version 仍是 0）
+    engine = make_test_engine("admin")
+    try:
+        _, teacher_id = await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id="cust-role-teacher",
+            password="CustRole-Teacher-Pass-1",
+            user_type="teacher",
+        )
+    finally:
+        await engine.dispose()
+    second = await _bind(
+        client, super_headers, teacher_id, [role_id], version=0,
+        reason="预览之后又绑了一名教师（业务场景 BS-M2UI3-E）",
+    )
+    assert second.status_code == 200, second.text
+    # 绑定不推进角色版本：这正是版本 CAS 挡不住、必须靠指纹的那段时间差
+    assert int((await _role_row(tenant_id, role_id))["version"]) == preview.json()["version"]
+
+    stale = await _delete(
+        client,
+        super_headers,
+        role_id,
+        confirm_role_code="temp_keeper",
+        version=preview.json()["version"],
+        fingerprint=preview.json()["fingerprint"],
+    )
+    assert stale.status_code == 409, stale.text
+    assert _detail_code(stale) == "ROLE_DELETE_PREVIEW_STALE"
+    latest = stale.json()["detail"]["latest_preview"]
+    assert latest["affected_users"] == 2
+    assert latest["fingerprint"] != preview.json()["fingerprint"]
+    # 版本没有前进：持有人变化不进 `roles.version`
+    assert latest["version"] == preview.json()["version"]
+    assert await _role_exists(tenant_id, role_id)
+
+    retried = await _delete(
+        client,
+        super_headers,
+        role_id,
+        confirm_role_code="temp_keeper",
+        version=latest["version"],
+        fingerprint=latest["fingerprint"],
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["affected_users"] == 2
+    assert not await _role_exists(tenant_id, role_id)

@@ -185,6 +185,30 @@ def test_ack_with_reason_passes() -> None:
     _assert_self_grant(_principal(), _EXPOSURE, self_grant_ack=True, reason="代管人事敏感信息核对")
 
 
+def test_scope_kind_uses_scope_wording_but_the_same_rules() -> None:
+    """`kind` 只切文案：范围维度未确认时同样 422，且消息点名范围值（`school` = 全校）。
+
+    两条腿共用一份判据是 TD-194 抽 helper 的理由；若范围侧漏掉 ack 校验、或错用权限文案，
+    运营在范围编辑页会看到"给自己新增敏感权限：school"这种对不上操作的提示。
+    """
+
+    scope_exposure = SelfGrantExposure(("school",))
+    with pytest.raises(RoleAdminError) as raised:
+        _assert_self_grant(
+            _principal(), scope_exposure, self_grant_ack=False, reason=None, kind="scope"
+        )
+    assert raised.value.code == "SELF_GRANT_CONFIRMATION_REQUIRED"
+    assert "数据范围" in raised.value.message and "school" in raised.value.message
+    with pytest.raises(RoleAdminError) as raised:
+        _assert_self_grant(
+            _principal(), scope_exposure, self_grant_ack=True, reason=" ", kind="scope"
+        )
+    assert raised.value.code == "SELF_GRANT_REASON_REQUIRED"
+    _assert_self_grant(
+        _principal(is_super=True), scope_exposure, self_grant_ack=False, reason=None, kind="scope"
+    )
+
+
 def test_super_admin_skips_the_interrupt_but_the_caller_still_audits() -> None:
     """超管免打断：ack/理由都不校验（否则每次正常配置都要重复勾选，运营会绕道）。
 
@@ -302,12 +326,12 @@ def test_scope_change_on_another_role_does_not_reach_self() -> None:
 def test_factory_defaults_of_editable_roles_do_hold_the_sensitive_scope() -> None:
     """范围侧的不变量与权限侧**相反**，而且这个相反是有意的：必须钉住它。
 
-    权限侧断言"可编辑角色的出厂默认 ∩ 敏感码 = ∅"，所以 `reset_role` 今天不构成自扩权通道。
-    范围侧同一条断言不成立——`school_admin` 的出厂范围本来就是 `school`（矩阵 §2）。于是
+    权限侧断言"可编辑角色的出厂默认 ∩ 敏感码 = ∅"，所以 `reset_role` 的权限维度今天不构成
+    自扩权通道。范围侧同一条断言不成立——`school_admin` 的出厂范围本来就是 `school`（矩阵 §2）。
     「有人把 school_admin 降级成 self → 另一个持有者执行重置出厂 → 他自己的可见范围从本人抬回
-    全校」是一条**不经过 ack** 的抬升路径。它今天靠 reset 自己的逐字确认 + 理由 ≥10 +
-    `school.role.reset` 审计兜住，但按 TD-194 已记录的收口范围，抽 helper 时必须把 reset
-    接进**范围版**判据，不能只接权限码那条腿。这条用例是那个结论的证据，不是待修的缺陷。
+    全校」就是一条真实的抬升路径；TD-194 收口时已把 `reset_role` 的**范围维度**接进
+    `_guard_self_grant`（未带 `self_grant_ack` 即 422，见 `test_bs_m2ui3_custom_role.py` 与
+    `test_rbac_reset_self_grant.py`）。这条用例改为守不变量本身：出厂默认一变，接线范围要重估。
     """
 
     offenders = {

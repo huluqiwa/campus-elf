@@ -334,3 +334,167 @@
 - `class` 范围行的只读展示与手工特例的长期方案沿用 §10 那条（独立表 + 与同步的优先级规则），本点不动；
 - 范围与权限共享一列 `version` → 前端两个编辑区会互相让对方的草稿失效，本点用"保存前重取快照 + 409 自动采用最新"缓解，彻底解法是分列版本或合并端点 → 登记 TD；
 - `school` 之外若将来出现第二个"覆盖型"范围（如 `department` 全校化），13.3 的敏感项清单要跟着改，本点先写死 `school` 单一事实来源。
+
+---
+
+## 14. TD-187d：用户↔多角色绑定（2026-10-29 简报，用户已拍板）
+
+对应任务：TD-187d（M2-UI3 第四批）、TD-194（守卫 helper 抽取 + `reset_role` 双维度接线）、TD-199（删除预览影响面失去 CAS 保护）。本批**只做绑定**；权限账号启停归 TD-187e。
+
+### 14.1 现状核对（读代码得到的事实）
+
+| 事项 | 事实 | 影响 |
+|---|---|---|
+| `user_roles` 表 | 已建：`uq_user_roles_user_id_role_id` + 两条复合外键（用户、角色都必须同租，`ondelete=CASCADE`）；模型只有 `user_id`/`role_id`，**没有 version/updated_at** | 数据面就绪；绑定的并发控制没有现成载体 |
+| 写入路径 | 全仓**没有任何 `insert/update/delete user_roles`**（只有 `Principal` 与审计侧的读取、测试直插） | 本接口是第一条写路径，TD-199 的"预览过期"从纸面变成真实窗口 |
+| 权限生效时机 | `app/auth/principal.py:140-196` **每个请求都重读** `user_roles → role_permissions → permissions`；`users.status != active` 直接拒绝 | 绑定/解绑**下一个请求即生效**，不需要撤 token、不打断在线会话（与 M2-UI2 权限编辑同口径） |
+| 绑定 CAS 载体 | `users` 只有 `token_version`（语义是"令牌失效"），**没有**可用于绑定集的版本列 | 需要一个新列，或改用"期望集合"比对（§14.4） |
+| 目标用户 | `GET /school/users/lookup` 已能按登录名精确定位并返回 `id/user_type/status/roles`（MFA 重置用，查询留审计） | 绑定页复用，不重复造 |
+| 角色目录 | `GET /school/roles` 的 `RoleResponse` 已含 `permission_codes`、`user_count`、`version` | 前端可在本地算绑定前后的权限差；服务端仍以落库结果为准（TD-195 口径） |
+| 内置租户角色 | 8 个：`school_super_admin`/`school_admin`/`teacher_b_end` + C 端 `student`/`teacher`；教师账号可能同时需要 C 端 `teacher` 与 B 端 `teacher_b_end` | 不能一刀切"只许绑 B 端角色"；真正不能绑的只有超管角色 |
+| 超管保护先例 | MFA 重置对超管目标一律 403（`app/personnel/mfa_admin.py`），由平台 CLI 兜底 | 绑定沿用同一保护口径 |
+| TD-199 | 删除预览的 `affected_users` 不受 `roles.version` 保护；`test_preview_affected_users_is_not_protected_by_the_version_cas` 钉住现状，注释要求绑定落地时翻成 409 断言 | 本批已拍板用**影响面指纹**收口（§14.3）；该用例已翻成 409 断言并改名 `test_preview_then_rebind_makes_the_delete_stale` |
+
+### 14.2 目标与不做
+
+**目标**
+
+1. `GET /school/users/{user_id}/roles`：读该账号当前绑定、绑定版本、生效权限并集。
+2. `PUT /school/users/{user_id}/roles`：全量替换绑定集，版本 CAS，差异审计。
+3. **自绑禁令**（决策 #5）：操作者不能改自己的绑定，403 + 拒绝审计。
+4. **超管保护**：不能改超管的绑定、不能经本接口把超管角色授给别人。
+5. **TD-199 收口**：绑定变化使删除预览的**影响面指纹**失效（§14.3）。
+6. **TD-194 收口**：抽出守卫 helper，并把 `reset_role` 的权限/范围两个维度接上（§14.8）。
+
+**不做**
+
+- 权限账号启停（TD-187e）、前端页面（TD-187g）。
+- 不做独立的绑定预览端点：前端用 `GET /users/{id}/roles` + `GET /school/roles` 本地算差异，服务端以落库后的审计 diff 为准（与 TD-195/§10 的前端预检口径一致）。若 187g 发现前端算不准，再加服务端预览。
+- 不做按人直授权限、不做账号删除、不做 C 端角色的分配策略（M4）。
+
+### 14.3 决策 A（已拍板 2026-10-29）：TD-199 用「影响面指纹」收口
+
+用户选择**指纹**，不采用"绑定 bump 角色版本"。
+
+**做法**
+
+- `POST /school/roles/{id}/delete/preview` 除 `affected_users` 外，新增 `fingerprint`：
+  `SHA-256(role_id + 按 id 排序的受影响 user_id 列表)` 的十六进制。只回哈希，不回显受影响用户清单。
+- `POST /school/roles/{id}/delete` 的请求体新增必填 `fingerprint`；既有 `version` 保留——它负责"角色权限/范围在预览后被改"，指纹负责"持有人集合在预览后被改"，两套判据各管一件事。
+- 执行时在 `roles` 行锁（`for update`）之后重新计算指纹；不一致 → 409 `ROLE_DELETE_PREVIEW_STALE`，回带最新预览（人数 + 指纹 + 版本）。调用方刷新后重新确认。
+- 删除执行路径在重算指纹前对 `user_roles` 的持有人行取 `FOR UPDATE`（预览不锁）：并发**解绑**不碰角色行锁，不锁持有人行时它能在"重算指纹 → CASCADE"之间提交，让响应与审计的 `affected_users` 多算一个已经解绑的人。锁序 `roles → user_roles`，与绑定的 `users → roles → user_roles` 无环。
+- 指纹只覆盖**持有人集合**，不覆盖权限码：权限/范围变化已经由 `roles.version` 挡住，避免同一次变化触发两条错误码。
+- 指纹无过期时间：它绑定的是状态而不是时间，状态没变就一直有效。
+- 并发顺序：删除先锁角色行；绑定写路径读取提交角色时持 `FOR KEY SHARE`（与 `user_roles` 插入所需的外键锁同档）。绑定要么在指纹重算前提交（指纹不匹配 → 409），要么被角色行锁挡到删除提交后（读不到角色 → 404 `ROLE_NOT_FOUND` + 拒绝审计）。不会出现"按旧人数删掉、绑定同时成功"，也不会把并发暴露成外键 500。
+  - 实现对齐（2026-10-29 复审 Major）：初稿只写了"绑定插入对角色行取外键共享锁"，那样删除先提交时绑定会在 INSERT 撞外键变成 500；落地时把锁提前到 `_roles_by_ids` 的角色读取（`for key share`），于是同一时序变成"等锁 → 读到 0 行 → 404"。用例 `test_rbac_binding.py::test_role_deleted_mid_binding_yields_404_instead_of_a_foreign_key_error` 先用 `pg_blocking_pids()` 确认有会话被本用例事务挡住，再提交删除；判据不绑定语句文本，因此锁被移除时"绑定改在 INSERT 外键检查处被挡、最终 `IntegrityError`"同样会如实转红，而绑定若晚于删除提交才启动（探测不到等待）也判失败，不留假绿。
+
+**为什么不用版本 bump（原推荐 A）**：你选指纹，是因为改绑不应让角色上未提交的权限/范围草稿失效——持有人变化只影响"删除风险面"，不影响角色自身的权限配置。代价是新增一个响应字段、一个请求字段与一个错误码，且要覆盖"绑了又解回同一集合 → 指纹相同、删除成功"这条用例。
+
+**测试翻面**：`test_preview_affected_users_is_not_protected_by_the_version_cas` 改名为指纹用例，断言"预览 → 改绑 → 删除 = 409"；另补"改绑后又解回原集合 → 删除成功"。（已落地：两个用例现为 `test_preview_then_rebind_makes_the_delete_stale` 与 `test_rebinding_back_to_the_same_set_keeps_the_preview_valid`。）
+
+### 14.4 决策 B（技术默认，可推翻）：绑定自身的并发控制
+
+**推荐：给 `users` 加一列 `roles_version integer not null default 0`**，`GET` 下发，`PUT` 必须带；不等则 409 并回带最新绑定快照。
+
+| 方案 | 说明 | 取舍 |
+|---|---|---|
+| **A（推荐）** | 新列 `users.roles_version`，每次绑定替换 `+1` | 与 `roles.version` 同一种交互（读 version → 提交 version → 冲突带快照）；一次小迁移；语义单列，不碰 `token_version` |
+| B | 请求带 `expected_role_ids`（客户端回显读到的集合），服务端按集合相等判 CAS | 不建列；但请求体翻倍，集合相等在"角色被删/重建"时语义模糊，前端要额外保存一份快照 |
+| C | 不加锁/不比对，后写覆盖 | 两个管理员同时改同一账号的绑定会静默丢掉一个人的改动——权限回收场景下这是安全问题，不采用 |
+
+两个版本号职责不同，不能合并：`users.roles_version` 防"同一账号的两次绑定互相覆盖"；`roles.version` 仍是角色自身权限/范围编辑的 CAS（删除预览的新鲜度由 §14.3 的指纹负责，绑定**不再**触碰 `roles.version`）。
+
+### 14.5 决策 C（已拍板 2026-10-29）：绑定路径不接自扩权守卫
+
+**先说事实**：在决策 #5（禁止改自己的绑定）成立的前提下，绑定**别人**的角色不会改变操作者自己的权限并集；而 `evaluate_self_grant` 判的是"被写角色的权限集是否让操作者本人净增敏感码"。绑定接口既不写角色权限集，也不允许目标是操作者本人——**判据没有可达的 true 分支**。
+
+| 方案 | 做法 | 结果 |
+|---|---|---|
+| **A（推荐）** | 不接守卫；**自绑禁令是这条链的唯一承重墙**；用例钉住"给自己绑 = 403 + `school.user.roles.denied`"；在 TD-194 备注里写死"#5 一旦放宽（自助换岗/代绑），绑定路径必须立刻按绑定后的操作者权限并集接守卫" | 与 §12.2 对创建路径的裁定同口径：不写结构上不可达的分支，不写只能靠 mock 的用例 |
+| B | 按 TD-194 字面"绑定侧也要接守卫" | 只能把"目标用户的并集"硬塞进"操作者是否扩权"的判据，语义是错的；或写成永不触发的分支，给后来人"绑定已受守卫保护"的错误暗示 |
+
+**已选 A**，并同步改 TD-194 的措辞：三条写路径 = 权限替换 + 范围替换 + `reset_role`（第四入口），**绑定不接**；#5 是绑定的硬前置。选 B 需要接受一条不可达分支与一条 mock 用例。
+
+### 14.6 决策 D（已拍板 2026-10-29，全部按推荐）：可绑定对象与超管保护
+
+| # | 规则 | 推荐 | 理由 |
+|---|---|---|---|
+| 1 | 目标用户类型 | 只允许 `teacher`/`school_admin`；`student` → 422 `BINDING_TARGET_NOT_ALLOWED` | 「权限账号」是 B 端概念；给学生绑后台角色等于绕过 B 端账号边界 |
+| 2 | 目标用户状态 | `deleted` 视为不存在（404，留拒绝审计）；`locked`/`disabled` 可绑 | 停用账号先配好角色再启用是正常流程；`locked` 是临时状态，不应阻止配置 |
+| 3 | 目标持有超管角色 | 一律 403 `BINDING_SUPER_ADMIN_FORBIDDEN`（增、删、清空都不行） | 与 MFA 重置同口径：超管由平台侧管理，避免租户内互相削权/加权 |
+| 4 | 提交的角色含超管角色 | 422 `ROLE_NOT_BINDABLE` | 否则持 `permission_account.manage` 的人可把任意账号提成超管，绕过平台开通流程 |
+| 5 | 空绑定集 | 允许 | "收回全部权限"是合法的离职/停岗动作；自绑被禁，不存在管理员误清自己 |
+| 6 | 跨租角色/用户 id | 一律 404 + 拒绝审计 | 不泄露存在性，沿用本项目既有口径 |
+
+第 1 条只拦"目标用户"，不拦"角色类型"：教师账号可能合法地同时持有 C 端 `teacher` 与 B 端 `teacher_b_end`。
+
+### 14.7 接口与错误契约
+
+| 方法/路径 | 权限码 | 说明 |
+|---|---|---|
+| `GET /school/users/{user_id}/roles` | `school.permission_account.manage` | 返回 `{user_id, display_name, user_type, status, roles_version, roles[], permission_codes[]}`；`roles[]` 含 `{id, code, name, is_system, bindable}`（与 `RoleResponse.bindable` 同源，超管角色为 false）。只读，不审计成功查询 |
+| `PUT /school/users/{user_id}/roles` | `school.permission_account.manage` | 全量替换；body `{role_ids: UUID[], version: int, reason?: str≤500}`；成功返回与 GET 相同形状 + `added/removed` 角色与权限码 diff |
+
+- `RoleResponse` 增加服务端派生字段 `bindable: bool`（当前只有 `school_super_admin` 为 false），前端绑定页据此过滤，避免"能选中、提交必 422"的死胡同（与 TD-200 的 `resettable` 同口径）。
+- 删除预览/删除契约（TD-199）：`RoleDeletionPreviewResponse` 增加 `fingerprint`；`RoleDeletePayload` 增加必填 `fingerprint`，`version` 保留。
+- 不新增权限码；绑定与启停共用 `school.permission_account.manage`。
+- 错误码新增：`BINDING_SELF_FORBIDDEN`(403)、`BINDING_TARGET_NOT_ALLOWED`(422)、`BINDING_SUPER_ADMIN_FORBIDDEN`(403)、`ROLE_NOT_BINDABLE`(422)、`BINDING_VERSION_CONFLICT`(409，回带最新绑定快照)、`ROLE_DELETE_PREVIEW_STALE`(409，回带最新删除预览)；沿用 `USER_NOT_FOUND`(404)、`ROLE_NOT_FOUND`(404)、`REALM_MISMATCH`(403)。
+- 审计：
+  - 成功 `school.user.roles.updated`：`role_codes_before/after`、`added_role_codes`、`removed_role_codes`、`added_permission_codes`、`removed_permission_codes`、`reason`；不写登录名/邮箱等明文。
+  - 拒绝 `school.user.roles.denied`：`reason` 为判据码（`BINDING_SELF_FORBIDDEN`/`BINDING_TARGET_NOT_ALLOWED`/`BINDING_SUPER_ADMIN_FORBIDDEN`/`ROLE_NOT_BINDABLE`/`USER_NOT_FOUND`/`ROLE_NOT_FOUND`）。
+  - 版本冲突不入拒绝审计（不是安全事件），只回 409 + 最新快照。
+  - 差异的时点：`added/removed_permission_codes` 是**本事务读到**的角色权限并集之差。并发改角色权限不会被绑定的 `FOR KEY SHARE` 挡住（那是 `FOR NO KEY UPDATE`，两者不冲突），所以审计描述的是"这次绑定让该账号的能力面按本事务看见的样子变了多少"；同一时刻的角色权限编辑有它自己的 `school.role.permissions.updated` 审计与 `roles.version` CAS，两件事不互相覆盖。不在绑定里加锁角色权限映射——那会把一次改绑升级成"锁住该角色的全部权限行"。
+
+### 14.8 TD-194 helper 与 `reset_role` 接线
+
+- 抽 `guard_self_grant(...)`：把"判据结果 → 422（ack/理由）→ `*.denied` + `school.role.self_grant`（打断）→ 成功侧 `school.role.self_grant`"封在一处，`kind` 作为入参（不拆两个函数）。
+- 接线范围：`replace_role_permissions`、`replace_role_scopes`、`reset_role`（**权限 + 范围两个维度**）。绑定不接（§14.5）。
+- `reset_role` 的 payload 增加 `self_grant_ack: bool = False`；范围侧是可达路径（`school_admin` 出厂范围含 `school`，见 TD-194 备注），未带 ack 的重置会 422。**187g 之前**，前端没有确认条，调用方需显式传 ack——这是本批已知的接口契约变化。
+- 权限侧的"出厂默认 ∩ 敏感码 = ∅"不变量与两侧用例保持不变；抽取 helper 后仍需通过。
+
+### 14.9 实现顺序（TDD 红→绿）
+
+1. 迁移：`users.roles_version integer not null default 0`。
+2. 纯逻辑单测先红：绑定 diff、空集、超管角色/目标、自绑、版本冲突、`guard_self_grant` 的 ack/理由/超管豁免、删除指纹（含"绑了又解回原集合"）。
+3. 服务层 `app/rbac/binding.py`：`get_user_bindings` / `replace_user_bindings`（目标 `users` 行 `SELECT … FOR UPDATE` 串行化 + `users.roles_version` CAS + 目标/角色校验 + 审计）；`admin.py` 的删除预览/删除加指纹计算与比对（`ROLE_DELETE_PREVIEW_STALE`）。
+   - 实现对齐（2026-10-29）：串行化没有复用 `auth.sessions.acquire_user_lock`（advisory lock 的语义是"会话写操作串行化"，会把绑定和登录/刷新挤成一条队列）；改用目标用户行锁——只与同账号的另一次绑定、以及 MFA 重置（同样锁用户行）互斥，范围正好。
+4. API：两条绑定路由 + payload/response + `bindable` 字段 + 删除契约的 `fingerprint` + 错误映射。
+5. `reset_role` 接 helper + payload ack；改 TD-199 的既有集成用例为 409 断言。
+6. 业务场景：建角色→绑人→**不重登**下一请求生效→解绑即时失权→自绑 403→超管保护→过期预览 409。
+7. 文档回写：design.md 权限矩阵/错误码、handoff §1、TD-187d/194/199 处置。
+
+### 14.10 测试清单
+
+**单元**
+
+- 绑定 diff（增/删/不变/空集）、超管角色拒绝、自绑拒绝（在服务入口、任何写之前）。
+- 删除指纹：同集合不同顺序哈希相同；绑了又解回原集合哈希不变；不同角色同集合哈希不同（`role_id` 入哈希）；空集合稳定。
+- `guard_self_grant`：权限/范围两 kind 的 ack/理由/超管豁免；`reset_role` 范围净增 `school` 时 422、带 ack 200 且写 `school.role.self_grant`。
+
+**集成（真实 PG）**
+
+- 自绑 403 + `school.user.roles.denied`；学生目标 422；超管目标 403；超管角色 422；跨租 user/role 404 且无存在性泄露。
+- 绑定成功：`user_roles` 行正确；**下一请求**权限并集变化（不换 token）；`school.user.roles.updated` 的 added/removed 权限码可还原。
+- 版本 CAS：两人并发改同一账号绑定，后者 409 + 最新快照，库无半提交。
+- TD-199（指纹）：删除预览 → 改绑 → 删除 = 409 `ROLE_DELETE_PREVIEW_STALE`；改绑后又解回原集合 → 删除成功；权限/范围变化仍由 `version` 触发 409（两套判据互不替代）。
+- `reset_role`：范围净增无 ack → 422 且不推版本；带 ack → 200 + 审计。
+
+**业务场景（真实基础设施）**
+
+- BS-M2UI3-A 建角色→绑人→该教师下一请求 403 变 200；审计两段串得上。
+- BS-M2UI3-B 解绑→下一请求 403；会话不断。
+- BS-M2UI3-D 自绑 403 / 超管角色 422 / 超管目标 403，三类拒绝都留痕。
+- BS-M2UI3-E 删除预览→改绑→删除 409（TD-199），刷新后 200。
+
+**前端**：本批不做（187g）。
+
+### 14.11 预判技术债
+
+| 事项 | 说明 | 处置建议 |
+|---|---|---|
+| 绑定页需要两个权限码 | 绑定要 `permission_account.manage`，列角色要 `role.manage`；只持其一的账号打不开完整页面 | 已延后：TD-187g 评估是否让 `GET /school/roles` 接受"二选一"，本期不改读接口权限 |
+| 无服务端绑定预览 | 差异由前端用 `GET /roles` 的码集本地算，存在与权限并集快照的时差 | 已延后：与 TD-195 同批统一"保存前重取"口径 |
+| 最后一名超管无专门保护 | 绑定的超管保护是"目标持有超管即拒绝"，但账号停用（187e）仍需同一套保护，否则可停掉最后一名超管 | 已采纳：TD-187e 复用本批判据并补"最后一名超管"用例 |
+| `users.roles_version` 与 `token_version` 易混淆 | 前者管绑定并发，后者管令牌失效；改错会让绑定触发全端重登或完全不设防 | 已在 design.md/handoff 写明；仅绑定服务读写 `roles_version` |
+| 删除要同时回传 `version` 与 `fingerprint` | 指纹管持有人集合、版本管角色权限/范围；前端漏传任一个都拿不到 409 的正确语义 | 已采纳：TD-187g 的删除确认框同时回传两者；错误码按 `ROLE_VERSION_CONFLICT` / `ROLE_DELETE_PREVIEW_STALE` 分流 |
+| 改绑不再让角色编辑草稿失效 | 这是选指纹换来的收益；代价是删除契约多一个必填字段 | 已按 §14.3 定稿 |

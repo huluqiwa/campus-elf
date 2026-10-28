@@ -75,6 +75,9 @@ class User(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 权限/状态变更时自增：access token 校验时比对，旧令牌立即失效
     token_version: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    # 角色绑定集的乐观锁（TD-187d）：每次全量替换 +1。与 token_version 职责不同——
+    # 绑定不撤令牌（权限每请求从库里读），这里只防两次绑定互相覆盖。
+    roles_version: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
     password_changed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
