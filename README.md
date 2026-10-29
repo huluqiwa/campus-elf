@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-**当前阶段：M2 组织与人员收尾中（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台已交付并过 CI；M2-UI3 自定义角色/权限账号进行中——前七批（库层不变量 + 自扩权守卫、自定义角色创建/删除、角色级数据范围编辑、用户↔多角色绑定、权限账号停用/启用、测试与门禁补全、审计字段收口 TD-187f-B）已交付并过 CI，剩前端页（TD-187g）；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
+**当前阶段：M2 组织与人员收尾中（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台已交付并过 CI；M2-UI3 自定义角色/权限账号进行中——前八批（库层不变量 + 自扩权守卫、自定义角色创建/删除、角色级数据范围编辑、用户↔多角色绑定、权限账号停用/启用、测试与门禁补全、审计字段收口 TD-187f-B、**前端页面的后端前置契约 TD-187g-A**）已交付并过 CI，剩前端页本体（TD-187g-B 角色页 / TD-187g-C 权限账号页）；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
 
 已完成：
 
@@ -42,9 +42,11 @@
 
 进行中/待做：
 
-- **M2-UI3 剩余**：TD-187g 前端角色与权限账号页（含 TD-198 `name` 非空白、TD-200 `resettable` 下发）；每个功能点单独 PR，CI 绿后合并。**M3/M4**（知识库闭环、AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。M2-UI1 新增的 3 条全栈 E2E 因本机 8000 端口被占待补跑（TD-183）；M2-UI2 的「UI × 真实库」联动全栈用例同样待补（TD-192）。
+- **M2-UI3 剩余**：TD-187g 前端角色页（**TD-187g-B**）与权限账号页（**TD-187g-C**）；TD-198 `name` 非空白的**表单侧**与 TD-200 前端改跟 `resettable` 走这两半在后两个 PR 里收口；每个功能点单独 PR，CI 绿后合并。**M3/M4**（知识库闭环、AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。M2-UI1 新增的 3 条全栈 E2E 因本机 8000 端口被占待补跑（TD-183）；M2-UI2 的「UI × 真实库」联动全栈用例同样待补（TD-192）。
 
 - **M2-UI3 第七批：审计字段 `sessions_revoked` 收口（TD-231，2026-10-29，PR #16 → 合并提交 `0ffdb2d`）**：整数键 `sessions_revoked` **全仓只写整数**，含义统一为「本次真正断开的**活跃**会话家族数」（未撤销且未过期，与设备列表 `list_sessions` 取数一致）——租户 MFA 重置、平台 MFA 重置、密码重置三条链路的取家族 SELECT 都加了 `and expires_at > now()`（**撤销语句保持全量未撤销**：把已过期的死行一并标上撤销不花钱，计数准就行），与停用侧口径对齐；自助链路 4 个动作（`auth.mfa.activated`/`auth.mfa.disabled`/`auth.password.changed`/`auth.password.reset`）的布尔语义改用新键 **`sessions_all_revoked`**，`auth.password.reset` 原先另开的并行整数键 `sessions_revoked_count` 并入同名整数键后消失——改名前布尔与整数混写同一个键，巡检 SQL `sum((metadata_json->>'sessions_revoked')::int)` 在布尔行上直接报错（PG 不能把 `true` cast 成 int）。四条「过期家族不计入」用例补齐（租户 MFA 重置 / 平台 MFA 重置 / 租户密码重置 / **平台密码重置**——最后一条是独立审查的唯一阻塞项：审查实测「只把平台侧 SQL 改回旧写法，全部 57 条相关用例照样全绿」，即平台侧那处收窄改错了也没有用例会红），且用 `type(...) is int` 钉住类型——`True == 1` 在 Python 成立，只断言值会让布尔蒙混过关。口径与键名对照表见 `docs/design.md` §5.12。**遗留**（TD-235，已延后到 M3）：自助链路另外 3 个动作只写布尔不写条数，真要做跨动作设备数对比时才补。
+
+- **M2-UI3 第八批：前端页面的后端前置契约（TD-187g-A，2026-10-30，PR #18 → 合并提交 `8936c3f`）**：**纯后端，不含任何前端代码**。用户 2026-10-30 三项拍板——① 权限账号页列账号用**新增列出接口** `GET /school/permission-accounts`（不复用已交付的 `GET /school/users/lookup`）；② 两个权限码（`school.role.manage` vs `school.permission_account.manage`）用**新增只列角色的接口** `GET /school/bindable-roles`（**不含 `permission_codes`**——合并会让只持账号管理权的人拿到全校权限矩阵）；③ TD-187g **拆 3 个 PR**（A 后端契约补齐 / B 前端角色页 / C 前端权限账号页）。落地：迁移 `a1c3e5f7b9d2` 给 `roles` 加 `ck_roles_name_not_blank`（TD-198；加约束**前**先查存量违例、违例即中止；因 `roles` 已 FORCE ROW LEVEL SECURITY，迁移先断言连接能绕 RLS，否则存量计数被遮蔽成 0、预检形同虚设）；`RoleResponse` 增服务端派生的 **`resettable`**（TD-200，判据 = 「有出厂定义」**且**「角色可编辑」，**两道门都算**——只算前者会让校方超管/学生/教师这三个内置锁定角色按钮亮着、点了恒 409）；`GET /school/permission-accounts`（cursor 分页 + 只列教师/校方管理员 + 不按人员范围裁剪 + **不回显 `login_id`** + 每行带服务端派生的 `is_super_admin`，TD-242）；`GET /school/bindable-roles`（只给 `id/code/name/is_system`，超管角色不列——列出来等于能勾不能存）；`create_role` 直调时 `name.strip()` 为空即 422（不落库、不撞 CHECK 变 500）；共享游标解码器 `decode_cursor` 拒绝**无时区**时间戳（TD-243——手造一个未来时刻的游标会让 keyset 条件恒真、翻页**静默回到第一页**，现在明确 400）；顺带修掉 `reset_client()` 跨事件循环关全局 Redis 客户端的**存量**报错（TD-246：只吞「事件循环已关」这一种、其它照抛，并补 5 条回归网）。两轮独立审查 1M/9m → 0B/0M/7m 全部整改；本地受影响 28 文件 **207 passed** + ruff/mypy/bandit×2/alembic check 全绿；PR CI backend **825 passed**（首轮曾因 `app/auth` 覆盖率掉到 410/506=81.03% 被自查拦下，补回归网后回到 412/506）、security 绿；合并后 main（tip `8936c3f`）推送 CI backend **825 passed / 823.32s（13:43）**、security 绿，四包分支覆盖率与 PR run **逐包一致**（`app/rbac` 79.92%（211/264，门槛 73）、`app/auth` **81.42%**（412/506，门槛 80）、`app/tenant` 81.25%（13/16，门槛 81）、`app/audit` 66.67%（4/6，门槛 66））。
 
 ## 技术栈（已锁定）
 
