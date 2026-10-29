@@ -54,4 +54,13 @@ regexes = [
   "ScopeEdit-Seed-Pass-1",
   "ScopeBs-Admin-Pass-1",
   "ScopeBs-Keeper-Pass-1",
+  # M2-UI3 TD-187g-A 权限账号列表/绑定目录的种子口令（仅测试账号，随机租户码每次用例现生成）：
+  # 业务场景（超管/权限管理员/教师/学生/普通账号五个角色各一个）+ 接线集成用例。
+  # 仍按精确字符串放行，不做目录豁免——tests 目录同样可能误粘真实凭证。
+  "PermAcct-Super-Pass-1",
+  "PermAcct-Admin-Pass-1",
+  "PermAcct-Teacher-Pass-1",
+  "PermAcct-Student-Pass-1",
+  "PermAcct-Plain-Pass-1",
+  "PermAccount-Pass-1",
 ]
