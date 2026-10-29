@@ -7,7 +7,7 @@
 
 import os
 from collections.abc import AsyncIterator, Iterator
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -18,6 +18,7 @@ from app.auth.mfa import decode_mfa_token
 from app.auth.tokens import decode_access_token
 from app.config import get_settings
 from app.db.session import db_session, dispose_engine
+from app.security.encryption import decode_kek, encrypt_secret, mfa_aad
 from app.security.totp import generate_totp_secret
 from tests.support.auth import TEST_PLATFORM_PASSWORD, seed_platform_user
 from tests.support.db import (
@@ -339,6 +340,55 @@ async def test_activation_fails_when_pending_secret_is_gone(
     state = await _tenant_mfa_state(tenant_id, user_id)
     assert state["mfa_enabled"] is False
     assert (await _audit_metadata("auth.mfa.activation_failed"))[-1]["reason"] == "enroll_expired"
+
+
+@pytest.mark.asyncio
+async def test_activation_fails_closed_when_pending_secret_cannot_be_decrypted(
+    mfa_env: None, fixed_totp_step: int
+) -> None:
+    """待激活项解不开：500 fail-closed + `auth.mfa.secret_invalid` 审计，不启用、不签发会话。
+
+    与 `test_activation_fails_when_pending_secret_is_gone` 是**两支不同的分支**，不是重复：那条把
+    Redis 项删掉（`pending is None` → 400「绑定已过期」，提示用户重绑），这条留一条**存在但解不开**
+    的密文（AAD 与本人不匹配，等价于密文被移植或 KEK 轮换后失配）。区别对用户是有意义的：解不开时
+    系统**不能**说"绑定过期、请重绑"——那会让用户在一个服务端已经读不懂自己密钥的状态下反复重绑，
+    也不能静默把 MFA 打开，所以必须报 500「暂不可用」并留一条独立审计（`auth.mfa.secret_invalid`）。
+
+    为什么这条必须写死在这里而不是靠"总有用例踩到"：TD-221 的 CI 重跑实测（简报 §16.2）显示
+    `service.py` 的 `if secret_invalid → 审计+500` 这条弧在同 commit 两次 run 里**一次缺、一次有**，
+    而全仓当时没有任何用例断言激活链路会 500——那条覆盖是别的用例顺路踩到的。fail-closed 分支的
+    覆盖不该是运气。
+    """
+
+    tenant_id, user_id = await _seed_tenant("S-ENR-7")
+    actor = _tenant_actor(tenant_id, user_id)
+    enrollment = await service.enroll_mfa(actor=actor, current_password=TENANT_PASSWORD)
+
+    # 用另一个主体的 AAD 重新加密同一个 secret 再塞回 Redis：键在、值读不懂，正是"解不开"那一支。
+    await revocation.store_mfa_pending_secret(
+        encrypt_secret(
+            enrollment.secret,
+            kek=decode_kek(get_settings().encryption_kek),
+            aad=mfa_aad("tenant", uuid4()),
+        ),
+        realm="tenant",
+        user_id=user_id,
+        ttl_seconds=600,
+    )
+
+    with pytest.raises(service.AuthError) as invalid:
+        await service.activate_mfa(actor=actor, code=_code(enrollment.secret))
+    assert invalid.value.code == "MFA_UNAVAILABLE"
+    assert invalid.value.http_status == 500
+
+    # 条数按本租收窄（别租同名动作不算这条的）；"没有激活过"用全表口径，
+    # 因为写错租户的那一行同样是"这次激活过了"的证据（TD-228 的边界）。
+    assert len(await _audit_metadata("auth.mfa.secret_invalid", tenant_id)) == 1
+    assert await _audit_metadata("auth.mfa.activated") == []
+    state = await _tenant_mfa_state(tenant_id, user_id)
+    assert state["mfa_enabled"] is False
+    assert state["mfa_secret_enc"] is None
+    assert await _refresh_rows(tenant_id) == []
 
 
 @pytest.mark.asyncio

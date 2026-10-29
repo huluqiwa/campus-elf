@@ -226,7 +226,48 @@ async def _roles_version(tenant_id: UUID, user_id: UUID) -> int:
     return int(value)
 
 
-async def _audits(action: str) -> list[dict[str, Any]]:
+async def _audits(action: str, tenant_id: UUID) -> list[dict[str, Any]]:
+    """按 `action` + **本用例租户**取审计（TD-228）。
+
+    只按 `action` 过滤在这个文件里今天是"碰巧对"：`clean_test_data` 每条用例前会 `TRUNCATE audit_logs`，
+    跨用例残留被清掉了，而本文件的跨租用例提交的是**本租操作者**（拒绝审计就落在本租，正是这里要
+    数的行）。把这条谓词写进 SQL 挡的是两类以后会出现的污染：①以后在同一条用例里让**别租管理员**
+    当操作者（`_seed` 已经备了 `foreign_tenant_id`/`foreign_user_id`），那时同名动作会多出别租的行；
+    ②失败路径上未 `cancel()` 的并发任务在下一条用例的 `TRUNCATE` 之后才提交。两种都会把"条数与
+    顺序都算准"的断言打成随机红，而随机红的第一嫌疑会被误记成业务 bug。
+    """
+
+    async with db_session(platform=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "select result, resource_id, metadata_json from public.audit_logs "
+                        "where action = :action and tenant_id = :tid order by sequence"
+                    ),
+                    {"action": action, "tid": str(tenant_id)},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [
+        {
+            "result": str(row["result"]),
+            "resource_id": None if row["resource_id"] is None else str(row["resource_id"]),
+            "metadata": dict(row["metadata_json"] or {}),
+        }
+        for row in rows
+    ]
+
+
+async def _audits_all(action: str) -> list[dict[str, Any]]:
+    """按 `action` 取审计（**全表口径**，不按租户收窄）。
+
+    「这条动作一次都不该发生」类断言必须用它：按租户收窄会漏掉**写错租户**的那一行，
+    而那恰恰是要抓的 bug。精确条数类断言才用带租户的 `_audits`（TD-228）。
+    """
+
     async with db_session(platform=True) as session:
         rows = (
             (
@@ -304,7 +345,7 @@ async def test_replace_bindings_writes_exact_rows_and_a_restorable_diff(stack: N
     assert await _user_roles(tenant_id, keeper) == []
     assert await _roles_version(tenant_id, keeper) == 3
 
-    audits = await _audits("school.user.roles.updated")
+    audits = await _audits("school.user.roles.updated", tenant_id)
     assert len(audits) == 3, audits
     assert [entry["resource_id"] for entry in audits] == [str(keeper)] * 3
     metadata = audits[2]["metadata"]
@@ -352,12 +393,12 @@ async def test_self_ban_precedes_every_database_lookup(stack: None) -> None:
         )
     assert caught.value.code == "BINDING_SELF_FORBIDDEN"
 
-    denied = await _audits("school.user.roles.denied")
+    denied = await _audits("school.user.roles.denied", seeded["tenant_id"])
     assert [(entry["result"], entry["metadata"].get("reason")) for entry in denied] == [
         ("denied", "BINDING_SELF_FORBIDDEN"),
         ("denied", "BINDING_SELF_FORBIDDEN"),
     ]
-    assert await _audits("school.user.roles.updated") == []
+    assert await _audits_all("school.user.roles.updated") == []
 
 
 async def test_target_and_role_protections_are_layered_and_audited(stack: None) -> None:
@@ -397,9 +438,9 @@ async def test_target_and_role_protections_are_layered_and_audited(stack: None) 
     assert await _user_roles(tenant_id, seeded["super_id"]) == ["school_super_admin"]
     assert await _roles_version(tenant_id, seeded["keeper_id"]) == 0
     assert await _roles_version(tenant_id, seeded["super_id"]) == 0
-    assert await _audits("school.user.roles.updated") == []
+    assert await _audits_all("school.user.roles.updated") == []
 
-    denied = await _audits("school.user.roles.denied")
+    denied = await _audits("school.user.roles.denied", tenant_id)
     assert [entry["metadata"].get("reason") for entry in denied] == [case[3] for case in cases]
     # 目标类型与提交的角色 id 各带一份上下文：排障时不必再猜"当时提交了什么"
     assert denied[0]["metadata"]["target_user_type"] == "student"
@@ -444,7 +485,7 @@ async def test_deleted_target_is_404_and_a_locked_target_stays_bindable(stack: N
 
     assert await _user_roles(tenant_id, keeper) == ["library_keeper"], "已删除账号的绑定不该被 404 路径改动"
     assert await _roles_version(tenant_id, keeper) == 1
-    assert [entry["metadata"]["reason"] for entry in await _audits("school.user.roles.denied")] == [
+    assert [entry["metadata"]["reason"] for entry in await _audits("school.user.roles.denied", tenant_id)] == [
         "USER_NOT_FOUND"
     ]
 
@@ -468,8 +509,8 @@ async def test_stale_version_returns_latest_snapshot_without_writing(stack: None
 
     assert await _user_roles(tenant_id, keeper) == ["library_keeper"]
     assert await _roles_version(tenant_id, keeper) == 1
-    assert len(await _audits("school.user.roles.updated")) == 1
-    assert await _audits("school.user.roles.denied") == []
+    assert len(await _audits("school.user.roles.updated", tenant_id)) == 1
+    assert await _audits_all("school.user.roles.denied") == []
 
 
 async def test_concurrent_replaces_with_the_same_version_land_exactly_one(
@@ -511,7 +552,7 @@ async def test_concurrent_replaces_with_the_same_version_land_exactly_one(
     winning_code = winners[0].bindings.roles[0].code
     assert await _user_roles(tenant_id, keeper) == [winning_code], "库里的行集必须只来自赢家"
     assert await _roles_version(tenant_id, keeper) == 1
-    audits = await _audits("school.user.roles.updated")
+    audits = await _audits("school.user.roles.updated", tenant_id)
     assert len(audits) == 1
     assert audits[0]["metadata"]["role_codes_after"] == [winning_code]
 
@@ -602,6 +643,7 @@ async def test_role_deleted_mid_binding_yields_404_instead_of_a_foreign_key_erro
             return exc
 
     engine = make_test_engine("admin")
+    task: asyncio.Task[Any] | None = None
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session, session.begin():
@@ -614,21 +656,22 @@ async def test_role_deleted_mid_binding_yields_404_instead_of_a_foreign_key_erro
                 {"rid": role_id, "tid": tenant_id},
             )
             task = asyncio.create_task(_outcome())
-            try:
-                await _wait_until_binding_waits_on_the_operator(engine, holder_pid)
-                assert not task.done(), "绑定应被角色行锁挡住"
-            except BaseException:
-                # 失败路径收掉还在等锁的绑定：否则用例结束后它才提交，白占一条连接、
-                # 返回值被静默丢弃（若它已抢先提交，写入仍会落库——cancel 此时是空操作）
-                task.cancel()
-                with contextlib.suppress(BaseException):
-                    await task
-                raise
+            await _wait_until_binding_waits_on_the_operator(engine, holder_pid)
+            assert not task.done(), "绑定应被角色行锁挡住"
             await session.execute(
                 text("delete from public.roles where id = :rid and tenant_id = :tid"),
                 {"rid": role_id, "tid": tenant_id},
             )
         outcome = await asyncio.wait_for(task, timeout=10)
+    except BaseException:
+        # 失败路径收掉还在等锁的绑定：否则用例结束后它才提交，白占一条连接、返回值被静默丢弃
+        # （若它已抢先提交，写入仍会落库——cancel 此时是空操作）。守卫覆盖**取锁之后的每一段**：
+        # 探针超时、`assert`、删除本身的异常都会走到这里，只包一段等于没包（TD-228）。
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+        raise
     finally:
         await engine.dispose()
 
@@ -636,5 +679,5 @@ async def test_role_deleted_mid_binding_yields_404_instead_of_a_foreign_key_erro
     assert (outcome.code, outcome.http_status) == ("ROLE_NOT_FOUND", 404)
     assert await _user_roles(tenant_id, keeper) == []
     assert await _roles_version(tenant_id, keeper) == 0
-    denied = await _audits("school.user.roles.denied")
+    denied = await _audits("school.user.roles.denied", tenant_id)
     assert [entry["metadata"]["reason"] for entry in denied] == ["ROLE_NOT_FOUND"]

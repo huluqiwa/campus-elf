@@ -157,22 +157,30 @@ async def tenant_login(login_id: str, *, school_code: str = SCHOOL_CODE) -> serv
     return outcome
 
 
-async def audit_metadata(action: str) -> list[dict[str, object]]:
-    """读取指定动作的审计 metadata（平台连接）。"""
+async def audit_metadata(
+    action: str, tenant_id: UUID | None = None
+) -> list[dict[str, object]]:
+    """读取指定动作的审计 metadata（平台连接）。
 
+    给了 `tenant_id` 就只取该租户的行（TD-228：精确条数断言不该被别租同名动作污染）；
+    不给就是全表口径——"这条动作一次都不该发生"的断言要的是全表口径，按租户收窄会漏掉
+    **写错租户**的那一行。
+    """
+
+    if tenant_id is None:
+        statement = text(
+            "select metadata_json from audit_logs where action = :action order by created_at"
+        )
+        params: dict[str, object] = {"action": action}
+    else:
+        statement = text(
+            "select metadata_json from audit_logs where action = :action "
+            "and tenant_id = :tid order by created_at"
+        )
+        params = {"action": action, "tid": str(tenant_id)}
     async with db_session(platform=True) as session:
         rows: list[dict[str, object] | None] = list(
-            (
-                await session.execute(
-                    text(
-                        "select metadata_json from audit_logs where action = :action "
-                        "order by created_at"
-                    ),
-                    {"action": action},
-                )
-            )
-            .scalars()
-            .all()
+            (await session.execute(statement, params)).scalars().all()
         )
     return [dict(row or {}) for row in rows]
 

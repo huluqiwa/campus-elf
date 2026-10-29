@@ -1,6 +1,7 @@
 """M1-C2 集成测试：会话限额、踢出、设备列表、下线、退出其它与 Redis 标记（真实 PG + Redis）。"""
 
 import asyncio
+import contextlib
 import os
 from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timedelta
@@ -179,8 +180,38 @@ async def _expect_unauthorized(pair: service.TokenPair) -> None:
     assert excinfo.value.status_code == 401
 
 
-async def _audit_rows(action: str) -> list[str]:
-    """读取指定审计动作的 metadata JSON 文本。"""
+async def _audit_rows(action: str, tenant_id: UUID) -> list[str]:
+    """读取指定租户下某审计动作的 metadata JSON 文本（TD-228：必须带租户过滤）。
+
+    这个助手只回文本、不回主体列，所以"在 Python 里按 actor 收窄"做不到——谓词必须写在 SQL 里。
+    今天这两类污染里只剩后者：`test_cross_tenant_session_is_not_visible` 虽然在同一条里造了
+    `tenant_a`/`tenant_b`，但拒绝审计落的是操作者所在的 `tenant_a`，正是那条用例要数的一行，
+    加了谓词也不会把它挡掉。写进 SQL 挡的是以后在同一条里让**别租主体当操作者**时多出的行，
+    以及失败路径上未 `cancel()` 的并发任务在下一条用例 `TRUNCATE` 之后才提交的残留。
+    """
+
+    async with db_session(platform=True) as session:
+        return list(
+            (
+                await session.execute(
+                    text(
+                        "select metadata_json::text from audit_logs "
+                        "where action = :action and tenant_id = :tid order by created_at"
+                    ),
+                    {"action": action, "tid": str(tenant_id)},
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def _audit_rows_all(action: str) -> list[str]:
+    """读取某审计动作的 metadata JSON 文本（**全表口径**，不按租户收窄）。
+
+    「这条动作一次都不该发生」类断言必须用它：按租户收窄会漏掉**写错租户**的那一行，
+    而那恰恰是要抓的 bug。精确条数类断言才用带租户的 `_audit_rows`（TD-228）。
+    """
 
     async with db_session(platform=True) as session:
         return list(
@@ -354,12 +385,12 @@ async def test_limit_kicks_oldest_session_and_audits(session_env: None) -> None:
     with pytest.raises(service.AuthError) as excinfo:
         await service.refresh_tokens(refresh_token=p1.refresh_token)
     assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
-    assert await _audit_rows("auth.refresh.reuse_detected") == []
+    assert await _audit_rows_all("auth.refresh.reuse_detected") == []
     assert (await _principal_for(p2)).session_id == p2.session_id
     assert (await _principal_for(p3)).session_id == p3.session_id
     assert (await _principal_for(p4)).session_id == p4.session_id
 
-    kicked = await _audit_rows("auth.session.kicked")
+    kicked = await _audit_rows("auth.session.kicked", tenant_id)
     assert len(kicked) == 1
     assert str(p1.session_id) in kicked[0]
     assert "Chrome / Windows" in kicked[0]
@@ -407,7 +438,7 @@ async def test_list_and_revoke_single_session(session_env: None) -> None:
         current_session_id=p2.session_id,
     )
     assert [item.session_id for item in remaining] == [p2.session_id]
-    assert len(await _audit_rows("auth.session.revoked")) == 1
+    assert len(await _audit_rows("auth.session.revoked", tenant_id)) == 1
 
     # 不存在的会话（含他人/已撤销）一律按未找到处理
     assert (
@@ -472,7 +503,7 @@ async def test_revoke_others_keeps_current(session_env: None) -> None:
     )
     assert [item.session_id for item in remaining] == [p3.session_id]
 
-    audit = await _audit_rows("auth.session.revoked_others")
+    audit = await _audit_rows("auth.session.revoked_others", tenant_id)
     assert len(audit) == 1
     assert str(p3.session_id) in audit[0]
     assert '"revoked_count": 2' in audit[0] or '"revoked_count":2' in audit[0]
@@ -505,7 +536,7 @@ async def test_cannot_list_or_revoke_another_users_session(session_env: None) ->
     )
     assert await _family_reason_tenant(tenant_id, bob.session_id) is None
     assert (await _principal_for(bob)).session_id == bob.session_id
-    denied = await _audit_rows("auth.session.revoke_denied")
+    denied = await _audit_rows("auth.session.revoke_denied", tenant_id)
     assert len(denied) == 1
     assert str(bob.session_id) in denied[0]
 
@@ -539,7 +570,7 @@ async def test_cross_tenant_session_is_not_visible(session_env: None) -> None:
     )
     assert await _family_reason_tenant(tenant_b, bob.session_id) is None
     assert (await _principal_for(bob)).session_id == bob.session_id
-    denied = await _audit_rows("auth.session.revoke_denied")
+    denied = await _audit_rows("auth.session.revoke_denied", tenant_a)
     assert len(denied) == 1
     assert str(bob.session_id) in denied[0]
 
@@ -712,7 +743,7 @@ async def test_concurrent_logins_do_not_exceed_limit(
     )
     assert first.session_id != second.session_id
     assert await _active_family_count_tenant(tenant_id, user_id) == 3
-    assert len(await _audit_rows("auth.session.kicked")) == 1
+    assert len(await _audit_rows("auth.session.kicked", tenant_id)) == 1
 
 
 @pytest.mark.asyncio
@@ -744,28 +775,36 @@ async def test_revoke_wins_over_inflight_refresh(
     refresh_task = asyncio.create_task(
         service.refresh_tokens(refresh_token=pair.refresh_token)
     )
-    await asyncio.wait_for(refresh_waiting.wait(), timeout=5)
+    try:
+        await asyncio.wait_for(refresh_waiting.wait(), timeout=5)
 
-    assert (
-        await sessions.revoke_session(
-            realm="tenant",
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=pair.session_id,
-            current_session_id=pair.session_id,
-            request_id="test-revoke-vs-refresh",
+        assert (
+            await sessions.revoke_session(
+                realm="tenant",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=pair.session_id,
+                current_session_id=pair.session_id,
+                request_id="test-revoke-vs-refresh",
+            )
+            is True
         )
-        is True
-    )
-    release_refresh.set()
-    with pytest.raises(service.AuthError) as excinfo:
-        await refresh_task
+        release_refresh.set()
+        with pytest.raises(service.AuthError) as excinfo:
+            await refresh_task
 
-    assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
-    assert await _active_family_count_tenant(tenant_id, user_id) == 0
-    assert await revocation.session_exists(pair.session_id, realm="tenant") is False
-    assert await _audit_rows("auth.refresh.reuse_detected") == []
-    assert await _family_reason_tenant(tenant_id, pair.session_id) == "session_revoked"
+        assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
+        assert await _active_family_count_tenant(tenant_id, user_id) == 0
+        assert await revocation.session_exists(pair.session_id, realm="tenant") is False
+        assert await _audit_rows_all("auth.refresh.reuse_detected") == []
+        assert await _family_reason_tenant(tenant_id, pair.session_id) == "session_revoked"
+    except BaseException:
+        # 失败路径必须收掉还卡在 `release_refresh` 上的刷新任务：它会在**下一条用例已经 TRUNCATE
+        # 之后**才提交，白占一条连接、把红甩给不相干的断言（TD-228）。`cancel()` 对已完成的任务是空操作。
+        refresh_task.cancel()
+        with contextlib.suppress(BaseException):
+            await refresh_task
+        raise
 
 
 @pytest.mark.asyncio
@@ -797,25 +836,33 @@ async def test_change_password_wins_over_inflight_refresh(
     refresh_task = asyncio.create_task(
         service.refresh_tokens(refresh_token=pair.refresh_token)
     )
-    await asyncio.wait_for(refresh_waiting.wait(), timeout=5)
+    try:
+        await asyncio.wait_for(refresh_waiting.wait(), timeout=5)
 
-    new_pair = await service.change_password(
-        principal_user_id=user_id,
-        realm="tenant",
-        tenant_id=tenant_id,
-        current_password=TENANT_PASSWORD,
-        new_password=NEW_PASSWORD,
-        user_agent=FIREFOX_MAC,
-    )
-    release_refresh.set()
-    with pytest.raises(service.AuthError) as excinfo:
-        await refresh_task
+        new_pair = await service.change_password(
+            principal_user_id=user_id,
+            realm="tenant",
+            tenant_id=tenant_id,
+            current_password=TENANT_PASSWORD,
+            new_password=NEW_PASSWORD,
+            user_agent=FIREFOX_MAC,
+        )
+        release_refresh.set()
+        with pytest.raises(service.AuthError) as excinfo:
+            await refresh_task
 
-    assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
-    assert await _family_reason_tenant(tenant_id, pair.session_id) == "password_change"
-    assert await revocation.session_exists(pair.session_id, realm="tenant") is False
-    assert await revocation.session_exists(new_pair.session_id, realm="tenant") is True
-    assert await _audit_rows("auth.refresh.reuse_detected") == []
+        assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
+        assert await _family_reason_tenant(tenant_id, pair.session_id) == "password_change"
+        assert await revocation.session_exists(pair.session_id, realm="tenant") is False
+        assert await revocation.session_exists(new_pair.session_id, realm="tenant") is True
+        assert await _audit_rows_all("auth.refresh.reuse_detected") == []
+    except BaseException:
+        # 同上：`change_password` 或探针任一步失败，都要收掉还卡在 `release_refresh` 上的刷新任务，
+        # 否则它在下一条用例 TRUNCATE 之后才提交，红会甩给不相干的断言（TD-228）。
+        refresh_task.cancel()
+        with contextlib.suppress(BaseException):
+            await refresh_task
+        raise
 
 
 @pytest.mark.asyncio
@@ -838,7 +885,7 @@ async def test_rotated_token_replay_after_kick_is_revoked_not_reuse(
         with pytest.raises(service.AuthError) as excinfo:
             await service.refresh_tokens(refresh_token=token)
         assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
-    assert await _audit_rows("auth.refresh.reuse_detected") == []
+    assert await _audit_rows_all("auth.refresh.reuse_detected") == []
 
 
 @pytest.mark.asyncio
@@ -856,7 +903,7 @@ async def test_expired_family_replay_is_not_reuse(session_env: None) -> None:
 
     assert await _family_reason_tenant(tenant_id, first.session_id) is None
     assert await _active_family_count_tenant(tenant_id, users["S-4117"]) == 0
-    assert await _audit_rows("auth.refresh.reuse_detected") == []
+    assert await _audit_rows_all("auth.refresh.reuse_detected") == []
 
 
 @pytest.mark.asyncio
@@ -876,7 +923,7 @@ async def test_expired_rotated_token_with_active_family_is_not_reuse(
 
     assert await _family_reason_tenant(tenant_id, first.session_id) is None
     assert await _active_family_count_tenant(tenant_id, users["S-4122"]) == 1
-    assert await _audit_rows("auth.refresh.reuse_detected") == []
+    assert await _audit_rows_all("auth.refresh.reuse_detected") == []
     still_valid = await service.refresh_tokens(refresh_token=rotated.refresh_token)
     assert still_valid.session_id == first.session_id
 
@@ -900,7 +947,7 @@ async def test_reuse_detection_revokes_family_and_removes_session_marker(
     assert await _active_family_count_tenant(tenant_id, user_id) == 0
     assert await revocation.session_exists(first.session_id, realm="tenant") is False
     await _expect_unauthorized(rotated)
-    assert len(await _audit_rows("auth.refresh.reuse_detected")) == 1
+    assert len(await _audit_rows("auth.refresh.reuse_detected", tenant_id)) == 1
 
 
 @pytest.mark.asyncio
@@ -951,20 +998,28 @@ async def test_kick_wins_over_inflight_refresh(
     refresh_task = asyncio.create_task(
         service.refresh_tokens(refresh_token=first.refresh_token)
     )
-    await asyncio.wait_for(refresh_waiting.wait(), timeout=5)
+    try:
+        await asyncio.wait_for(refresh_waiting.wait(), timeout=5)
 
-    await _login(school, "S-4119", user_agent=SAFARI_IOS)
-    await _login(school, "S-4119", user_agent=FIREFOX_MAC)
-    await _login(school, "S-4119", user_agent=SAFARI_IOS)
-    assert await _family_reason_tenant(tenant_id, first.session_id) == "session_kicked"
+        await _login(school, "S-4119", user_agent=SAFARI_IOS)
+        await _login(school, "S-4119", user_agent=FIREFOX_MAC)
+        await _login(school, "S-4119", user_agent=SAFARI_IOS)
+        assert await _family_reason_tenant(tenant_id, first.session_id) == "session_kicked"
 
-    release_refresh.set()
-    with pytest.raises(service.AuthError) as excinfo:
-        await refresh_task
-    assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
-    assert await _audit_rows("auth.refresh.reuse_detected") == []
-    assert await revocation.session_exists(first.session_id, realm="tenant") is False
-    assert await _active_family_count_tenant(tenant_id, users["S-4119"]) == 3
+        release_refresh.set()
+        with pytest.raises(service.AuthError) as excinfo:
+            await refresh_task
+        assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
+        assert await _audit_rows_all("auth.refresh.reuse_detected") == []
+        assert await revocation.session_exists(first.session_id, realm="tenant") is False
+        assert await _active_family_count_tenant(tenant_id, users["S-4119"]) == 3
+    except BaseException:
+        # 同上：踢出用的三次登录任一步失败，都要收掉还卡在 `release_refresh` 上的刷新任务，
+        # 否则它在下一条用例 TRUNCATE 之后才提交，红会甩给不相干的断言（TD-228）。
+        refresh_task.cancel()
+        with contextlib.suppress(BaseException):
+            await refresh_task
+        raise
 
 
 @pytest.mark.asyncio
@@ -989,7 +1044,7 @@ async def test_change_password_revoked_rotated_token_is_not_reuse(
             await service.refresh_tokens(refresh_token=token)
         assert excinfo.value.code == "INVALID_REFRESH_TOKEN"
     assert await _family_reason_tenant(tenant_id, first.session_id) == "password_change"
-    assert await _audit_rows("auth.refresh.reuse_detected") == []
+    assert await _audit_rows_all("auth.refresh.reuse_detected") == []
 
 
 @pytest.mark.asyncio
@@ -1008,4 +1063,4 @@ async def test_lowered_limit_kicks_multiple_oldest_sessions(
     await _login(school, "S-4121", user_agent=CHROME_WINDOWS)
 
     assert await _active_family_count_tenant(tenant_id, users["S-4121"]) == 1
-    assert len(await _audit_rows("auth.session.kicked")) == 3
+    assert len(await _audit_rows("auth.session.kicked", tenant_id)) == 3

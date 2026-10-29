@@ -74,7 +74,7 @@ step "repo: 源码入库校验" check_sources_tracked
 if has_cmd uv; then
   step "backend: lock check" bash -c "cd backend && uv lock --check"
   step "backend: sync --frozen" bash -c "cd backend && uv sync --frozen"
-  step "backend: ruff" bash -c "cd backend && uv run ruff check app tests scripts"
+  step "backend: ruff" bash -c "cd backend && uv run ruff check app tests scripts alembic"
   # --no-incremental：本地 mypy 缓存曾掩盖 5 处类型错误（CI 冷缓存才发现），门禁必须冷跑
   step "backend: mypy" bash -c "cd backend && uv run mypy --no-incremental app tests"
   # scripts/ 与 app/tests 不能在同一次 mypy 调用里混跑（无 __init__ 的脚本会被当成两个模块名），单独跑。

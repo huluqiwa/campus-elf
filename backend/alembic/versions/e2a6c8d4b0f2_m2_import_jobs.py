@@ -71,7 +71,7 @@ def upgrade() -> None:
             name=op.f("ck_import_jobs_counters_nonnegative"),
         ),
         sa.ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.id"], name=f"fk_import_jobs_tenant_id_tenants", ondelete="RESTRICT"
+            ["tenant_id"], ["tenants.id"], name="fk_import_jobs_tenant_id_tenants", ondelete="RESTRICT"
         ),
         sa.ForeignKeyConstraint(
             ["created_by", "tenant_id"],
