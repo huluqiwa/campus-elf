@@ -1,6 +1,6 @@
 """权限账号停用/启用的服务层不变量（M2-UI3 TD-187e）。
 
-业务场景（`tests/business/test_bs_m2ui3_account_status.py`）走 HTTP，请求天然串行；这里补七类
+业务场景（`tests/business/test_bs_m2ui3_account_status.py`）走 HTTP，请求天然串行；这里补八类
 **只有服务层/并发才成立**的性质：
 
 1. 停用的撤会话是「一步到位但只断活着的」：该账号**未撤销且未过期**的刷新家族置
@@ -20,7 +20,10 @@
    不是它前面那层 `users` 行锁的副产品（原 TD-227 的疑问在此收口）；
 7. 归属探针的 404 路径**一次只占一条数据库连接**：探针跑在自己的短事务里，拒绝审计另起一条，
    两者不叠加。这条同时覆盖 `account_admin`（停用）与 `mfa_admin`（管理员 MFA 重置）两个模块——
-   探针是同一批（TD-230 / 第七轮 m3）以同一形状加进去的，只测一边等于另一边没测。
+   探针是同一批（TD-230 / 第七轮 m3）以同一形状加进去的，只测一边等于另一边没测；
+8. **MFA 重置侧**的别租 id 同样不进对方的账号锁队列：第 5 条只测了停用侧，`mfa_admin` 的探针
+   是同批同形加的却没有独立回归网（TD-230 → 187f-A T5）。谁以后把 MFA 的归属判定挪回取锁
+   之后，第 5 条仍然绿、这条会转红。
 
 `_SessionLedger` 计的是 `db_session` 作用域的嵌套层数；一次作用域恰好借还一条池连接
 （`app/db/session.py` 的 `factory() as session, session.begin()`），所以"峰值 = 1"就是"任一时刻只占一条连接"。
@@ -413,6 +416,30 @@ async def _audit_rows(action: str, tenant_id: UUID) -> list[dict[str, Any]]:
                         "where action = :action and tenant_id = :tid order by sequence"
                     ),
                     {"action": action, "tid": tenant_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row) for row in rows]
+
+
+async def _audit_rows_all(action: str) -> list[dict[str, Any]]:
+    """按 `action` 取审计（**全表口径**，不按租户收窄）。
+
+    「这条动作一次都不该发生」类断言必须用它：按租户收窄会漏掉**写错租户**的那一行，
+    而那恰恰是要抓的 bug。精确条数类断言才用带租户的 `_audit_rows`（TD-228）。
+    """
+
+    async with db_session(platform=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "select resource_id, actor_id::text as actor_id, result, metadata_json "
+                        "from audit_logs where action = :action order by sequence"
+                    ),
+                    {"action": action},
                 )
             )
             .mappings()
@@ -890,8 +917,9 @@ async def test_cross_tenant_user_id_does_not_take_their_account_lock(
             await holder_engine.dispose()
 
     holder_task = asyncio.create_task(_hold_foreign_account_lock())
-    await asyncio.wait_for(holding.wait(), timeout=10)
     try:
+        await asyncio.wait_for(holding.wait(), timeout=10)
+
         with pytest.raises(AccountAdminError) as cross:
             await deactivate_user(operator, foreign_id, reason=REASON)
         assert cross.value.code == "USER_NOT_FOUND"
@@ -906,7 +934,78 @@ async def test_cross_tenant_user_id_does_not_take_their_account_lock(
         assert denied[0]["resource_id"] == str(foreign_id)
         assert denied[0]["actor_id"] == str(seeded["operator_id"])
         assert (await _user_row(seeded["foreign_tenant_id"], foreign_id))["status"] == "active"
-    finally:
+    except BaseException:
+        # 失败路径必须收掉 holder：它还卡在 `release.wait()` 上，会带着一条 PG 连接和那把
+        # 别租账号的 advisory lock 拖进下一条用例（TD-228）。`cancel()` 对已完成任务是空操作。
+        release.set()
+        holder_task.cancel()
+        with contextlib.suppress(BaseException):
+            await holder_task
+        raise
+    else:
+        release.set()
+        await asyncio.wait_for(holder_task, timeout=10)
+
+
+async def test_mfa_reset_cross_tenant_id_does_not_take_their_account_lock(
+    stack: None,
+) -> None:
+    """Given 他租账号正持着自己的会话写事务；When 本租管理员拿那个 id 来重置 MFA；Then 立刻 404，不排队。
+
+    与停用侧 `test_cross_tenant_user_id_does_not_take_their_account_lock` **同形**（TD-230 的
+    187f-A T5）：`mfa_admin` 的归属探针是同批以同一形状加进去的，只给停用侧留用例，MFA 这侧
+    就没有回归网——谁以后重排 MFA 的判据顺序（把归属判定挪回取锁之后），停用侧那条仍绿、
+    这条转红。holder 全程不提交，重置照样返回，就是"没进等待区间"的证据。
+    """
+
+    school_code = f"SCH-STATUS{uuid4().hex[:6].upper()}"
+    seeded = await _seed(school_code)
+    tenant_id = seeded["tenant_id"]
+    foreign_id = seeded["foreign_user_id"]
+    foreign_tenant_id = seeded["foreign_tenant_id"]
+    operator = _principal(seeded["operator_id"], tenant_id)
+    before = await _user_row(foreign_tenant_id, foreign_id)
+
+    holding = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _hold_foreign_account_lock() -> None:
+        holder_engine = make_test_engine("admin")
+        try:
+            factory = async_sessionmaker(holder_engine, expire_on_commit=False)
+            async with factory() as holder, holder.begin():
+                await acquire_user_lock(holder, realm="tenant", user_id=foreign_id)
+                holding.set()
+                await release.wait()
+        finally:
+            await holder_engine.dispose()
+
+    holder_task = asyncio.create_task(_hold_foreign_account_lock())
+    try:
+        await asyncio.wait_for(holding.wait(), timeout=10)
+
+        with pytest.raises(MfaAdminError) as cross:
+            await reset_user_mfa(operator, foreign_id, reason=REASON)
+        assert cross.value.code == "USER_NOT_FOUND"
+        assert cross.value.http_status == 404
+        # 能拿到异常本身就说明没排进那把别租账号的锁（排进去会一直等到 `timeout = 120` 被
+        # pytest-timeout 打断）；下面这条只是兜底断言。
+        assert not holder_task.done()
+        denied = await _audit_rows("school.user.mfa_reset_denied", tenant_id)
+        assert [row["metadata_json"]["reason"] for row in denied] == ["USER_NOT_FOUND"]
+        assert denied[0]["resource_id"] == str(foreign_id)
+        assert denied[0]["actor_id"] == str(seeded["operator_id"])
+        # 成功动作一条都没落，且对方账号的 MFA/token 版本/状态一个字节都没变
+        assert await _audit_rows_all("school.user.mfa_reset") == []
+        assert await _user_row(foreign_tenant_id, foreign_id) == before
+    except BaseException:
+        # 同上：失败路径必须收掉 holder，别让它带着别租账号的锁拖进下一条用例（TD-228）。
+        release.set()
+        holder_task.cancel()
+        with contextlib.suppress(BaseException):
+            await holder_task
+        raise
+    else:
         release.set()
         await asyncio.wait_for(holder_task, timeout=10)
 

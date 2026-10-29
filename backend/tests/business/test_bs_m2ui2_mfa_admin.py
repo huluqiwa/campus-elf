@@ -238,16 +238,24 @@ async def _recovery_count(tenant_id: UUID, user_id: UUID) -> int:
     return int(value or 0)
 
 
-async def _audit_rows(action: str) -> list[dict[str, Any]]:
+async def _audit_rows(action: str, tenant_id: UUID) -> list[dict[str, Any]]:
+    """按 `action` + **本用例租户**取审计（TD-228）。
+
+    本文件的跨租用例（重置别租用户按 `USER_NOT_FOUND`）由**本租管理员**发起，拒绝审计落的就是本租，
+    这条谓词不会把它们挡掉，也不该挡。它挡的是以后可能出现的两类污染：①在同一条用例里让别租管理员
+    当操作者，那时同名动作会多出别租的行；②失败路径上未 `cancel()` 的并发任务在下一条用例的
+    `TRUNCATE` 之后才提交。这两类都会把"顺序与条数都算准"的精确断言打成随机红。
+    """
+
     async with db_session(platform=True) as session:
         rows = (
             (
                 await session.execute(
                     text(
                         "select resource_id, result, metadata_json from audit_logs "
-                        "where action = :action order by sequence"
+                        "where action = :action and tenant_id = :tid order by sequence"
                     ),
-                    {"action": action},
+                    {"action": action, "tid": str(tenant_id)},
                 )
             )
             .mappings()
@@ -296,7 +304,7 @@ async def test_lookup_is_precise_audited_and_permissioned(client: AsyncClient) -
     assert missing.status_code == 404, missing.text
     assert missing.json()["detail"]["code"] == "USER_NOT_FOUND"
 
-    rows = await _audit_rows("school.user.lookup")
+    rows = await _audit_rows("school.user.lookup", seeded["tenant_id"])
     assert [row["metadata_json"]["found"] for row in rows] == [True, True, False]
     # 未命中是独立事务写的 denied 行：外层 404 回滚不会带走它，枚举探测才留下痕迹
     assert [row["result"] for row in rows] == ["success", "success", "denied"]
@@ -424,7 +432,7 @@ async def test_mfa_reset_clears_binding_revokes_sessions_and_guards_targets(
     ] is False
 
     # 审计：只有成功那一次，含理由与撤销家族数，不含 secret/恢复码/登录名
-    rows = await _audit_rows("school.user.mfa_reset")
+    rows = await _audit_rows("school.user.mfa_reset", tenant_id)
     assert len(rows) == 1
     metadata = rows[0]["metadata_json"]
     assert set(metadata) == {"sessions_revoked", "reason"}
@@ -441,12 +449,12 @@ async def test_mfa_reset_clears_binding_revokes_sessions_and_guards_targets(
     )
     assert again.status_code == 409
     assert again.json()["detail"]["code"] == "MFA_NOT_ENABLED"
-    assert len(await _audit_rows("school.user.mfa_reset")) == 1
+    assert len(await _audit_rows("school.user.mfa_reset", tenant_id)) == 1
 
     # 被挡的重试同样留痕：外层事务回滚会带走同事务的审计，这里验独立事务写成功。
     # 顺序即用例顺序：自己 → 超管 → 未启用 → 跨租（按不存在处理）→ 再次未启用。
     # 判据码统一 SCREAMING_SNAKE：M2 的审计巡检会按 reason 分组统计，大小写混用会分成两组。
-    denied = await _audit_rows("school.user.mfa_reset_denied")
+    denied = await _audit_rows("school.user.mfa_reset_denied", tenant_id)
     assert [row["metadata_json"]["reason"] for row in denied] == [
         "MFA_SELF_RESET",
         "MFA_SUPER_ADMIN_FORBIDDEN",

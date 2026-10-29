@@ -56,7 +56,7 @@ _SEED_STALE_COMMENT_OLD = """    -- 与启动自检 `catalog.code_realm()` 同�
 _SEED_STALE_COMMENT_NEW = """    -- 与启动自检 `catalog.code_realm()` 同一口径；DB 触发器 role_permissions_realm_guard
     -- 自 M1-E2 起同样只允许租户域模块白名单（TD-149 已收口）。"""
 
-_SEED_SCOPE_BLOCK = f"""
+_SEED_SCOPE_BLOCK = """
 
     -- 出厂默认数据范围（M1-E2 口径 ⑨）：与权限映射同一"只补缺、不覆盖"口径 ——
     -- 范围入库后属于运营配置，人工撤掉的不能被开通流程悄悄加回来。

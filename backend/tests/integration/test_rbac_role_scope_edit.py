@@ -27,7 +27,7 @@ from app.auth.principal import DATA_SCOPE_SELECT_SQL, Principal
 from app.config import get_settings
 from app.db.session import db_session, dispose_engine
 from app.rbac import admin
-from app.rbac.admin import RoleAdminError
+from app.rbac.admin import RoleAdminError, RoleSummary
 from tests.support.auth import seed_tenant_user
 from tests.support.db import clean_test_data, database_url, make_test_engine, upgrade_test_database
 from tests.support.dsn import assert_test_database_dsn
@@ -231,6 +231,32 @@ async def _scope_rows(tenant_id: UUID, role_id: UUID) -> list[dict[str, Any]]:
     finally:
         await engine.dispose()
     return [{"scope_type": str(r["scope_type"]), "scope_id": r["scope_id"]} for r in rows]
+
+
+async def _permission_codes(tenant_id: UUID, role_id: UUID) -> list[str]:
+    """角色当前映射的权限码（按码排序），用于跨路径并发时判定"权限这一侧到底被写了什么"。"""
+
+    engine = make_test_engine("admin")
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            rows: list[str] = list(
+                (
+                    await session.execute(
+                        text(
+                            "select p.code from public.role_permissions rp "
+                            "join public.permissions p on p.id = rp.permission_id "
+                            "where rp.tenant_id = :tid and rp.role_id = :rid order by p.code"
+                        ),
+                        {"tid": str(tenant_id), "rid": str(role_id)},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    finally:
+        await engine.dispose()
+    return [str(code) for code in rows]
 
 
 async def _audits(action: str) -> list[dict[str, Any]]:
@@ -852,8 +878,9 @@ async def test_two_concurrent_replacements_of_the_same_version_yield_one_writer(
     它**钉不住**两件容易被误当成本条功劳的事：① `update ... and version = :version` 那条 SQL 级
     CAS 谓词——同函数更早的 `int(role["version"]) != version` 已经在行锁之后拦下落败者，去掉谓词
     本条仍然绿，谓词是纵深防御而不是本条的承重墙（已登记 TD-205）；② 权限与范围共享一列
-    `roles.version`（TD-202）时的跨路径锁顺序——两个写者都走范围路径，权限路径没参与，跨路径那条
-    排在 TD-187f。
+    `roles.version`（TD-202）时的跨路径锁顺序——两个写者都走范围路径，权限路径没参与；跨路径那条
+    由紧随其后的 `test_cross_path_concurrent_permission_and_scope_edit_yields_one_writer` 钉住
+    （TD-187f-A T2）。
     """
 
     seeded = await _seed_tenant("SCPA4")
@@ -885,6 +912,102 @@ async def test_two_concurrent_replacements_of_the_same_version_yield_one_writer(
     winner = (await _audits("school.role.scopes.updated"))[-1]["metadata"]
     assert winner["added"] == [rows[0]["scope_type"]], (winner, rows)
     assert await _audits("school.role.scopes.denied") == [], "版本落败属并发，不是越权探测（不入安全审计）"
+
+
+# --- 4b. 跨路径：权限 PUT 与范围 PUT 抢同一列 `roles.version` ---
+
+
+async def test_cross_path_concurrent_permission_and_scope_edit_yields_one_writer(
+    stack: None,
+) -> None:
+    """同一个角色：甲在权限页提交、乙同时的范围页提交，两边都带 `version=0` → 恰好一路成功。
+
+    业务形状是 M2-UI3 前台真实的两个标签页：权限与范围分家编辑，但 `roles.version` 只有一列
+    （TD-202 的有意取舍——分列会出现"权限写进去了、范围失败"的半更新态）。今天这条链路**没有**
+    任何机制阻止两路都落库：唯一的屏障是两边都在同一行 `roles` 上取 `FOR UPDATE`。所以本条要钉的
+    是三件跨路径才成立的事：① 恰好一个写者成功、`version` 只推进一格（不是两格）；② 落败那一路
+    拿到的 409 `latest` 快照必须已经是**赢家**的新值——前台据此提示"刷新后重试"，快照若是旧值等于
+    让操作者基于过期数据再改一轮；③ 赢家只写自己那一侧，落败侧一行都不许留（半更新态的真实形状）。
+
+    **本条预期"新增即绿"**（简报 §16.4 步骤 2 已写明）：它不是复现一个今天的 bug，而是把"两侧共享
+    一列版本 + 同一行锁"这套隐式约定钉成回归网。谁以后改任一侧的取锁方式（TD-202 的候选解之一就是
+    给范围单独开版本列；把 `for_update` 换成 advisory lock 也算），本条会转红而不是等到线上出现
+    "两个都 200、版本只加一格"。
+
+    它**钉不住**两件事：① SQL 级 CAS 谓词是否承重（同 §852 的①，落败者先被行锁后的版本比较拦住）；
+    ② 死锁不存在——两侧取锁顺序相同（都是 `roles` 行锁），本条只验证"排上队的那一路不会既拿到锁又
+    看不见对方已写的值"，不验证反序取锁的情形（那种情形需要新的写入方，今天没有）。
+    """
+
+    seeded = await _seed_tenant("SCPA5")
+    principal: Principal = seeded["principal"]
+    tenant_id = seeded["tenant_id"]
+    role_id = await _create_role(principal)
+    submitted = ["school.personnel.create", "school.personnel.edit"]
+
+    async def submit_permissions() -> RoleAdminError | RoleSummary:
+        try:
+            return await admin.replace_role_permissions(
+                principal,
+                role_id,
+                permission_codes=submitted,
+                version=0,
+                reason="并发跨路径甲",
+                request_id=None,
+            )
+        except RoleAdminError as exc:
+            return exc
+
+    async def submit_scopes() -> RoleAdminError | RoleSummary:
+        try:
+            return await admin.replace_role_scopes(
+                principal,
+                role_id,
+                scope_types={"self"},
+                version=0,
+                reason="并发跨路径乙",
+                request_id=None,
+            )
+        except RoleAdminError as exc:
+            return exc
+
+    outcomes = await asyncio.gather(submit_permissions(), submit_scopes())
+    winners = [item for item in outcomes if not isinstance(item, RoleAdminError)]
+    losers = [item for item in outcomes if isinstance(item, RoleAdminError)]
+    assert len(winners) == 1 and len(losers) == 1, outcomes
+    assert await _role_version(tenant_id, role_id) == 1, "跨路径并发同样只推进一格"
+
+    loser = losers[0]
+    assert loser.code == "ROLE_VERSION_CONFLICT", loser
+    assert loser.latest is not None, "落败必须带回刷新快照，否则前台只能盲改"
+    assert loser.latest.version == 1
+
+    permissions_won = isinstance(winners[0], RoleSummary) and sorted(
+        winners[0].permission_codes
+    ) == submitted
+    if permissions_won:
+        assert await _permission_codes(tenant_id, role_id) == submitted
+        assert await _scope_rows(tenant_id, role_id) == [], "落败的范围写入不能留下半行"
+        assert sorted(loser.latest.permission_codes) == submitted, "快照得是赢家的新权限集"
+        metadata = (await _audits("school.role.permissions.updated"))[-1]["metadata"]
+        assert metadata["added"] == submitted, metadata
+        assert metadata["removed"] == ["school.personnel.view"], metadata
+        assert await _audits("school.role.scopes.updated") == []
+    else:
+        rows = await _scope_rows(tenant_id, role_id)
+        assert [row["scope_type"] for row in rows] == ["self"], rows
+        assert await _permission_codes(tenant_id, role_id) == ["school.personnel.view"], (
+            "落败的权限写入不能改动映射"
+        )
+        assert list(loser.latest.permission_codes) == ["school.personnel.view"], (
+            "范围赢家不该动权限快照"
+        )
+        metadata = (await _audits("school.role.scopes.updated"))[-1]["metadata"]
+        assert metadata["added"] == ["self"], metadata
+        assert await _audits("school.role.permissions.updated") == []
+
+    assert await _audits("school.role.permissions.denied") == []
+    assert await _audits("school.role.scopes.denied") == [], "版本落败属并发，不入安全审计"
 
 
 # --- 5. 守卫的"净增"分母与请求期解析必须同解 ---
