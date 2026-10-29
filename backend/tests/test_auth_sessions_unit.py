@@ -185,3 +185,84 @@ class TestSessionRedisDegradation:
         monkeypatch.setattr(revocation, "_redis", lambda: _BrokenRedis())
 
         assert await revocation.is_active(str(uuid4()), uuid4(), realm="tenant") is True
+
+
+class TestResetClientAcrossEventLoops:
+    """`reset_client()` 跨事件循环关闭全局 Redis 客户端（TD-246）。
+
+    `_client` 是模块级全局、在第一次用到它的用例的事件循环里创建。pytest-asyncio
+    每个用例一个事件循环，于是"客户端在 A 用例的循环里建、在 B 用例的循环里关"是常态，
+    而 redis-py 关闭 transport 时要在**建连的原循环**上挂回调——原循环已关就抛
+    `RuntimeError: Event loop is closed`。那条连接本来就随旧循环一起死了，关不掉也无所谓，
+    所以这一种要吞掉；**其它异常照常抛出不掩盖**（否则真问题会被这条兜底吃掉）。
+    """
+
+    class _FakeClient:
+        """只提供 `reset_client` 用到的那一个方法。"""
+
+        def __init__(self, error: BaseException | None = None) -> None:
+            self._error = error
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+            if self._error is not None:
+                raise self._error
+
+    @pytest.mark.asyncio
+    async def test_swallows_only_the_closed_event_loop_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """原循环已关：吞掉这一种错误，且全局引用**先摘掉**再关（关不掉也不留半个客户端）。"""
+
+        client = self._FakeClient(RuntimeError("Event loop is closed"))
+        monkeypatch.setattr(revocation, "_client", client)
+
+        await revocation.reset_client()
+
+        assert client.closed is True
+        assert revocation._client is None, "全局引用必须摘掉，否则下次调用还会撞已死的客户端"
+
+    @pytest.mark.asyncio
+    async def test_reraises_other_runtime_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同样是 RuntimeError 但不是"事件循环已关"：照常抛出，不许被兜底吃掉。"""
+
+        monkeypatch.setattr(revocation, "_client", self._FakeClient(RuntimeError("连接被重置")))
+
+        with pytest.raises(RuntimeError, match="连接被重置"):
+            await revocation.reset_client()
+
+    @pytest.mark.asyncio
+    async def test_reraises_non_runtime_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """非 RuntimeError 一律照常抛出（兜底只针对那一句，不是一网打尽）。"""
+
+        monkeypatch.setattr(revocation, "_client", self._FakeClient(OSError("磁盘炸了")))
+
+        with pytest.raises(OSError):
+            await revocation.reset_client()
+
+    @pytest.mark.asyncio
+    async def test_normal_close_clears_the_global(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """正常关闭：全局清空，行为与改动前一致。"""
+
+        client = self._FakeClient()
+        monkeypatch.setattr(revocation, "_client", client)
+
+        await revocation.reset_client()
+
+        assert client.closed is True
+        assert revocation._client is None
+
+    @pytest.mark.asyncio
+    async def test_no_client_is_a_no_op(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """没有客户端时是空操作（不该凭空造一个、也不该报错）。"""
+
+        monkeypatch.setattr(revocation, "_client", None)
+
+        await revocation.reset_client()
+
+        assert revocation._client is None
