@@ -71,6 +71,11 @@ def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
         object_id = UUID(str(payload["id"]))
     except Exception as exc:
         raise CursorError(f"无法解码分页游标：{cursor[:32]}…") from exc
+    if created_at.tzinfo is None:
+        # 无时区的时间戳会被 PG 按会话时区解释：手造一个未来时刻的游标会让比较条件
+        # 恒真，翻页**悄悄回到第一页**——正是上面那句"绝不能静默回到开头"要杜绝的。
+        # 真实游标一律带时区（`created_at` 取自 TIMESTAMPTZ 列），所以这里只挡手造的。
+        raise CursorError(f"分页游标缺少时区信息：{cursor[:32]}…")
     return created_at, object_id
 
 

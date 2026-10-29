@@ -440,6 +440,8 @@ async def test_create_custom_role_grants_capability_and_survives_sync(
         "permission_codes": LIBRARIAN_CODES,
         # 服务端派生：自定义角色可绑定（只有超管角色为 false，见 BS-M2UI3-D）
         "bindable": True,
+        # 服务端派生：自定义角色没有出厂定义 → 不可「恢复出厂」（TD-200）
+        "resettable": False,
     }
 
     # Then 库里的权限映射逐码相等（断言的是"表里有什么"，不是"接口回显了什么"）

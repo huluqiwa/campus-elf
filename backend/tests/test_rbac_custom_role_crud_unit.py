@@ -7,7 +7,11 @@
    而"接口放过、库撞 CHECK 变 500"是最难复现的一类线上故障）；长度上限 63 而非列宽 64；
 3. `is_system=false` 的角色在 `_lock_reason` / `_to_summary` 里一律可编辑（M2-UI3 的翻转点），
    内置角色仍按 `EDITABLE_ROLE_CODES` / `LOCKED_ROLE_REASONS` 划分；
-4. 复制源与显式权限清单互斥：这是入参语义检查，必须在碰库之前拒绝。
+4. 复制源与显式权限清单互斥：这是入参语义检查，必须在碰库之前拒绝；
+5. 角色名的"非空白"判据：库层 CHECK 的空白字符集 ⊆ 接口层那一份（TD-198），
+   库层不得比接口层宽松（否则兜底反而漏掉"接口拒、库收"的行）；
+6. `resettable` 由服务端从出厂默认表派生（TD-200），前端不再按 `is_system` 猜；
+   它还要连"角色可编辑"这一道门一起算——只算"有出厂定义"会给锁定角色点亮一个必 409 的按钮。
 """
 
 import re
@@ -23,6 +27,7 @@ from app.api.school_rbac import RoleCreatePayload, RoleDeletionPreviewResponse
 from app.auth.principal import Principal
 from app.rbac import admin
 from app.rbac.admin import (
+    DB_ROLE_NAME_BLANK_CHARS,
     EDITABLE_ROLE_CODES,
     LOCKED_ROLE_REASONS,
     RESERVED_TENANT_ROLE_CODES,
@@ -42,6 +47,14 @@ MIGRATION_FILE = (
     / "d7a1c3e5b9f4_m2_ui3_custom_role_invariants.py"
 )
 
+#: TD-198 的迁移（角色名非空白 CHECK）。
+NAME_CHECK_MIGRATION_FILE = (
+    Path(__file__).resolve().parents[1]
+    / "alembic"
+    / "versions"
+    / "a1c3e5f7b9d2_m2_ui3_role_name_not_blank.py"
+)
+
 
 def _principal() -> Principal:
     return Principal(
@@ -57,7 +70,7 @@ def _principal() -> Principal:
     )
 
 
-def _row(code: str, *, is_system: bool) -> dict[str, object]:
+def _row(code: str, *, is_system: bool, resettable: bool | None = None) -> dict[str, object]:
     return {
         "id": uuid4(),
         "code": code,
@@ -67,6 +80,9 @@ def _row(code: str, *, is_system: bool) -> dict[str, object]:
         "version": 3,
         "user_count": 2,
         "permission_codes": ["school.kb.view"],
+        # `resettable` 由服务端从出厂默认表派生（TD-200），与 `is_system` 不是一回事：
+        # 默认按"内置 ⇒ 有出厂定义"给值，需要单独验派生时显式传。
+        "resettable": is_system if resettable is None else resettable,
     }
 
 
@@ -101,6 +117,81 @@ def test_interface_code_pattern_matches_database_check() -> None:
         assert not compiled.fullmatch(bad), bad
 
 
+def test_db_blank_set_is_a_subset_of_the_interface_blank_set() -> None:
+    """TD-198：库层 CHECK 的空白字符集是接口层那一份的**子集**（接口更严）。
+
+    两条方向都要钉住：
+    - **库层判为空 ⇒ 接口层必拒**（ASCII 集 ⊆ Python `strip()` 集）：库里算"没名字"的，
+      接口不会放行，两边不会对同一个名字给出相反结论；
+    - **接口层比库层更严**（Python `strip()` 还去 U+3000 等 Unicode 空白）：界面里不能出现
+      "看不见名字"的角色——这正是 TD-198 要治的病。
+    已知窄缝：绕过应用直接写 SQL 时，一个只含 U+3000 的名字库层会放行。补齐全套 Unicode
+    空白集要在 SQL 里维护一份易腐的字面量，代价大于收益（写入口只有接口层）；
+    该窄缝登记在 `docs/tech-debt.md` TD-239。
+    """
+
+    assert NAME_CHECK_MIGRATION_FILE.exists(), (
+        f"迁移文件路径变了：{NAME_CHECK_MIGRATION_FILE}"
+    )
+    migration_sql = NAME_CHECK_MIGRATION_FILE.read_text(encoding="utf-8")
+    # 迁移用 f-string 把字符集插进 CHECK，所以对照点是那个常量声明本身
+    # （与 `ck_roles_code_format_valid` 的同款回归网）。
+    embedded = re.search(r'^_BLANK_CHARS = r"([^"]+)"', migration_sql, re.MULTILINE)
+    assert embedded is not None, "迁移里找不到角色名的空白字符集：本用例的对照前提不成立"
+    # 迁移里是 PG 的 E'' 转义写法（\t \n ...），解成真实字符再比对
+    assert embedded.group(1).encode().decode("unicode_escape") == DB_ROLE_NAME_BLANK_CHARS, (
+        f"库层空白字符集 {embedded.group(1)!r} 与应用层快照漂移"
+    )
+    # 约束表达式确实用上了这份字符集（不是"常量声明在那儿、CHECK 用别的"）
+    assert "btrim(name, E'{_BLANK_CHARS}')" in migration_sql, (
+        "CHECK 表达式没有引用字符集常量：常量与约束会各说各话"
+    )
+    # 库里这份字符集必须全在 Python 的空白集内：库拒的名字，接口也拒。
+    for char in DB_ROLE_NAME_BLANK_CHARS:
+        assert char.isspace(), f"库层字符集里的 {char!r} 不是空白字符，两边语义对不上"
+    assert "".join(DB_ROLE_NAME_BLANK_CHARS).strip() == "", "字符集本身全是空白，判据自相矛盾"
+
+    # 接口层：全空白名一律拒，且落库前先 strip。
+    for blank in ("", "   ", "\t", "\n", " \t\r\n\v\f ", "　"):
+        with pytest.raises(ValidationError):
+            RoleCreatePayload(code="library_keeper", name=blank)
+    assert RoleCreatePayload(code="library_keeper", name="  资料管理员  ").name == "资料管理员"
+
+
+def test_resettable_is_derived_by_the_server_not_by_is_system() -> None:
+    """TD-200：`resettable` 与 `is_system` 是两件事，前端只认 `resettable`。
+
+    今天"内置 ⇒ 有出厂定义"让两者恰好等价，但那是巧合：给某个内置角色撤掉定义行、
+    或给自定义角色加"按模板初始化"，按 `is_system` 点亮的按钮就会亮着恒 409。
+
+    **还要连"角色可编辑"这一道门一起算**：重置实际要过 `_assert_editable` → `ROLE_DEFAULTS_UNAVAILABLE`
+    两道门。校方超管/学生/教师这三个内置锁定角色**都有**出厂定义，只算"有定义"会给它们
+    点亮一个永远 409 的按钮——那正是 TD-200 要治的病换了个方向复发。
+    """
+
+    # 内置但没有出厂定义 → 不可重置（按钮必须不亮）
+    builtin_without_defaults = _to_summary(_row("school_admin", is_system=True, resettable=False))
+    assert builtin_without_defaults.resettable is False
+    # 自定义但有出厂定义 → 可重置（按钮该亮）
+    custom_with_defaults = _to_summary(_row("library_keeper", is_system=False, resettable=True))
+    assert custom_with_defaults.resettable is True
+    # 同一行上 `is_system` 与 `resettable` 可以各说各话——这正是要下发 `resettable` 的理由
+    assert custom_with_defaults.is_system is False
+    assert builtin_without_defaults.is_system is True
+
+    # 内置锁定角色：有出厂定义也**不可**重置（`_assert_editable` 先拦）
+    for locked_code in LOCKED_ROLE_REASONS:
+        locked = _to_summary(_row(locked_code, is_system=True, resettable=True))
+        assert locked.editable is False, locked_code
+        assert locked.resettable is False, (
+            f"{locked_code} 是锁定角色，重置永远 409：按钮不能亮"
+        )
+    # 内置可编辑角色（`school_admin`/`teacher_b_end`）有出厂定义时可重置
+    for editable_code in EDITABLE_ROLE_CODES:
+        editable = _to_summary(_row(editable_code, is_system=True, resettable=True))
+        assert editable.resettable is True, editable_code
+
+
 def test_custom_roles_are_editable_and_builtin_still_gated() -> None:
     """`is_system=false` 一律可编辑；内置角色按锁定名单与可编辑名单划分。"""
 
@@ -122,6 +213,27 @@ def test_custom_roles_are_editable_and_builtin_still_gated() -> None:
     assert (builtin_editable.editable, builtin_editable.lock_reason) == (True, None)
     builtin_locked = _to_summary(_row("student", is_system=True))
     assert (builtin_locked.editable, builtin_locked.lock_reason) == (False, LOCKED_ROLE_REASONS["student"])
+
+
+async def test_service_layer_rejects_blank_role_name() -> None:
+    """直调 `create_role` 也要拒全空白名（TD-198）。
+
+    接口层 Pydantic 已经拒了，但服务层不校验就等于"只靠调用方守规矩"：直调会一路走到 INSERT
+    撞新 CHECK → `IntegrityError` → 500。判据与服务层其他入参错误同族（422、不落安全审计）。
+    这条用例不碰库：名字判据排在任何写路径之前。
+    """
+
+    with pytest.raises(RoleAdminError) as caught:
+        await admin.create_role(
+            _principal(),
+            code="library_keeper",
+            name="   ",
+            permission_codes=[],
+            copy_from_role_id=None,
+            reason=None,
+            request_id=None,
+        )
+    assert (caught.value.code, caught.value.http_status) == ("ROLE_NAME_NOT_BLANK", 422)
 
 
 async def test_copy_from_and_explicit_codes_are_mutually_exclusive() -> None:
