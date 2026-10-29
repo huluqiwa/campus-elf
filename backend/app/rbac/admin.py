@@ -95,6 +95,15 @@ _SCOPE_TYPE_OWNERSHIP: dict[str, str] = {
 _SCOPE_TYPE_CHECK_CONSTRAINT = "ck_data_scopes_scope_type_valid"
 _SYSTEM_ROLE_REASON = "该内置角色不在可编辑范围"
 
+# 库层 CHECK `ck_roles_name_not_blank` 用的空白字符集（TD-198）：迁移 `a1c3e5f7b9d2` 里
+# 是**同一份字面量的快照**，单元测试逐字符比对两边，防止随重构漂移。
+# 为什么显式给字符集而不是用默认 `btrim(name)`：默认 btrim **只去空格**，去不掉制表符/换行。
+# **它与接口层不是同一份集合**，方向是接口层更严：接口用 Python 的 `str.strip()`（去**全部**
+# Unicode 空白，含 U+3000 全角空格），这份是 ASCII 子集。所以库层认的空白 ⊂ 接口层认的空白，
+# 不会出现"接口放行、库拒绝"的反向缺口；反过来"库放行、接口拒绝"是**允许**的——界面里不该出现
+# 看不见名字的角色，那正是 TD-198 要治的病（残留窄缺口见 `docs/tech-debt.md` TD-239）。
+DB_ROLE_NAME_BLANK_CHARS: str = " \t\n\r\f\v"
+
 TENANT_PERMISSIONS: tuple[PermissionDef, ...] = tuple(
     entry for entry in PERMISSION_CATALOG if entry.module in TENANT_MODULES
 )
@@ -139,6 +148,11 @@ class RoleSummary:
     #: 能否经绑定接口授给账号（TD-187d）。只有超管角色为 false——它由平台开通流程管理，
     #: 允许租户内绑定等于让持 `permission_account.manage` 的人把任意账号提成超管。
     bindable: bool
+    #: 能否"恢复出厂"（TD-200）：服务端派生——**有出厂定义**且**角色可编辑**（两道门都过）。
+    #: 前端只按这个字段点亮"恢复出厂"按钮，不再按 `is_system` 猜（两者的等价只是今天的巧合）。
+    #: 少算一道门的后果：校方超管/学生/教师这三个内置锁定角色都有出厂定义，只算"有定义"
+    #: 会给它们点亮一个永远 409 的按钮。
+    resettable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +232,21 @@ select
             where rp.role_id = r.id and rp.tenant_id = r.tenant_id
         ),
         array[]::text[]
-    ) as permission_codes
+    ) as permission_codes,
+    (
+        -- 能不能"恢复出厂"（TD-200）：服务端派生，不让前端复刻"有没有出厂定义"的判据。
+        -- 判据与 `_preview` 的 `ROLE_DEFAULTS_UNAVAILABLE` **同源**：两侧都空才算没有定义。
+        -- 注意这只是**第一道门**：重置还要先过 `_assert_editable`（锁定角色 → 409 `ROLE_IMMUTABLE`），
+        -- 所以"可编辑"这一半在 `_to_summary` 里并进来，两道门都过了才是真的能重置。
+        exists (
+            select 1 from public.rbac_builtin_role_defaults d
+            where d.realm = 'tenant' and d.role_code = r.code
+        )
+        or exists (
+            select 1 from public.rbac_builtin_role_scope_defaults s
+            where s.realm = 'tenant' and s.role_code = r.code
+        )
+    ) as resettable
 from public.roles r
 where r.tenant_id = cast(:tid as uuid)
   and (cast(:rid as uuid) is null or r.id = cast(:rid as uuid))
@@ -239,18 +267,23 @@ def role_is_bindable(code: str) -> bool:
 def _to_summary(row: Any) -> RoleSummary:
     is_system = bool(row["is_system"])
     code = str(row["code"])
+    editable = (not is_system) or code in EDITABLE_ROLE_CODES
     return RoleSummary(
         id=UUID(str(row["id"])),
         code=code,
         name=str(row["name"]),
         is_system=is_system,
-        editable=(not is_system) or code in EDITABLE_ROLE_CODES,
+        editable=editable,
         lock_reason=_lock_reason(code, is_system=is_system),
         version=int(row["version"]),
         defaults_applied=bool(row["defaults_applied"]),
         user_count=int(row["user_count"]),
         permission_codes=tuple(str(code) for code in row["permission_codes"]),
         bindable=role_is_bindable(code),
+        # 「有出厂定义」**且**「可编辑」：重置要连过两道门（`_assert_editable` → `ROLE_DEFAULTS_UNAVAILABLE`），
+        # 少算一道就会给前端一个"亮着必 409"的按钮——校方超管/学生/教师这三个内置锁定角色
+        # 都有出厂定义，但锁定后永远重置不了（TD-200 的立项目标就是这个按钮别恒 409）。
+        resettable=bool(row["resettable"]) and editable,
     )
 
 
@@ -1217,7 +1250,7 @@ async def create_role(
 
     异常:
         RoleAdminError: 409（码为内置保留/同码已存在/目录漂移）、404（复制源不存在/跨租）、
-            422（复制源非可编辑角色、复制源与显式权限清单同时给出、非法权限码、
+            422（角色名全空白、复制源非可编辑角色、复制源与显式权限清单同时给出、非法权限码、
             非超管转授 `school.role.manage`）。
     """
 
@@ -1225,6 +1258,13 @@ async def create_role(
     normalized_code = code.strip()
     normalized_name = name.strip()
     normalized_reason = reason.strip() if reason and reason.strip() else None
+
+    if not normalized_name:
+        # 服务层也拦一道（TD-198）：接口层 Pydantic 已经拒了全空白名，但直调 `create_role` 的
+        # 调用方（测试、将来的内部编排）绕不过那一层——落库前不拦就是撞新 CHECK 变 500。
+        # 判据用 Python 的 `strip()`（全部 Unicode 空白），比库层 CHECK 的 ASCII 集更严。
+        # 入参非法族，不落安全审计（与 `DEACTIVATE_REASON_REQUIRED` 同口径）。
+        raise RoleAdminError("ROLE_NAME_NOT_BLANK", "角色名不能为空或全空白", 422)
 
     if copy_from_role_id is not None and permission_codes:
         # 二选一（简报 §4.1）。不选"以显式清单为准、静默忽略复制源"：前端两个字段都填时

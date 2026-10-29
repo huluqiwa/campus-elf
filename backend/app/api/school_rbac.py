@@ -30,6 +30,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth.principal import Principal, require_permission
+from app.db.repository import CursorError
 from app.personnel import account_admin, mfa_admin
 from app.personnel.account_admin import AccountAdminError
 from app.personnel.mfa_admin import MfaAdminError
@@ -70,6 +71,13 @@ class RoleResponse(BaseModel):
     permission_codes: list[str]
     # 能否经绑定接口授出（TD-187d）：超管角色为 false。服务端下发，前端不按 code 硬编码。
     bindable: bool
+    # 能否"恢复出厂"（TD-200）：服务端派生——**有出厂定义**且**角色可编辑**（两道门都过）。
+    # 前端按它点亮"恢复出厂"，`is_system` 只用于展示"内置/自建"标签（两者今天的等价只是巧合）。
+    # 注意它只管**两道硬门**（锁定 → `ROLE_IMMUTABLE`；无出厂定义 → `ROLE_DEFAULTS_UNAVAILABLE`）：
+    # 真正执行仍要理由 ≥10 字、逐字 `confirm_role_code`、当前 `version`，
+    # 且 `school_admin` 的 `school` 范围净增会触发自扩权确认（422 `SELF_GRANT_CONFIRMATION_REQUIRED`）。
+    # 所以前端要按"确认流"处理，不要按"点了必成"处理。
+    resettable: bool
 
 
 class PermissionResponse(BaseModel):
@@ -274,6 +282,41 @@ class UserLookupResponse(BaseModel):
     roles: list[str]
 
 
+class BindableRoleResponse(BaseModel):
+    """可经绑定接口授出的角色（TD-187g 决策 2）：**只有身份，没有权限码清单**。
+
+    完整权限矩阵是 `school.role.manage` 的事；这条端点给只持
+    `school.permission_account.manage` 的人用，不该顺手把矩阵递出去。
+    """
+
+    id: UUID
+    code: str
+    name: str
+    is_system: bool
+
+
+class PermissionAccountResponse(BaseModel):
+    """权限账号列表的一行（TD-187g 决策 1）：不回显 `login_id`（学号/工号属敏感标识符）。"""
+
+    id: UUID
+    display_name: str | None
+    user_type: str
+    status: str
+    role_codes: list[str]
+    roles_version: int
+    mfa_enabled: bool
+    # 该账号是否持有校方超管角色（服务端派生）：这类账号的角色绑定由平台开通流程管理，
+    # 租户内改绑必然 403 `BINDING_SUPER_ADMIN_FORBIDDEN`，前端据此把绑定入口关掉。
+    is_super_admin: bool
+
+
+class PermissionAccountPageResponse(BaseModel):
+    """权限账号列表的一页（cursor 分页，与 `GET /school/teachers` 同形）。"""
+
+    items: list[PermissionAccountResponse]
+    next_cursor: str | None
+
+
 class MfaResetPayload(BaseModel):
     """MFA 重置请求：理由必填（服务层再校验 ≥10 字符）。"""
 
@@ -306,6 +349,7 @@ def _role_response(summary: RoleSummary) -> RoleResponse:
         user_count=summary.user_count,
         permission_codes=list(summary.permission_codes),
         bindable=summary.bindable,
+        resettable=summary.resettable,
     )
 
 
@@ -438,6 +482,35 @@ async def list_permissions(
             sensitive_self_grant=entry.code in SENSITIVE_SELF_GRANT_CODES,
         )
         for entry in admin.list_permissions()
+    ]
+
+
+@router.get("/bindable-roles", response_model=list[BindableRoleResponse])
+async def list_bindable_roles(
+    account_manager: Annotated[Principal, AccountManagerDep],
+) -> list[BindableRoleResponse]:
+    """可经绑定接口授出的角色目录（TD-187g 决策 2）。
+
+    要 `school.permission_account.manage` 而不是 `school.role.manage`：绑定页要的是
+    "能选哪些角色"，不需要角色的权限码清单。超管角色不可绑，**不列**——
+    列出来就是"能勾不能存"。
+
+    异常:
+        HTTPException: 403（缺权限码/主体 realm 不符）。
+    """
+
+    try:
+        roles = await binding.list_bindable_roles(account_manager)
+    except BindingAdminError as exc:
+        raise _binding_error(exc) from exc
+    return [
+        BindableRoleResponse(
+            id=role.id,
+            code=role.code,
+            name=role.name,
+            is_system=role.is_system,
+        )
+        for role in roles
     ]
 
 
@@ -689,6 +762,48 @@ async def delete_role(
     except RoleAdminError as exc:
         raise _role_error(exc) from exc
     return _deletion_response(preview)
+
+
+@router.get("/permission-accounts", response_model=PermissionAccountPageResponse)
+async def list_permission_accounts(
+    account_manager: Annotated[Principal, AccountManagerDep],
+    limit: Annotated[int, Query(ge=1, le=binding.MAX_PAGE_SIZE)] = 50,
+    cursor: Annotated[str | None, Query(max_length=256)] = None,
+) -> PermissionAccountPageResponse:
+    """列出本校权限账号（TD-187g 决策 1）。
+
+    按账号类型过滤（教师 + 校方管理员，与绑定写路径同一集合），**不按人员数据范围裁剪**——
+    权限账号管理是租户级操作，按 `school`/`self` 裁会让管理员看不见自己要管的账号。
+    `deleted` 的账号不列。不回显 `login_id`。
+
+    异常:
+        HTTPException: 400（游标无效）、403（缺权限码/主体 realm 不符）。
+    """
+
+    try:
+        page = await binding.list_permission_accounts(
+            account_manager, limit=limit, cursor=cursor
+        )
+    except BindingAdminError as exc:
+        raise _binding_error(exc) from exc
+    except CursorError as exc:
+        raise HTTPException(status_code=400, detail="分页游标无效") from exc
+    return PermissionAccountPageResponse(
+        items=[
+            PermissionAccountResponse(
+                id=item.id,
+                display_name=item.display_name,
+                user_type=item.user_type,
+                status=item.status,
+                role_codes=list(item.role_codes),
+                roles_version=item.roles_version,
+                mfa_enabled=item.mfa_enabled,
+                is_super_admin=item.is_super_admin,
+            )
+            for item in page.items
+        ],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.get("/users/lookup", response_model=UserLookupResponse)

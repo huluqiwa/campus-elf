@@ -89,7 +89,12 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
         "roles": "用户↔多角色绑定（M2-UI3 TD-187d）：roles/user_roles 就是授权判据本身，不能反过来被数据范围限制",
         "user_roles": "同上：全量替换绑定集需要按角色集合读旧行、按 unnest 批量写新行，无仓储原语",
         "role_permissions": "同上：绑定 diff 要做两次「角色集合 → 权限码并集」（替换前后各一次）",
-        "users": "同上：目标账号的存在性/类型/状态与 `roles_version` CAS 都在同一把 `FOR UPDATE` 行锁内",
+        "users": (
+            "同上：目标账号的存在性/类型/状态与 `roles_version` CAS 都在同一把 `FOR UPDATE` 行锁内；"
+            "另有 TD-187g 决策 1 的**只读列表**（`GET /school/permission-accounts`）——那是租户级的"
+            "权限账号管理，按账号类型（教师/校方管理员）过滤、不按人员数据范围裁剪（TD-237 已登记），"
+            "每条语句显式 `tenant_id`，租户连接 + RLS 双重隔离"
+        ),
     },
     "app/personnel/account_admin.py": {
         "*": (

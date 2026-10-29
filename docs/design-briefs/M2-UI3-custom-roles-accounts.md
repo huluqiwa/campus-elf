@@ -811,3 +811,198 @@ TD-235 候选，等真要做跨动作告警时再统一补）。
 **独立审查与整改（1 轮，0 Blocker / 1 Major / 5 Minor）**：唯一阻塞项是**平台 realm 侧没有回归网**——审查实测「只把平台 `active_families` 改回旧写法，全部 57 条相关用例照样全绿」。整改：补红灯 ⑥ 的平台用例，并把该文件原先**不带租户过滤**的审计读取拆成 `_audit_metadata(action, tenant_id=...)` 与 `_platform_audit_metadata(action)`（`tenant_id is null`）——平台与租户共用 `auth.password.reset` 动作名，不收窄就会把租户那次的行一起读进来。另 5 条 Minor（台账处置列仍是 `已采纳`、M1-D2 简报 §5.6 审计表仍是旧键名、过期家族被登记了 Redis 会话标记、简报 §17.4 "4 处"应为"3 处"、行号引用漂移）已全部整改，详见 `docs/review-log.md` 同名小节。
 
 **交付结果（2026-10-29）**：PR #16 单 commit `47ab2c0` → **rebase 合并提交 `0ffdb2d`**。PR CI backend run `40907206389` **807 passed / 788.31s**、security run `40907206149` success；合并后 main 推送 CI backend run `40909787189` **807 passed / 805.66s**、security run `40909787157` success；四包分支覆盖率两次 run 逐包一致（`app/auth` 410/504 = 81.35%，门槛 80）。用例数 803 → 807（新增 4 条）。
+
+## 18. TD-187g：前端角色页与权限账号页（含 TD-198 / TD-200 / TD-202）
+
+> 状态：**已拍板**（2026-10-30，三条决策全按推荐，见 §18.3）。本点是 M2-UI3 的**最后一批**（milestone §5.2 T7），
+> 也是 M2-UI3 里唯一一个**前后端都要动**的点（TD-200 要后端下发字段、TD-198 要一条迁移），
+> 因此 §18.2 的三个决策定完之后才动手。
+
+### 18.1 目标与验收
+
+**范围（`docs/milestone.md` §5.2 T7）**：「187g 前端角色页与权限账号页（含 TD-198 `name` 非空白、
+TD-200 `resettable` 下发）」。
+
+**现状核对（2026-10-30 读代码得到的事实，不是设想）**：
+
+| 后端能力（已交付） | 端点 | 权限码 | 前端入口 |
+|---|---|---|---|
+| 自定义角色创建 | `POST /school/roles` | `school.role.manage` | **无** |
+| 自定义角色删除（预览/执行） | `POST /school/roles/{id}/delete/preview` · `/delete` | 预览 `school.role.manage`、执行 `school.role.delete` | **无** |
+| 角色数据范围读写 | `GET`/`PUT /school/roles/{id}/scopes` | `school.role.manage` | **无** |
+| 账号↔角色绑定 | `GET`/`PUT /school/users/{id}/roles` | `school.permission_account.manage` | **无** |
+| 权限账号停用/启用 | `POST /school/users/{id}/deactivate` · `/activate` | `school.permission_account.manage` | **无** |
+| 角色列表 / 权限目录 | `GET /school/roles` · `GET /school/permissions` | `school.role.manage` | 有（M2-UI2 角色权限页） |
+| 恢复出厂 | `POST /school/roles/{id}/reset/{preview,}` | `school.role.manage` | 有（M2-UI2，按 `is_system` 点亮按钮） |
+
+前端已有的只有 M2-UI2 的 `RoleSettingsView.vue`（`settings/roles`）：勾权限、恢复出厂、MFA 重置。
+**M2-UI3 后端交付的五项能力，今天前端一个入口都没有**——运营实际能做的只有「改权限码」。
+
+**两个后端缺口（本批必须补，否则前端做不出来）**：
+
+1. **权限账号页没有「列账号」的接口**。现有能碰到账号的接口全是「按 id 操作」或「按登录名精确查一个」：
+   - `GET /school/users/lookup?login_id=` → 一次一个账号（`school.personnel.mfa.reset`）；
+   - `GET /school/users/{user_id}/roles` → 单账号绑定快照；
+   - `GET /school/teachers` → 要 `school.personnel.view`（**另一个码**），只有教师档案、**没有角色与状态字段**，
+     且 `school_admin` 账号没有教师档案行 → **不可用**。
+   → 运营想「看看谁持了教师 B 端角色」「把离职教师的账号停掉」，今天**没有任何一条路**。
+2. **两个权限码把绑定页变成半死路**（§14.10 延后项）。绑定写要 `school.permission_account.manage`；
+   但绑定页得先列角色才能勾，`GET /school/roles` 要 `school.role.manage`。
+   只持前者的账号打开绑定页 → 列不出角色 → 只读死路；只持后者的账号 → 能改角色配置但碰不了任何账号。
+
+**验收（对应 milestone T7）**：
+
+- **A1** 角色页能新建自定义角色（`code`/`name` 必填校验与后端**同一判据**）、能删除自定义角色
+  （两步预览 → 逐字确认 code + 理由 ≥10 字 + 版本 + 影响面指纹）。
+- **A2** 角色页能编辑角色级数据范围：可改 `school`/`self` 两类；`class`/`course` 只读展示并写清
+  「为什么不可改」（后端 §13.2 决策③：这两类必须绑具体 id，本端点没有那个入参通道）。
+- **A3** 「恢复出厂」按钮跟服务端下发的 `resettable` 走，**不再跟 `is_system` 走**（TD-200）；
+  `is_system` 降级为纯展示标签（内置/自建）。
+- **A4** `roles.name` 补库层 `check (char_length(btrim(name)) > 0)`（TD-198）；前端新建表单的
+  `name` 必填校验与后端同一判据（去空白后非空）。
+- **A5** 权限账号页能列出本校权限账号（教师 + 校方管理员）、能改某个账号的角色绑定、能停用/启用、
+  能重置 MFA（把 M2-UI2 那个「安全工具」卡片从角色页挪到账号页更合适，但**不是必须**——见 §18.6）。
+- **A6** 两个权限码的问题有明确落法（§18.2 决策 2）。
+- **A7** 纯逻辑抽 `*-logic.ts` 走单测；两个页面各配 mock E2E。
+
+**不做（本期）**：账号硬删、角色继承/模板、权限码按人直授（§1.2 已定）、账号列表的
+数据范围裁剪（权限账号管理是**租户级**操作，见 §18.2 决策 1 方案 A 的风险栏）。
+
+### 18.2 候选方案
+
+#### 决策 1：权限账号页怎么列出账号
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 | 对 design.md 的影响 |
+|---|---|---|---|---|---|
+| **A（推荐）** 新增 `GET /school/permission-accounts`（`school.permission_account.manage`，分页），返回 `id` / `display_name` / `user_type` / `status` / `role_codes` / `roles_version` / `mfa_enabled`，**不回显 `login_id`** | 运营能浏览、能按角色与状态筛；契约与已有 `UserLookupResponse` 同族（都不回显 login_id） | 要写端点 + 查询 + 用例（**不需要迁移**：读 `users` / `user_roles` 现成表） | **列表不按人员数据范围裁剪**——权限账号管理是租户级操作，按 `school`/`self` 裁会让管理员看不到全校账号；这一点要写进契约与文档，否则后来者会「顺手」加范围过滤 | 无新增权限码；按 `user_type in ('teacher','school_admin')` 过滤（与 `BINDABLE_USER_TYPES` 同一集合） |
+| B 复用 `GET /school/users/lookup?login_id=`，权限账号页 = 搜索框 + 单账号卡片 | 零后端改动 | 运营必须知道登录名才能定位；查不到「谁持了某角色」；一次只能管一个账号；`lookup` 每次都写审计（查十个人十行审计） | 页面价值≈0，只能算「把已有按钮摆好看」 |
+| C 复用 `GET /school/teachers` + `GET /school/students` | 零后端改动 | 不用写后端 | 要**两个**权限码（`school.personnel.view` + `school.permission_account.manage`），只持其一的账号打不开页面；教师响应没有角色/状态字段，要再发 N 次单账号请求补齐 | **绕过 `permission_account.manage` 就把全校人员目录递出去** —— 违反最小权限；直接否决 |
+
+#### 决策 2：两个权限码怎么落（§14.10 的延后项）
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 | 对 design.md 的影响 |
+|---|---|---|---|---|---|
+| **A（推荐）** 新增 `GET /school/bindable-roles`（`school.permission_account.manage`），只返回可授角色的 `id` / `code` / `name` / `is_system`，**不含 `permission_codes`** | 只持绑定权的账号能独立完成绑定；最小权限——绑定页不需要知道角色有哪些权限；不把完整权限矩阵泄给只管绑定的人 | 多一个只读端点（约 60 行 + 用例） | 读路径的「可授」判据必须与写路径**同一口径**：写路径挡「目标持超管 → 403」「提交超管角色 → 422」，读路径至少要把 `bindable=false` 的超管角色**不列出来**（列出来 = 能勾不能存） | 无 |
+| B 让 `GET /school/roles` 接受「二选一」（`role.manage` **或** `permission_account.manage`） | 零新端点 | 少写一个端点 | 响应形状随调用方变；绑定权账号会拿到**完整 `permission_codes`** —— 权限矩阵外泄给不需要它的人；`role.manage` 账号会看到 `bindable=false` 的超管角色 | §14.10 说的「二选一」省下的只是一个端点，代价是响应形状分叉 + 矩阵外泄；不采纳 |
+| C 绑定页要求同时持两个码 | 零新端点 | 最简单 | 运营得多给一个码才能绑角色 —— **绑定权与配角色权是两个独立职责**（决策 #6「删角色另要 `school.role.delete`」就是同一条思路：拆开才不让一个人干所有事） | 与既定方向相反 |
+
+#### 决策 3：187g 拆几个 PR
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 |
+|---|---|---|---|---|
+| **A（推荐）** 拆 3 个：**187g-A** 后端契约补齐（`resettable` 下发 + `name` CHECK 迁移 + 两个新只读端点）/ **187g-B** 前端角色页（新建、删除、范围、`resettable`）/ **187g-C** 前端权限账号页（列表、绑定、启停、MFA） | 每块可独立验证、独立回滚；前端大改与后端契约分开，出错能定位在哪一侧 | 3 轮审查 + 3 次 CI（时间成本） | 187g-A 合入后前端还没用它 → 中间态是「后端先到」，不影响线上（没人调） |
+| B 拆 2 个：后端一个、前端（两个页面）一个 | 少一轮 CI | 前端 diff 巨大（两个页面 + 6 个端点 + mock），审查难度高 | 一处出错要整体回滚 |
+| C 一个大 PR | 最快 | diff 跨前后端 + 迁移 + 两个页面，违反 AGENTS.md §1.8「一次只提交一个可运行逻辑单元」 | 不采纳 |
+
+### 18.3 选择结论（**用户 2026-10-30 已拍板，三条全按推荐**）
+
+**用户裁决**：① 权限账号页用**新增列出接口**（`GET /school/permission-accounts`）；② 两个权限码用
+**新增只列角色的接口**（`GET /school/bindable-roles`）；③ 187g **拆 3 个 PR**（A 后端契约 / B 前端角色页 /
+C 前端账号页）。三条推荐的理由如下，落地时不得偏离。
+
+**决策 1 选 A**（新增 `GET /school/permission-accounts`）：理由三条——
+① B/C 都做不出「浏览权限账号」这件事，而这是权限账号页存在的意义；
+② C 会把全校人员目录递给出不起 `permission_account.manage` 的人，直接违反最小权限；
+③ 代价可控：不加权限码、不加迁移、不改写路径，只多一条只读端点 + 用例。
+
+**决策 2 选 A**（新增 `GET /school/bindable-roles`）：理由三条——
+① 它是三个方案里唯一**不外泄权限矩阵**的：B 会让只管绑定的账号拿到全量 `permission_codes`；
+② 它把「绑定权」与「配角色权」保持成两个独立职责，与决策 #6 的拆分思路一致；
+③ 少写一个端点的 B 方案省下的成本，远小于「矩阵外泄 + 响应分叉」的长期成本。
+
+**决策 3 选 A**（拆 3 个 PR）：与 187f → 187f-A/187f-B 的既有做法一致；后端契约先落，
+前端两个页面分开改，任何一块出问题都能单独回滚。
+
+### 18.4 实现顺序（TDD 红 → 绿）
+
+**187g-A（后端契约补齐）**
+
+1. **迁移**：`roles` 加 `check (char_length(btrim(name)) > 0)`（TD-198）。**先验存量再动约束**——
+   与 `d7a1c3e5b9f4` 同一做法：带着坏行加约束，PG 只会给一句看不懂的 `check constraint ... violated`。
+2. **`resettable` 下发**（TD-200）：`RoleSummary` 加 `resettable: bool`，由「该角色码在
+   `rbac_builtin_role_defaults` / `rbac_builtin_role_scope_defaults` 里有定义行」派生
+   （与 `_preview` 判 `ROLE_DEFAULTS_UNAVAILABLE` 的**同一处**取值，不能各算各的）→ `RoleResponse` 下发。
+   **再并上"角色可编辑"这一道门**（2026-10-30 独立审查 Major 1 修正）：重置实际要过
+   `_assert_editable` → `ROLE_DEFAULTS_UNAVAILABLE` 两道门，只算"有出厂定义"会给校方超管/学生/教师
+   这三个**内置锁定角色**点亮一个永远 409 的按钮——TD-200 要治的病换个方向复发。
+   判据与 `docs/tech-debt.md` TD-200 原定的收口方式（"由 `_lock_reason` 那层一次算出"）一致。
+3. **`GET /school/permission-accounts`**（决策 1 方案 A）：分页 + `user_type in ('teacher','school_admin')`
+   过滤 + 每行的 `role_codes`（join `user_roles` → `roles.code`）+ `roles_version` + `status` + `mfa_enabled`；
+   不回显 `login_id`。
+4. **`GET /school/bindable-roles`**（决策 2 方案 A）：只返回 `id`/`code`/`name`/`is_system`；
+   `bindable=false` 的超管角色不列。
+5. 用例：两个新端点的权限码 / 跨租 / 过滤 / 形状；`resettable` 在「有定义 / 无定义」与
+   「可编辑 / 锁定」四种组合上取值正确（锁定角色恒 false）；迁移的库层不变量用例
+   （`name` 全空白插入被 CHECK 挡）。
+
+**187g-B（前端角色页）**
+
+1. `rbac-logic.ts`（或新的 `role-page-logic.ts`）加纯逻辑：新建角色表单校验（`code` 正则 +
+   `name` 去空白非空，与后端同判据）、删除确认校验（逐字 code + 理由 ≥10）、范围编辑差异
+   （`scopeDiff`）、范围保存前的「重取快照」决策。
+2. 页面：新建角色对话框、删除角色（预览 → 确认框 → 执行）、范围编辑区（可改两类 + 只读两类 + 原因）。
+3. **TD-200**：`role-reset` 按钮改跟 `resettable` 走（`is_system` 只做标签）。
+4. **TD-202**（权限/范围共享 `roles.version`）：范围区保存前**重取快照**、409 时**自动采用 latest**
+   （沿用权限区已有的 `conflictedLatestRole` 路径），两个编辑区不做「同时脏」。
+5. mock E2E：新建 / 删除 / 范围保存 / 409 自愈 / `resettable=false` 时按钮不亮。
+
+**187g-C（前端权限账号页）**
+
+1. 路由 `/settings/accounts`，`meta.permission = "school.permission_account.manage"`；
+   菜单项按权限显示（`AdminLayout`）。
+2. 账号列表（角色码、状态、类型、MFA）→ 点某行 → 绑定抽屉（`GET/PUT /users/{id}/roles`，
+   角色清单来自 `GET /school/bindable-roles`）+ 停用/启用（理由 ≥10 字）+ MFA 重置。
+3. 自锁/超管保护在界面层提示（后端 403 才是真边界）。
+4. mock E2E：列表渲染 / 改绑定（捕获 `PUT` 体）/ 停用（理由校验）/ 启用 / 403 提示。
+
+**每个 PR 的收尾**：本地受影响子集 + 静态门禁 → 独立审查 → commit → push → PR → 远端 CI 全绿 →
+rebase 合并 → main CI 全绿 → 删分支 → 文档回填 PR → §9 八段汇报。
+
+### 18.5 测试策略与门禁
+
+- **单元（前端）**：纯逻辑（表单校验、范围差异、删除确认）；沿用 `rbac-logic.test.ts` 的写法。
+- **单元/集成（后端，187g-A）**：两个新端点的权限与形状；`resettable` 派生；`name` CHECK 的库层不变量。
+- **mock E2E**：两个页面各一个 spec 文件（`frontend/e2e/admin-role-pages.spec.ts`、
+  `admin-permission-accounts.spec.ts`），mock helper 扩 `rbac-mock.ts`（有状态：绑定/启停改 mock 内部状态）。
+- **门禁**：后端 `ruff`/`mypy`/`bandit`/`alembic check`（187g-A 有迁移）；前端 `lint`/`format`/`typecheck`/单测/mock E2E。
+- **无全栈 E2E**：本批不做（TD-183/192 的全栈 E2E 仍在 backlog；本地 8000 端口被占）。
+
+### 18.6 预判技术债
+
+- **TD-237**：`GET /school/permission-accounts` 不按人员数据范围裁剪（租户级操作），
+  将来若要「校方管理员只能管自己片区的账号」，需要另加范围维度；本期写进契约注释与 design.md。
+- **TD-238**：`GET /school/bindable-roles` 与 `GET /school/roles` 是两份角色目录，
+  将来若角色目录再加字段（默认范围、标签），要决定是否合并（合并 = 绑定权账号拿到矩阵，回到决策 2 方案 B）。
+- **TD-242（2026-10-30 独立审查 m9 追加）**：权限账号列表里**会出现超管账号**（超管持有者是
+  `school_admin` 类型，落在 `BINDABLE_USER_TYPES` 内），但给它绑角色必然 403
+  `BINDING_SUPER_ADMIN_FORBIDDEN`（决策 D 第 2 条）。**TD-187g-A 已把判据补成服务端派生的
+  `PermissionAccountResponse.is_super_admin`**（从同一批 `role_codes` 派生，不另开 join），
+  TD-187g-C 的绑定抽屉据此**不给超管账号可勾选的角色**，并给一句只读说明；不能"点了再弹
+  403"兜底，也**不要在前端按 `role_codes` 硬认超管**——角色集合一变判据就失灵。
+- **TD-243（2026-10-30 独立审查 m2，已在本 PR 修）**：分页游标的时间戳若不带时区，PG 按会话
+  时区解释，手造的"未来时刻"游标会让翻页**悄悄回到第一页**。`decode_cursor` 现在要求带时区，
+  naive 直接 400（`tests/test_org_scope_sync_unit.py::test_decode_cursor_rejects_timestamp_without_timezone`）。
+- **TD-244（2026-10-30 独立审查 m3，已在本 PR 修）**：迁移的存量预检会被 RLS 遮蔽成 0 行
+  （`roles` 已 FORCE ROW LEVEL SECURITY）。本点迁移按 MFA 迁移的同款写法加了
+  `_assert_can_bypass_rls()`——迁移连接不是超级用户/BYPASSRLS 就显式报错，不默默数成 0。
+- **TD-245（2026-10-30 独立审查提的边界）**：`bindable-roles` 会把内置角色的 `id` 给只持账号
+  管理权的人，配合绑定写路径可把内置角色绑给任意教师账号。提权面有限（内置角色不含
+  `school.role.manage`），且绑定路径按 TD-194 决策**不接**自扩权守卫——已拍板的边界，不是漏洞。
+  但要写进文档：将来给自定义角色加"可绑定"标记前，必须评估它的权限码会不会经绑定流出去。
+- **MFA 重置入口的位置**：M2-UI2 把它放在角色权限页底部（「安全工具」卡片）。
+  权限账号页做出来后它更贴切，但**搬走要动 M2-UI2 已交付的页面与它的 E2E**——
+  本期**不搬**（A5 允许留在原处），登记为后续可选项。
+- **TD-198 的迁移窗口**：`name` CHECK 只影响写入路径，历史行里若有全空白名会挡住迁移 → 迁移前验存量并报错。
+- **`resettable` 与 `is_system` 并存**：两个字段都留着，但只有一个是判据（`resettable`）；
+  将来若给自定义角色加「按模板初始化」，`resettable` 不用改、`is_system` 也不用改。
+
+### 18.7 高风险确认
+
+本点动的是**权限面**（角色增删、范围编辑、账号绑定、账号启停），按 AGENTS.md §11.7 属「权限」类，
+**需用户确认后才编码**。**用户 2026-10-30 已拍板**（三条全按推荐，见 §18.3）：
+
+1. **决策 1**：权限账号页用**新增列出接口** `GET /school/permission-accounts`。
+2. **决策 2**：两个权限码用**新增只列角色的接口** `GET /school/bindable-roles`（不含 `permission_codes`）。
+3. **决策 3**：187g **拆 3 个 PR**（A 后端契约补齐 / B 前端角色页 / C 前端权限账号页）。
+
+本节只记录这三条已拍板结论；实现过程中的其余取舍按 §18.4/§18.6 执行，不再逐条回头确认。

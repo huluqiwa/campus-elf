@@ -332,9 +332,19 @@ async def clear_rate_limit(scope: str, identity: str) -> None:
 
 
 async def reset_client() -> None:
-    """关闭并清空客户端（测试/进程退出用）。"""
+    """关闭并清空客户端（测试/进程退出用）。
+
+    关闭可能撞上"客户端是在**上一个**事件循环里建的、那个循环已经关了"的情况：
+    redis-py 关闭连接时会让 transport 在**原循环**上挂一个回调，循环已关就抛
+    `RuntimeError: Event loop is closed`。那条连接本来就是死的（循环都关了），
+    关不掉也无所谓，所以这里吞掉这一种错误；其它异常照常抛出，不掩盖真问题。
+    """
 
     global _client
     if _client is not None:
-        await _client.aclose()
-        _client = None
+        client, _client = _client, None
+        try:
+            await client.aclose()
+        except RuntimeError as exc:
+            if "Event loop is closed" not in str(exc):
+                raise

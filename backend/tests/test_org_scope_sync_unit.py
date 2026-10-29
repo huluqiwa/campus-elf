@@ -1,11 +1,13 @@
 """M2-ORG01-03 单元测试：class 范围行的派生与对账、cursor 编解码（纯函数，不依赖数据库）。"""
 
+import base64
+import json
 from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
-from app.db.repository import decode_cursor, encode_cursor
+from app.db.repository import CursorError, decode_cursor, encode_cursor
 from app.org.scopes_sync import scope_row_diff
 
 
@@ -60,3 +62,19 @@ def test_decode_cursor_rejects_garbage(bad: str) -> None:
 
     with pytest.raises(ValueError):
         decode_cursor(bad)
+
+
+def test_decode_cursor_rejects_timestamp_without_timezone() -> None:
+    """无时区的时间戳必须报错（400），不能放行。
+
+    PG 会按**会话时区**解释无时区时间戳：手造一个"未来时刻"的游标，比较条件恒真，
+    翻页会**悄悄回到第一页**——正是 `decode_cursor` 文档串里"绝不能静默回到开头"
+    要杜绝的那种。真实游标一律带时区（`created_at` 取自 TIMESTAMPTZ 列），所以这里
+    只挡手造的。
+    """
+
+    payload = json.dumps({"t": datetime(2999, 1, 1, 0, 0, 0).isoformat(), "id": str(uuid4())})
+    cursor = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+
+    with pytest.raises(CursorError):
+        decode_cursor(cursor)

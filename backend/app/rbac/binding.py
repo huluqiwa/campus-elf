@@ -22,6 +22,7 @@
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -31,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.writer import append_audit
 from app.auth.principal import Principal
 from app.core.metrics import record_audit_write_failure
+from app.db.repository import decode_cursor, encode_cursor
 from app.db.session import db_session
 from app.rbac.admin import SUPER_ADMIN_ROLE_CODE, role_is_bindable
 
@@ -40,6 +42,9 @@ logger = logging.getLogger(__name__)
 #: 绕过 B 端账号边界。只拦目标用户，不拦角色类型——教师账号可合法地同时持有 C 端 `teacher`
 #: 与 B 端 `teacher_b_end`。
 BINDABLE_USER_TYPES: frozenset[str] = frozenset({"teacher", "school_admin"})
+
+#: 列表端点的单页上限（与 `app/org/service.py:MAX_PAGE_SIZE` 同口径）。
+MAX_PAGE_SIZE: int = 100
 
 
 class BindingAdminError(RuntimeError):
@@ -100,6 +105,37 @@ class BindingUpdate:
     removed_role_codes: tuple[str, ...]
     added_permission_codes: tuple[str, ...]
     removed_permission_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionAccount:
+    """权限账号列表的一行（TD-187g）。
+
+    **不回显 `login_id`**：它是学号/工号，属于「完整查看需权限+理由+审计」那一类标识符；
+    列表通道只有 `school.permission_account.manage`，给出去等于把内部主键扩散给列表调用方
+    （与 `app/personnel/service.py:PersonnelItem` 同口径）。
+    """
+
+    id: UUID
+    display_name: str | None
+    user_type: str
+    status: str
+    role_codes: tuple[str, ...]
+    roles_version: int
+    mfa_enabled: bool
+    #: 该账号是否持有校方超管角色。**服务端派生**，前端不按角色码自己认：
+    #: 持有超管角色的账号，其角色绑定由平台开通流程管理，租户内改绑必然 403
+    #: `BINDING_SUPER_ADMIN_FORBIDDEN`（见 `replace_user_roles`）。前端要在绑定抽屉里
+    #: 把这类账号标成"不可改绑"，靠 `role_codes` 硬认会在角色集合变化时失灵。
+    is_super_admin: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionAccountPage:
+    """权限账号列表的一页（cursor 分页）。"""
+
+    items: tuple[PermissionAccount, ...]
+    next_cursor: str | None
 
 
 def _require_tenant(principal: Principal) -> UUID:
@@ -301,6 +337,106 @@ async def get_user_bindings(principal: Principal, user_id: UUID) -> UserBindings
         return await _bindings(session, tenant_id, user)
 
 
+async def list_bindable_roles(principal: Principal) -> list[BoundRole]:
+    """可经绑定接口授出的角色目录（只读，不审计成功查询）。
+
+    **只返回角色身份，不含 `permission_codes`**（TD-187g 决策 2）：绑定页要的是"能选哪些角色"，
+    完整权限矩阵是 `school.role.manage` 的事。只持 `school.permission_account.manage` 的人
+    不该顺手拿到全校角色的权限清单——这是这条端点存在的理由，不是顺手简化。
+
+    不可绑定的角色（超管）**不列**：列出来 = 能勾不能存。
+    """
+
+    tenant_id = _require_tenant(principal)
+    async with db_session(tenant_id=tenant_id) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "select id, code, name, is_system from public.roles "
+                        "where tenant_id = :tid order by is_system desc, code"
+                    ),
+                    {"tid": tenant_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    roles = [_to_bound_role(dict(row)) for row in rows]
+    return [role for role in roles if role.bindable]
+
+
+async def list_permission_accounts(
+    principal: Principal, *, limit: int = 50, cursor: str | None = None
+) -> PermissionAccountPage:
+    """列出本校权限账号（只读，不审计成功查询）。
+
+    范围口径（TD-187g 决策 1）：按**账号类型**过滤（`BINDABLE_USER_TYPES` —— 与绑定写路径
+    同一个集合），**不按人员数据范围裁剪**：权限账号管理是租户级操作，按 `school`/`self` 裁
+    会让管理员看不到全校的账号（那是"看不见自己要管的账号"，不是最小权限）。
+
+    `deleted` 的账号不列——它在绑定写路径里被当作不存在。
+
+    异常:
+        BindingAdminError: 403（主体 realm 不符）。
+        CursorError: 游标无法解码（由路由层映射 400，不得当成"第一页"静默吞掉）。
+    """
+
+    tenant_id = _require_tenant(principal)
+    page_size = max(1, min(limit, MAX_PAGE_SIZE))
+    cursor_created_at: datetime | None = None
+    cursor_id: UUID | None = None
+    if cursor is not None:
+        cursor_created_at, cursor_id = decode_cursor(cursor)
+
+    sql = (
+        "select u.id, u.display_name, u.user_type, u.status, u.roles_version, u.mfa_enabled, "
+        "u.created_at, "
+        "coalesce("
+        "array_agg(r.code order by r.code) filter (where r.code is not null), "
+        "array[]::text[]"
+        ") as role_codes "
+        "from public.users u "
+        "left join public.user_roles ur on ur.user_id = u.id and ur.tenant_id = u.tenant_id "
+        "left join public.roles r on r.id = ur.role_id and r.tenant_id = ur.tenant_id "
+        "where u.tenant_id = :tid and u.status <> 'deleted' "
+        "and u.user_type = any(cast(:types as text[])) "
+    )
+    params: dict[str, Any] = {"tid": tenant_id, "types": sorted(BINDABLE_USER_TYPES)}
+    if cursor_created_at is not None and cursor_id is not None:
+        sql += "and (u.created_at, u.id) < (:c_created_at, :c_id) "
+        params["c_created_at"] = cursor_created_at
+        params["c_id"] = cursor_id
+    sql += "group by u.id order by u.created_at desc, u.id desc limit :limit"
+    params["limit"] = page_size
+
+    async with db_session(tenant_id=tenant_id) as session:
+        rows = (
+            (await session.execute(text(sql), params)).mappings().all()
+        )
+    items = tuple(
+        PermissionAccount(
+            id=UUID(str(row["id"])),
+            display_name=None if row["display_name"] is None else str(row["display_name"]),
+            user_type=str(row["user_type"]),
+            status=str(row["status"]),
+            role_codes=tuple(str(code) for code in row["role_codes"]),
+            roles_version=int(row["roles_version"]),
+            mfa_enabled=bool(row["mfa_enabled"]),
+            # 派生自同一批 `role_codes`，不另开一次 join：超管角色可绑性由
+            # `role_is_bindable` 统一判定，列表侧只回答"这个账号是不是超管"。
+            is_super_admin=SUPER_ADMIN_ROLE_CODE in tuple(str(code) for code in row["role_codes"]),
+        )
+        for row in rows
+    )
+    next_cursor = (
+        encode_cursor(rows[-1]["created_at"], UUID(str(rows[-1]["id"])))
+        if len(rows) == page_size
+        else None
+    )
+    return PermissionAccountPage(items=items, next_cursor=next_cursor)
+
+
 async def replace_user_bindings(
     principal: Principal,
     user_id: UUID,
@@ -491,10 +627,15 @@ async def replace_user_bindings(
 
 __all__ = [
     "BINDABLE_USER_TYPES",
+    "MAX_PAGE_SIZE",
     "BindingAdminError",
     "BindingUpdate",
     "BoundRole",
+    "PermissionAccount",
+    "PermissionAccountPage",
     "UserBindings",
     "get_user_bindings",
+    "list_bindable_roles",
+    "list_permission_accounts",
     "replace_user_bindings",
 ]
