@@ -48,6 +48,9 @@ from tests.support.mfa import (
     platform_mfa_state as _platform_mfa_state,
 )
 from tests.support.mfa import (
+    platform_refresh_families as _platform_refresh_families,
+)
+from tests.support.mfa import (
     platform_refresh_rows as _platform_refresh_rows,
 )
 from tests.support.mfa import (
@@ -55,6 +58,9 @@ from tests.support.mfa import (
 )
 from tests.support.mfa import (
     refresh_rows as _refresh_rows,
+)
+from tests.support.mfa import (
+    seed_platform_session as _seed_platform_session,
 )
 from tests.support.mfa import (
     seed_tenant as _seed_tenant,
@@ -277,7 +283,9 @@ async def test_activation_enables_mfa_and_rotates_all_sessions(
     assert started[-1]["method"] == "totp"
     activated = await _audit_metadata("auth.mfa.activated")
     assert activated[-1]["recovery_codes_issued"] == len(activation.recovery_codes)
-    assert activated[-1]["sessions_revoked"] is True
+    assert activated[-1]["sessions_all_revoked"] is True
+    # 布尔语义改用新键：`sessions_revoked` 现在只放整数条数，自助链路不再往里写布尔
+    assert "sessions_revoked" not in activated[-1]
 
     # 已启用后不得重复绑定/激活
     with pytest.raises(service.AuthError) as already:
@@ -528,7 +536,8 @@ async def test_disable_mfa_requires_password_and_factor_then_rotates_sessions(
     assert [row["revoked_reason"] for row in rows] == ["mfa_change", None]
     assert not await revocation.session_exists(activation.pair.session_id, realm="tenant")
     disabled_audit = await _audit_metadata("auth.mfa.disabled")
-    assert disabled_audit[-1]["sessions_revoked"] is True
+    assert disabled_audit[-1]["sessions_all_revoked"] is True
+    assert "sessions_revoked" not in disabled_audit[-1]
     assert disabled_audit[-1]["recovery_code_used"] is False
 
     # 关闭后登录回到仅密码
@@ -653,6 +662,48 @@ async def test_admin_mfa_reset_clears_binding_sessions_and_pending_secret(
         await service.refresh_tokens(refresh_token=activation.pair.refresh_token)
     normal = await service.login_platform(account="ops-cli-reset", password=TEST_PLATFORM_PASSWORD)
     assert isinstance(normal, service.TokenPair)
+
+
+@pytest.mark.asyncio
+async def test_admin_mfa_reset_counts_only_live_families(
+    mfa_env: None, fixed_totp_step: int
+) -> None:
+    """Given 平台账号一条活跃会话与一条已过期家族；When 运维重置 MFA；Then 只数还活着的那些。
+
+    租户侧同形用例在 `tests/integration/test_account_status.py::test_mfa_reset_counts_only_live_families`；
+    平台侧此前按"全部未撤销"计数，同一个 `sessions_revoked` 键跨动作对比会误判（TD-231）。
+    """
+
+    engine = make_test_engine("admin")
+    try:
+        await seed_platform_user(engine, account="ops-cli-count")
+    finally:
+        await engine.dispose()
+    user_id = await _platform_user_id("ops-cli-count")
+    actor = service.MfaActor(user_id=user_id, realm="platform", tenant_id=None)
+    enrollment = await service.enroll_mfa(actor=actor, current_password=TEST_PLATFORM_PASSWORD)
+    activation = await service.activate_mfa(actor=actor, code=_code(enrollment.secret))
+    # 已过期但未撤销：换不出新令牌，设备列表也看不见它
+    expired_family = await _seed_platform_session(user_id, ttl_seconds=-3600)
+
+    result = await platform_admin.reset_platform_mfa(account="ops-cli-count")
+
+    assert result.sessions_revoked == 1
+    assert not await revocation.session_exists(activation.pair.session_id, realm="platform")
+
+    # 撤销动作仍是全量（死行一并标上），但计数的只有活着的那个
+    rows = await _platform_refresh_families()
+    assert len(rows) == 2
+    assert all(row["revoked_at"] is not None for row in rows)
+    assert {row["family_id"] for row in rows} == {
+        activation.pair.session_id,
+        expired_family,
+    }
+
+    audit = await _audit_metadata("platform.user.mfa_reset")
+    # 布尔是 int 的子类：`True == 1` 会蒙混过关，类型也得钉住
+    assert type(audit[-1]["sessions_revoked"]) is int
+    assert audit[-1]["sessions_revoked"] == 1
 
 
 @pytest.mark.asyncio

@@ -182,6 +182,104 @@ async def _user_row(tenant_id: UUID, user_id: UUID) -> dict[str, Any]:
     return dict(row)
 
 
+async def _audit_metadata(action: str, *, tenant_id: UUID) -> list[dict[str, Any]]:
+    """按时间顺序读取某租户的审计 metadata。
+
+    必须按租户收窄：平台 realm 与租户 realm 共用同一个动作名（如 `auth.password.reset`），
+    不收窄就会把平台那次的行一起读进来，条数断言会被污染（TD-231）。
+    """
+
+    async with db_session(platform=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "select metadata_json from audit_logs where action = :action "
+                        "and tenant_id = :tid order by created_at, event_id"
+                    ),
+                    {"action": action, "tid": str(tenant_id)},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row["metadata_json"] or {}) for row in rows]
+
+
+async def _platform_audit_metadata(action: str) -> list[dict[str, Any]]:
+    """按时间顺序读取平台 realm 的审计 metadata（平台行 `tenant_id` 为空）。"""
+
+    async with db_session(platform=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "select metadata_json from audit_logs where action = :action "
+                        "and tenant_id is null order by created_at, event_id"
+                    ),
+                    {"action": action},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row["metadata_json"] or {}) for row in rows]
+
+
+async def _seed_expired_family(tenant_id: UUID, user_id: UUID) -> UUID:
+    """插入一条已过期但未撤销的刷新家族，返回 family_id。
+
+    它换不出新令牌、设备列表也看不见它，所以不该计入 `sessions_revoked`（TD-231）。
+    """
+
+    family_id = uuid4()
+    async with db_session(tenant_id=tenant_id) as session:
+        await session.execute(
+            text(
+                "insert into refresh_tokens "
+                "(tenant_id, jti, family_id, user_id, token_hash, expires_at, last_seen_at) "
+                "values (:tid, :jti, :fid, :uid, :hash, now() - interval '1 hour', now())"
+            ),
+            {
+                "tid": tenant_id,
+                "jti": uuid4(),
+                "fid": family_id,
+                "uid": user_id,
+                "hash": uuid4().hex + uuid4().hex,
+            },
+        )
+    return family_id
+
+
+async def _seed_expired_platform_family(account: str) -> UUID:
+    """插入一条已过期但未撤销的平台刷新家族，返回 family_id。
+
+    与租户侧同口径：过期家族换不出新令牌，不该计入 `sessions_revoked`（TD-231）。
+    不登记 Redis 会话标记——过期家族在生产里本来就没有活着的标记。
+    """
+
+    family_id = uuid4()
+    async with db_session(platform=True) as session:
+        user_id = await session.scalar(
+            text("select id from platform_users where account = :account"), {"account": account}
+        )
+        assert user_id is not None
+        await session.execute(
+            text(
+                "insert into platform_refresh_tokens "
+                "(jti, family_id, platform_user_id, token_hash, expires_at, last_seen_at) "
+                "values (:jti, :fid, :uid, :hash, now() - interval '1 hour', now())"
+            ),
+            {
+                "jti": uuid4(),
+                "fid": family_id,
+                "uid": user_id,
+                "hash": uuid4().hex + uuid4().hex,
+            },
+        )
+    return family_id
+
+
 @pytest.mark.asyncio
 async def test_tenant_reset_request_and_confirm_full_flow(
     reset_env: None, admin_engine: AsyncEngine
@@ -311,6 +409,42 @@ async def test_tenant_reset_request_and_confirm_full_flow(
     assert replay.value.http_status == 400
     assert replay.value.message == "重置链接无效或已过期"
     assert (await _audit_reasons("auth.password.reset_failed"))[-1] == "used"
+
+
+@pytest.mark.asyncio
+async def test_password_reset_counts_only_live_families(
+    reset_env: None, admin_engine: AsyncEngine
+) -> None:
+    """Given 账号一条活跃会话与一条已过期家族；When 确认重置密码；Then 只数活着的那些。
+
+    `sessions_revoked` 现在全仓只放整数条数，口径统一为「本次真正断开的活跃会话家族数」；
+    布尔语义改用 `sessions_all_revoked`，`sessions_revoked_count` 这个并行键消失（TD-231）。
+    """
+
+    email = _unique_email("tenant-reset-count")
+    tenant_id, user_id = await seed_tenant_user(
+        admin_engine,
+        school_code=SCHOOL_CODE,
+        login_id="S-4002",
+        password=TENANT_PASSWORD,
+        email=email,
+    )
+    await service.login_tenant(school_code=SCHOOL_CODE, login_id="S-4002", password=TENANT_PASSWORD)
+    # 已过期但未撤销的家族：换不出新令牌，不该计入"断了几台设备"
+    await _seed_expired_family(tenant_id, user_id)
+
+    await service.request_password_reset(
+        realm="tenant", school_code=SCHOOL_CODE, login_id="S-4002", ip="203.0.113.9"
+    )
+    token = _latest_reset_token(email)
+    await service.confirm_password_reset(token=token, new_password=NEW_PASSWORD)
+
+    metadata = (await _audit_metadata("auth.password.reset", tenant_id=tenant_id))[-1]
+    # 布尔是 int 的子类：`True == 1` 会让"值对了"的断言蒙混过关，类型也得钉住
+    assert type(metadata["sessions_revoked"]) is int
+    assert metadata["sessions_revoked"] == 1
+    assert "sessions_revoked_count" not in metadata
+    assert metadata["sessions_all_revoked"] is True
 
 
 @pytest.mark.asyncio
@@ -570,6 +704,35 @@ async def test_platform_reset_request_and_confirm(
     with pytest.raises(service.AuthError):
         await service.login_platform(account=account, password=TEST_PLATFORM_PASSWORD)
     await service.login_platform(account=account, password=NEW_PASSWORD)
+
+
+@pytest.mark.asyncio
+async def test_platform_password_reset_counts_only_live_families(
+    reset_env: None, admin_engine: AsyncEngine
+) -> None:
+    """平台 realm 同样只数活着的家族（TD-231）。
+
+    平台与租户共用 `auth.password.reset` 动作名，审计行靠 `tenant_id is null` 区分；
+    不收窄就会把租户那次的行一起读进来，条数断言会被污染。
+    """
+
+    email = _unique_email("platform-reset-count")
+    account = "ops-reset-count"
+    await seed_platform_user(admin_engine, account=account, email=email)
+    await service.login_platform(account=account, password=TEST_PLATFORM_PASSWORD)
+    # 已过期但未撤销的家族：换不出新令牌，不该计入"断了几台设备"
+    await _seed_expired_platform_family(account)
+
+    await service.request_password_reset(realm="platform", account=account)
+    token = _latest_reset_token(email)
+    await service.confirm_password_reset(token=token, new_password=NEW_PASSWORD)
+
+    metadata = (await _platform_audit_metadata("auth.password.reset"))[-1]
+    # 布尔是 int 的子类：`True == 1` 会让"值对了"的断言蒙混过关，类型也得钉住
+    assert type(metadata["sessions_revoked"]) is int
+    assert metadata["sessions_revoked"] == 1
+    assert "sessions_revoked_count" not in metadata
+    assert metadata["sessions_all_revoked"] is True
 
 
 @pytest.mark.asyncio

@@ -658,3 +658,154 @@ realm → 理由长度 → 自停用 → **无锁归属探针（404，必须先�
 - 读数可复现性依赖 CI 侧产物；本地与 CI 不可比这件事本身是长期成本 → 若 T1 得出"仍会漂"，把「给 auth 关键分支加确定性用例」另开 TD，而不是把门槛继续往下调。
 - `scripts/check_coverage.py` 的包与阈值是**手写字典**，新增关键包要人工同步 → 本批不动，观察是否真踩过（踩过再开 TD）。
 - 本批不碰 `sessions_revoked` 的口径与类型（TD-231 → 187f-B），`docs/design.md` §5.12 那条"三处口径不同"的警告在本批结束时仍然有效，不能提前删。
+
+## 17. TD-187f-B：审计字段 `sessions_revoked` 的口径与类型收口（T6 = TD-231）
+
+> 用户 2026-10-29 拍板：TD-231 从 TD-187f-A 拆出来单独一个 PR。理由是它要动
+> `app/personnel/mfa_admin.py` / `app/platform_admin.py` / `app/auth/service.py` 三个**生产模块**与
+> 两条已交付链路的既有用例，混进「纯测试补全」的 diff 里就分不清是哪处改动让读数变化。
+
+### 17.1 目标与验收
+
+**问题（`docs/design.md` §5.12 的两段警告，2026-10-29 实测复核仍成立）**：
+
+1. **同一个键，三种计数口径**：`sessions_revoked` 在停用侧（`school.user.deactivated`）只数
+   **未撤销且未过期**的家族；在租户 MFA 重置侧（`school.user.mfa_reset`）与平台 MFA 重置侧
+   （`platform.user.mfa_reset`）数**全部未撤销**家族（含已过期但还没被清理的死行）。同一个键进告警后
+   跨动作对比会误判严重度——安全结论本身不受影响（两侧都是"把还活着的会话全断了"）。
+2. **同一个键，两种类型**：自助链路 4 个动作（`auth.mfa.activated` / `auth.mfa.disabled` /
+   `auth.password.changed` / `auth.password.reset`）把它写成**布尔 `True`**（只表达"撤销发生过"）；
+   管理侧 3 个动作写成**条数整数**；`auth.password.reset` 另开一个 `sessions_revoked_count` 整数键
+   表达同一件事。后果：巡检 SQL `sum((metadata_json->>'sessions_revoked')::int)` 在布尔行上直接报错
+   （PG 不能把 `true` cast 成 int），改用 `::text` 又把 `true` 与 `3` 当两类值。
+
+**验收（对应 milestone §5.2 的 T6）**：
+
+- `sessions_revoked` 这个键**全仓只写整数**，含义统一为「**本次操作真正断开的活跃会话家族数**」
+  （活跃 = 未撤销且未过期，与设备列表 `list_sessions` 的取数口径一致）。
+- 布尔语义改用**新键 `sessions_all_revoked`**，只出现在自助链路 4 个动作（"本次操作把旧会话全部撤销了"）。
+- 租户 / 平台两条 MFA 重置链路各补一条「**已过期家族不计入 `sessions_revoked`**」的用例。
+- `docs/design.md` §5.12 那段「三处口径不同」的警告改成「三处一致」，并补一张**键名对照表**。
+- `auth.password.reset` 的 `sessions_revoked_count` 消失——整数并进同名键 `sessions_revoked`。
+
+**消费方盘点（2026-10-29 实测）**：全仓 `grep sessions_revoked` 的命中只在 `backend/app/`、
+`backend/tests/`、`docs/` 三处；`deploy/`、`scripts/`、前端**无任何消费方**。所以改名不会打断既有链路，
+受影响的只有 5 处测试断言。
+
+### 17.2 候选方案
+
+**必做部分（三个候选方案都包含，无争议）**：
+
+- **M1**：自助链路 4 处布尔 `sessions_revoked` → `sessions_all_revoked`
+  （`auth.mfa.activated` / `auth.mfa.disabled` / `auth.password.changed` / `auth.password.reset`，
+  均在 `app/auth/service.py` 的审计 metadata 里）。
+- **M2**：`auth.password.reset` 的 `sessions_revoked_count` → 并进同名整数键 `sessions_revoked`。
+- **M3**：租户 MFA 重置（`app/personnel/mfa_admin.py:300-310`）与平台 MFA 重置
+  （`app/platform_admin.py:225-235`）的**取家族 SELECT** 加 `and expires_at > now()`，与停用侧对齐；
+  **撤销 UPDATE 保持全量未撤销**（`revoked_at is null`）——把已过期的死行一并标成撤销是安全的，
+  收窄反而不划算。撤销语句与计数语句谓词不同，是**有意为之**，与停用侧"逐字一致"的取舍不同：
+  停用侧两条都收窄是因为它必须让"撤销了几台"与"库里标了几台"相等；MFA 侧只需要"计数准"。
+
+**有争议的部分（M2 之后，`auth.password.reset` 那个整数到底数什么）**：
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 | 对 design.md 的影响 |
+|---|---|---|---|---|---|
+| **A（推荐）** | 把自助链路共用的 `_SQL[realm]["active_families"]`（`app/auth/service.py:179` / `:330`）收窄为 `revoked_at is null and expires_at > now()`，`auth.password.reset` 的整数随之变成「活跃家族数」 | 整数键 `sessions_revoked` 在**全部 4 个写它的动作**上口径一致（停用 / 租户 MFA / 平台 MFA / 密码重置），TD-231 一次收干净；顺带让 `active_families` 这个名字名副其实 | 改动落在 4 条自助链路共用的 SQL 上：MFA 激活 / MFA 关闭 / 改密的 `old_families` 随之变成"只含活跃家族" | **实测为无影响**：那 3 条链路拿 `old_families` 只用于 `revocation.delete_sessions`（Redis 标记清理），而会话标记的 TTL = 刷新令牌有效期（`app/auth/revocation.py:1-11`、`:99-110`），家族过期时标记早已自动回收；"撤销"本身走 `revoke_user_tokens`（全量未撤销），不受影响 | §5.12 的口径表与键名对照表按"三处一致 + 自助链路另用 `sessions_all_revoked`"改写 |
+| B | 不动自助链路的家族查询，`auth.password.reset` 的整数维持「全部未撤销家族数」 | 零生产 SQL 改动，风险最低 | 整数键 `sessions_revoked` 仍是**两种口径**（管理侧活跃 / 自助侧全量），TD-231 只统一了类型、没统一口径 | 跨动作告警的口径错位原样保留 | §5.12 的警告只能改一半（"类型已统一，口径仍分两处"） |
+| C | `auth.password.reset` 的那个整数**不并入** `sessions_revoked`，改用第三个键 `sessions_revoked_all` | 三个键各自含义唯一、零行为改动 | 多一个键名；那个数表达的是"连死掉的记录一起标了撤销"，**当前没有任何消费方**（`deploy/` 与前端都没有巡检 SQL） | 无 | §5.12 要多写一行键名说明 |
+
+### 17.3 选择结论
+
+**选 A**，理由三条：
+
+1. **它是唯一能真正兑现 TD-231 初衷的**：TD-231 立项理由是"同一个键跨动作对比会误判"。B 与 C 都留着
+   "同一个整数键两种口径"或"多一个说不清含义的键"，只解决了类型分叉那半。
+2. **它的副作用经实测为空**：`old_families` 在 MFA 激活 / MFA 关闭 / 改密三条链路里**只**喂给
+   `revocation.delete_sessions`，而会话标记 TTL（`refresh_token_ttl_seconds`，默认 7 天）与刷新令牌
+   `expires_at` 同源（同在 `app/auth/service.py` 的 `_issue_tokens` 与 `_rotate` 里取同一个设置项），
+   家族过期时标记已自动回收；撤销动作本身走
+   `revoke_user_tokens`（全量），收窄家族清单**不影响谁还能不能继续登录**。
+3. **它让 `active_families` 这个名字第一次名副其实**：这个 SQL 叫"active"，实际查的是"未撤销"，
+   名字长期名不副实（停用侧另写了一条真正 active 的 SQL，两处并存本身就是分叉的温床）。
+
+**不选 B**：留半截。**不选 C**：为没人消费的数字再开一个键，键越多越容易再分叉。
+
+**顺带确认的一处留白**：自助链路另外 3 个动作（`auth.mfa.activated` / `auth.mfa.disabled` /
+`auth.password.changed`）**不写**整数——它们原来就没有数字，本次不做无中生有的加法（§17.6 登记为
+TD-235 候选，等真要做跨动作告警时再统一补）。
+
+### 17.4 实现顺序（TDD 红 → 绿）
+
+1. **红灯用例（先写，先确认它会红）**：
+   - 租户 MFA 重置：造一个「已过期但未撤销」的家族 + 一个活跃家族 → 断言审计里
+     `sessions_revoked == 1`（只数活跃那个）。改前会红（改前数 2）。
+   - 平台 MFA 重置：同形一条。
+   - `auth.password.reset`：造同形场景 → 断言审计里 `sessions_revoked == 1` 且**没有**
+     `sessions_revoked_count` 这个键。
+   - 自助链路 3 个**只写布尔**的动作（MFA 激活 / MFA 关闭 / 改密）：断言审计里
+     `sessions_all_revoked is True` 且 `sessions_revoked` **不在** metadata 里
+     （`auth.password.reset` 的布尔另有红灯 ③ 覆盖，它同时还写整数条数）。
+2. **改生产代码**：`mfa_admin.py` / `platform_admin.py` 的取家族 SELECT 加 `expires_at > now()`；
+   `service.py` 的 `_SQL[realm]["active_families"]` 收窄；`service.py` 4 处布尔改名；
+   `service.py` 的 `sessions_revoked_count` 并进 `sessions_revoked`。
+3. **绿灯**：复跑上面 5 条 + 受影响子集。
+4. **改既有测试**：5 处断言跟着改（**只改键名与期望值，不改断言语义**）；若某条断言必须改语义才能过，
+   停下来提出，不静默放宽。
+5. **改文档**：`docs/design.md` §5.12（口径一致 + 键名对照表）、本简报 §17、
+   `docs/tech-debt.md`（TD-231 转已完成）、`docs/handoff.md` §1、`docs/milestone.md` §5.2/§5.4。
+6. **本地门禁 → 独立审查 → commit → push → PR → 远端 CI 全绿 → rebase 合并 → main CI 全绿 → 删分支 →
+   文档回填 PR**。
+
+### 17.5 测试策略与门禁
+
+- 单元：无（这条改动没有纯函数）。
+- 集成：租户 MFA 重置 / 平台 MFA 重置 / 密码重置 / MFA 激活 / MFA 关闭 / 改密，六个文件覆盖
+  「过期家族不计入」与「键名改名」两类断言。
+- 业务场景：`tests/business/test_bs_m2ui2_mfa_admin.py`（租户 MFA 重置的审计 metadata 键集合断言）
+  与 `tests/business/test_bs_m2ui3_account_status.py`（停用侧）跟着改。
+- 门禁：`ruff` / `mypy` / `bandit` / `alembic check`；受影响侧的全量套件交给 PR 的远端 CI。
+- **无迁移**：本点不动 schema（审计 metadata 是 JSON 列，改键名不需要迁移）。
+
+### 17.6 预判技术债
+
+- **TD-235（候选，本批不排）**：自助链路 4 个动作里只有 `auth.password.reset` 写整数计数，另外 3 个
+  （MFA 激活 / MFA 关闭 / 改密）只写布尔 `sessions_all_revoked`。真要做"跨动作设备数对比"的告警时，
+  这 3 个动作需要补整数——届时它们的 `old_families` 已在手（本批收窄后就是活跃家族数），补起来很轻。
+- **审计键改名没有迁移窗口**：历史行里仍留着旧的 `sessions_revoked: true`。本仓无巡检消费方，短期无害；
+  若将来上巡检，需要按 `created_at` 切一个时间点，之前的行按旧键读。
+- **`sessions_all_revoked` 这个名字**：表达的是"本次操作把旧会话全部撤销了"，与整数键的"断了几台"是
+  两件事。名字容易和布尔混淆，改名前后各留一次注释说明。
+
+### 17.7 高风险确认
+
+本点动的是**认证链路的家族查询**（`_SQL[realm]["active_families"]` 被 4 条自助链路共用），按 AGENTS.md
+§11.7 属"认证"类，需用户确认后再编码。§17.3 的结论（方案 A）与两条待确认事实已列入本次确认：
+
+- 用户 2026-10-29 已拍板的部分：TD-231 拆成独立 PR、撤销 UPDATE 保持全量、布尔侧改名
+  `sessions_all_revoked`、`sessions_revoked_count` 并入同名整数键。
+- 本次新增待确认的部分：**方案 A**（收窄共用 SQL，让整数键在 4 个动作上口径统一）。
+
+### 17.8 实施结果（2026-10-29）
+
+按 §17.4 的 TDD 顺序落地，红→绿证据如下：
+
+| 步骤 | 用例 | 改前 | 改后 |
+|---|---|---|---|
+| 红灯 ① | `tests/integration/test_account_status.py::test_mfa_reset_counts_only_live_families` | `sessions_revoked == 3`（含已过期家族） | `== 2` |
+| 红灯 ② | `tests/integration/test_auth_d2_mfa_enroll.py::test_admin_mfa_reset_counts_only_live_families` | `sessions_revoked == 2` | `== 1` |
+| 红灯 ③ | `tests/integration/test_auth_d1_reset.py::test_password_reset_counts_only_live_families` | metadata 里 `sessions_revoked: True` + 多一个 `sessions_revoked_count: 2` | `sessions_revoked == 1`（int）、无 `sessions_revoked_count`、有 `sessions_all_revoked` |
+| 红灯 ④ | `tests/integration/test_auth_d2_mfa_enroll.py` 的 MFA 激活 / 关闭两条断言 | `KeyError: 'sessions_all_revoked'` | 通过 |
+| 红灯 ⑤ | `tests/business/test_bs_m1c_auth.py::test_bs_m1c_first_login_password_gate_and_change` | `KeyError: 'sessions_all_revoked'` | 通过 |
+| 红灯 ⑥（审查后补） | `tests/integration/test_auth_d1_reset.py::test_platform_password_reset_counts_only_live_families` | 把平台侧 `active_families` 改回旧写法 → `assert 2 == 1`（把已过期家族算了进去） | `== 1`（int）、无 `sessions_revoked_count`、有 `sessions_all_revoked` |
+
+生产改动三处（与 §17.4 step 2 一致，零偏离）：
+
+1. `app/personnel/mfa_admin.py`、`app/platform_admin.py`：取家族 SELECT 加 `and expires_at > now()`；**撤销 UPDATE 保持全量未撤销**（有意与停用侧"两条语句逐字一致"的取舍不同——停用侧要让"撤销了几台"等于"库里标了几台"，MFA 侧只需要计数准）。
+2. `app/auth/service.py`：`_SQL[realm]["active_families"]`（租户 / 平台两处）收窄为 `revoked_at is null and expires_at > now()`；4 处布尔 `sessions_revoked` 改名 `sessions_all_revoked`；`sessions_revoked_count` 并入同名整数键 `sessions_revoked`。
+3. 既有断言只改键名与期望值，**未放宽任何断言语义**；`tests/business/test_bs_m2ui2_mfa_admin.py` 的 `set(metadata) == {"sessions_revoked", "reason"}` 与 `== 1` 原样保留（该用例没有过期家族，计数不变）。
+
+**红灯过程中发现并堵掉的一个陷阱**：`True == 1` 在 Python 成立，所以"只断言 `metadata["sessions_revoked"] == 1`"会让**布尔值蒙混过关**——红灯 ③ 最初就是这样"值对了"却仍然红在别处。三处新用例都补了 `type(metadata["sessions_revoked"]) is int` 钉住类型，这才是 §17.1 验收里"全仓只写整数"的真正回归网。
+
+**文档回写**：§5.12 由"三处口径不同 + 类型分叉"改写为"口径一致 + 键名对照表"；`docs/tech-debt.md` TD-231 追加实施记录、另登记 TD-235（自助链路另外 3 个动作只写布尔不写条数，已延后到 M3）；`docs/handoff.md` §1 与 `docs/milestone.md` §5.2/§5.4 按"已实现、待合并回填 PR 号"登记。
+
+**独立审查与整改（1 轮，0 Blocker / 1 Major / 5 Minor）**：唯一阻塞项是**平台 realm 侧没有回归网**——审查实测「只把平台 `active_families` 改回旧写法，全部 57 条相关用例照样全绿」。整改：补红灯 ⑥ 的平台用例，并把该文件原先**不带租户过滤**的审计读取拆成 `_audit_metadata(action, tenant_id=...)` 与 `_platform_audit_metadata(action)`（`tenant_id is null`）——平台与租户共用 `auth.password.reset` 动作名，不收窄就会把租户那次的行一起读进来。另 5 条 Minor（台账处置列仍是 `已采纳`、M1-D2 简报 §5.6 审计表仍是旧键名、过期家族被登记了 Redis 会话标记、简报 §17.4 "4 处"应为"3 处"、行号引用漂移）已全部整改，详见 `docs/review-log.md` 同名小节。

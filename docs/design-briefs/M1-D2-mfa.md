@@ -210,6 +210,10 @@
 | `auth.mfa.secret_invalid` | 解密失败 | `reason`（不含密文） |
 | `platform.user.mfa_reset` | CLI 破窗 | `account_masked`, `sessions_revoked=true` |
 
+> **TD-231 之后的键名（2026-10-29 收口）**：上表里的 `sessions_revoked=true` 已不是现在的写法——
+> 布尔语义改名 `sessions_all_revoked`，整数键 `sessions_revoked` 只放「本次真正断开的活跃会话家族数」。
+> 现状键名与口径对照表见 `docs/design.md` §5.12；本表保留 M1-D2 当时的设计原貌。
+
 平台 realm 写平台审计；租户写租户审计并由 RLS 约束。失败审计在事务外独立写，避免随回滚丢失。
 
 ### 5.7 前端

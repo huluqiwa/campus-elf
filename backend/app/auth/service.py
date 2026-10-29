@@ -177,8 +177,11 @@ _SQL: dict[Realm, dict[str, str]] = {
             "select token_version from users where tenant_id = :tid and id = :uid"
         ),
         "active_families": (
+            # 只数**还活着**的家族（未撤销且未过期）：`sessions_revoked` 的口径统一为
+            # 「本次真正断开的活跃会话家族数」，与停用侧、设备列表取数一致（TD-231）。
             "select distinct family_id from refresh_tokens "
-            "where tenant_id = :tid and user_id = :uid and revoked_at is null"
+            "where tenant_id = :tid and user_id = :uid "
+            "and revoked_at is null and expires_at > now()"
         ),
         "select_reset_user_by_login": (
             "select id, status, email, user_type from users "
@@ -328,8 +331,9 @@ _SQL: dict[Realm, dict[str, str]] = {
         ),
         "select_credential_version": "select token_version from platform_users where id = :uid",
         "active_families": (
+            # 平台 realm：同样只数还活着的家族（TD-231）
             "select distinct family_id from platform_refresh_tokens "
-            "where platform_user_id = :uid and revoked_at is null"
+            "where platform_user_id = :uid and revoked_at is null and expires_at > now()"
         ),
         "select_reset_user_by_login": (
             "select id, status, email from platform_users where account = :login"
@@ -2020,7 +2024,9 @@ async def activate_mfa(
                             tenant_id=tenant_id,
                             metadata={
                                 "recovery_codes_issued": len(recovery_codes),
-                                "sessions_revoked": True,
+                                # 布尔语义（"旧会话被全断了"）用独立键；整数键 `sessions_revoked`
+                                # 留给"断了几台"的条数口径（TD-231）
+                                "sessions_all_revoked": True,
                                 "ip_hash": ip_hash,
                             },
                             request_id=request_id,
@@ -2270,7 +2276,7 @@ async def disable_mfa(
                 actor_id=principal_user_id,
                 tenant_id=tenant_id,
                 metadata={
-                    "sessions_revoked": True,
+                    "sessions_all_revoked": True,
                     "recovery_code_used": recovery_used,
                     "ip_hash": ip_hash,
                 },
@@ -3179,7 +3185,11 @@ async def _change_password_in_session(
         actor_realm=realm,
         actor_id=principal_user_id,
         tenant_id=tenant_id,
-        metadata={"sessions_revoked": True, "ip_hash": ip_hash, "ua_hash": ua_hash},
+        metadata={
+            "sessions_all_revoked": True,
+            "ip_hash": ip_hash,
+            "ua_hash": ua_hash,
+        },
         request_id=request_id,
     )
     await revocation.register_session(pair.session_id, realm=realm)
@@ -3718,8 +3728,9 @@ async def _confirm_reset_in_session(
         actor_id=user_id,
         tenant_id=tenant_id if realm == "tenant" else None,
         metadata={
-            "sessions_revoked": True,
-            "sessions_revoked_count": len(old_families),
+            "sessions_all_revoked": True,
+            # `old_families` 已收窄为"还活着的家族"，所以这个数就是真正被断开的设备数
+            "sessions_revoked": len(old_families),
             "ip_hash": ip_hash,
             "ua_hash": ua_hash,
         },

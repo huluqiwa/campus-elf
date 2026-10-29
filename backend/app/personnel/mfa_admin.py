@@ -6,9 +6,10 @@
   查询本身留审计（防枚举/滥用，限流见 M6）；
 - 不能重置自己（自助走恢复码/关闭 MFA）、不能重置校方超管（由平台 CLI 兜底）、
   不能经此接口触碰平台账号（租户连接 + users 表双重隔离）；
-- 重置即账号级安全事件：撤销全部**未撤销**的刷新家族（含已过期还没清理的死行，所以
-  `sessions_revoked` 按"未撤销"而非"仍活跃"计数——与停用侧的口径差异见 TD-231 与
-  `design.md` §5.12）、清空 MFA 与锁定状态、`token_version+1`，
+- 重置即账号级安全事件：撤销全部**未撤销**的刷新家族（含已过期还没清理的死行）、
+  清空 MFA 与锁定状态、`token_version+1`；
+  审计里的 `sessions_revoked` 只数**还活着**的家族（未撤销且未过期），与停用侧、
+  设备列表取数口径一致——"这次断了几台设备"要能跟台账对上（TD-231）；
   提交后删除 Redis 会话标记与待激活 secret；日志/审计不含 secret、恢复码或登录名明文；
 - 取账号级 advisory lock **之前**先做一次无锁的本租归属探针，且探针跑在自己的短事务里
   （跑完即归还连接，未命中的 404 不会连同拒绝审计占住两条连接）：那把锁的 key 只有
@@ -299,8 +300,12 @@ async def reset_user_mfa(
             (
                 await session.execute(
                     text(
+                        # 只数**还活着**的家族（未撤销且未过期），与停用侧口径一致：
+                        # 审计里的 `sessions_revoked` = "断了几台设备"，死行不占数（TD-231）。
+                        # 撤销语句仍是全量未撤销——把死行一并标上不花钱，但计数要准。
                         "select distinct family_id from public.refresh_tokens "
-                        "where user_id = :uid and tenant_id = :tid and revoked_at is null"
+                        "where user_id = :uid and tenant_id = :tid "
+                        "and revoked_at is null and expires_at > now()"
                     ),
                     {"uid": user_id, "tid": tenant_id},
                 )
