@@ -147,7 +147,8 @@ M0 完成；PostgreSQL/Redis/MailHog 可用；`docs/rbac-matrix.md` 初版确认
     文件的审计/会话查询按用例租户收窄 + 并发用例补任务取消兜底；**T4** TD-229 迁移目录纳入 ruff 门禁（先清零
     3 条存量）；**T5** TD-230 MFA 侧补「别租 id 不得排进对方账号锁队列」同形用例；
     **187f-B 审计字段收口**——验收编号 **T6** TD-231 `sessions_revoked` 三处口径与「布尔 vs 条数」类型分叉统一
-    （动 `mfa_admin.py`/`platform_admin.py`/`auth/service.py` 与两条已交付链路的既有用例）——**已实现（本 PR）**：
+    （动 `mfa_admin.py`/`platform_admin.py`/`auth/service.py` 与两条已交付链路的既有用例）——**已交付**（PR #16 →
+    合并提交 `0ffdb2d`，2026-10-29）：
     整数键 `sessions_revoked` **全仓只写整数**，含义统一为「本次真正断开的**活跃**会话家族数」
     （未撤销且未过期，与设备列表取数一致），四个写它的动作（停用 `school.user.deactivated` /
     租户 MFA 重置 `school.user.mfa_reset` / 平台 MFA 重置 `platform.user.mfa_reset` /
@@ -170,7 +171,7 @@ M1 的身份/RBAC；租户上下文。
 - M2-UI3 测试与门禁补全 T1–T5 逐项有「改前红 / 改后绿」证据或写明不适用理由；覆盖率类验收只认 CI 产物
   `coverage.json` 的读数，不认本地数字（简报 §16）。**T1–T5 已于 2026-10-29 随 PR #14 交付**（CI 读数
   `app/auth` 410/504 = 81.35%；**目标 82 未达标**，缺口 4 条如实登记，门槛保持 80 不上调）。T6（TD-231）在
-  187f-B 单独收口——**已实现（本 PR）**：整数键 `sessions_revoked` 只写「断了几台活跃会话」、布尔语义改键
+  187f-B 单独收口——**已交付**（PR #16 → 合并提交 `0ffdb2d`，2026-10-29）：整数键 `sessions_revoked` 只写「断了几台活跃会话」、布尔语义改键
   `sessions_all_revoked`、`sessions_revoked_count` 消失；口径与键名的对照表以 `docs/design.md` §5.12 为准。
   T3 的两条边界
   （「精确条数」按租户收窄、「必须为空」保留全表口径；`test_campus_chat_rbac.py` 判定不适用并写明理由）

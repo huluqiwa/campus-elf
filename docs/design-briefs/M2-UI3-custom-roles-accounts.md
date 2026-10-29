@@ -809,3 +809,5 @@ TD-235 候选，等真要做跨动作告警时再统一补）。
 **文档回写**：§5.12 由"三处口径不同 + 类型分叉"改写为"口径一致 + 键名对照表"；`docs/tech-debt.md` TD-231 追加实施记录、另登记 TD-235（自助链路另外 3 个动作只写布尔不写条数，已延后到 M3）；`docs/handoff.md` §1 与 `docs/milestone.md` §5.2/§5.4 按"已实现、待合并回填 PR 号"登记。
 
 **独立审查与整改（1 轮，0 Blocker / 1 Major / 5 Minor）**：唯一阻塞项是**平台 realm 侧没有回归网**——审查实测「只把平台 `active_families` 改回旧写法，全部 57 条相关用例照样全绿」。整改：补红灯 ⑥ 的平台用例，并把该文件原先**不带租户过滤**的审计读取拆成 `_audit_metadata(action, tenant_id=...)` 与 `_platform_audit_metadata(action)`（`tenant_id is null`）——平台与租户共用 `auth.password.reset` 动作名，不收窄就会把租户那次的行一起读进来。另 5 条 Minor（台账处置列仍是 `已采纳`、M1-D2 简报 §5.6 审计表仍是旧键名、过期家族被登记了 Redis 会话标记、简报 §17.4 "4 处"应为"3 处"、行号引用漂移）已全部整改，详见 `docs/review-log.md` 同名小节。
+
+**交付结果（2026-10-29）**：PR #16 单 commit `47ab2c0` → **rebase 合并提交 `0ffdb2d`**。PR CI backend run `40907206389` **807 passed / 788.31s**、security run `40907206149` success；合并后 main 推送 CI backend run `40909787189` **807 passed / 805.66s**、security run `40909787157` success；四包分支覆盖率两次 run 逐包一致（`app/auth` 410/504 = 81.35%，门槛 80）。用例数 803 → 807（新增 4 条）。
