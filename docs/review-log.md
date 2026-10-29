@@ -745,7 +745,7 @@
 
 ### M2-UI3 TD-187g-B：前端角色页（M2-UI3 第九批，2026-10-30）
 
-- 设计简报：`docs/design-briefs/M2-UI3-custom-roles-accounts.md` §19；用户 2026-10-30 四项拍板（都选推荐项）——**B1** 可手工授的数据范围类型清单**前端自己写一份**（`EDITABLE_SCOPE_TYPES = {school, self}`；后端 `_assert_editable_scope_types` 仍是唯一门禁）；**B2** `code` / `name` 格式校验**前端先查一遍**（后端那份照旧，前端只是把报错提前到提交前）；**B3** 新建角色的初始权限**单选，只能选一种**（空 / 复制某个已有角色 / 按同名内置角色初始化，三选一，不做可叠加的多选）；**B4** 删除功能的**执行控件**按 `school.role.delete` 显示、**入口**按「是不是内置角色」给（**方案 C「两个码都要才显示入口」被明确拒绝**——那样只有 `school.role.delete` 的人连「为什么这个按钮不给我」都看不到）。
+- 设计简报：`docs/design-briefs/M2-UI3-custom-roles-accounts.md` §19；用户 2026-10-30 四项拍板（都选推荐项）——**B1** 可手工授的数据范围类型清单**前端自己写一份**（`EDITABLE_SCOPE_TYPES = {school, self}`；后端 `_assert_editable_scope_types` 仍是唯一门禁）；**B2** `code` / `name` 格式校验**前端先查一遍**（后端那份照旧，前端只是把报错提前到提交前）；**B3** 新建角色的初始权限**二选一单选**（「空白（稍后配置）」/「复制已有角色」；权限勾选框只在「空白」模式下可用，复制源下拉只列 `editable=true` 且不含不可转授码的角色）——后端 `RoleCreatePayload` 就是二选一，两份非空同时给会 422 `ROLE_INITIAL_SOURCE_AMBIGUOUS`，界面不能表达出后端拒绝的组合；**B4** 删除功能的**执行控件**按 `school.role.delete` 显示、**入口**按「是不是内置角色」给（**方案 C「两个码都要才显示入口」被明确拒绝**——那样只有 `school.role.delete` 的人连「为什么这个按钮不给我」都看不到）。
 - 交付范围（**纯前端，`backend/` 零改动**）：
   - `frontend/apps/admin/src/components/RoleCreateDialog.vue`（新建自定义角色：码/名前端预检 + 初始权限三选一 + 复制源下拉过滤掉含不可转授码的角色，不给「点得动、提交必 422」的选项）。
   - `frontend/apps/admin/src/components/RoleDeleteDialog.vue`（删除：逐字确认角色码 + 理由 ≥10 + 影响面预览 + 版本 CAS；409 `ROLE_DELETE_PREVIEW_STALE` 时按服务端回带的 `latest_preview` 刷新，不让用户对着旧清单反复点）。
