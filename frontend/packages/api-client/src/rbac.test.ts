@@ -28,6 +28,8 @@ const ROLE_VIEW = {
   defaults_applied: true,
   user_count: 2,
   permission_codes: ["school.dashboard.view"],
+  bindable: true,
+  resettable: true,
 };
 
 describe("createRbacApi", () => {
@@ -89,6 +91,7 @@ describe("createRbacApi", () => {
       confirm_role_code: "school_admin",
       reason: "误改后恢复出厂默认权限",
       version: 3,
+      self_grant_ack: true,
     });
     expect(calls[0].path).toBe("/api/v1/school/roles/r-1/reset");
     expect(calls[0].init?.method).toBe("POST");
@@ -96,6 +99,7 @@ describe("createRbacApi", () => {
       confirm_role_code: "school_admin",
       reason: "误改后恢复出厂默认权限",
       version: 3,
+      self_grant_ack: true,
     });
   });
 
@@ -135,5 +139,129 @@ describe("createRbacApi", () => {
     await expect(
       api.replaceRolePermissions("r-1", { permission_codes: [], version: 1 }),
     ).rejects.toThrow("ROLE_VERSION_CONFLICT");
+  });
+
+  it("createRole 以 POST 提交 code/name 与初始权限来源", async () => {
+    const { session, calls } = sessionStub(() => ROLE_VIEW);
+    const created = await createRbacApi(session).createRole({
+      code: "campus_operator",
+      name: "校区运营",
+      permission_codes: ["school.kb.view"],
+      reason: "新设校区运营岗",
+    });
+    expect(created).toEqual(ROLE_VIEW);
+    expect(calls[0].path).toBe("/api/v1/school/roles");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      code: "campus_operator",
+      name: "校区运营",
+      permission_codes: ["school.kb.view"],
+      reason: "新设校区运营岗",
+    });
+  });
+
+  it("createRole 复制模式只提交 copy_from_role_id（不与 permission_codes 同时给）", async () => {
+    const { session, calls } = sessionStub(() => ROLE_VIEW);
+    await createRbacApi(session).createRole({
+      code: "campus_operator",
+      name: "校区运营",
+      copy_from_role_id: "r-9",
+    });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      code: "campus_operator",
+      name: "校区运营",
+      copy_from_role_id: "r-9",
+    });
+  });
+
+  it("previewRoleDeletion 是无请求体的 POST（只读预览）", async () => {
+    const { session, calls } = sessionStub(() => ({
+      role_code: "campus_operator",
+      name: "校区运营",
+      version: 2,
+      affected_users: 3,
+      permission_codes: ["school.kb.view"],
+      fingerprint: "a".repeat(64),
+    }));
+    const preview = await createRbacApi(session).previewRoleDeletion("r-1");
+    expect(calls[0].path).toBe("/api/v1/school/roles/r-1/delete/preview");
+    expect(calls[0].init).toEqual({ method: "POST" });
+    expect(preview.fingerprint).toHaveLength(64);
+    expect(preview.affected_users).toBe(3);
+  });
+
+  it("deleteRole 原样回传指纹与版本", async () => {
+    const { session, calls } = sessionStub(() => ({
+      role_code: "campus_operator",
+      name: "校区运营",
+      version: 2,
+      affected_users: 3,
+      permission_codes: [],
+      fingerprint: "a".repeat(64),
+    }));
+    await createRbacApi(session).deleteRole("r-1", {
+      confirm_role_code: "campus_operator",
+      reason: "岗位撤销，角色不再使用",
+      version: 2,
+      fingerprint: "a".repeat(64),
+    });
+    expect(calls[0].path).toBe("/api/v1/school/roles/r-1/delete");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      confirm_role_code: "campus_operator",
+      reason: "岗位撤销，角色不再使用",
+      version: 2,
+      fingerprint: "a".repeat(64),
+    });
+  });
+
+  it("listRoleScopes 走 GET 且读回范围行", async () => {
+    const { session, calls } = sessionStub(() => [
+      { scope_type: "school", scope_id: null, editable: true },
+      { scope_type: "class", scope_id: "c-1", editable: false },
+    ]);
+    const rows = await createRbacApi(session).listRoleScopes("r-1");
+    expect(calls[0].path).toBe("/api/v1/school/roles/r-1/scopes");
+    expect(calls[0].init).toBeUndefined();
+    expect(rows).toHaveLength(2);
+    expect(rows[1].editable).toBe(false);
+  });
+
+  it("previewRoleScopes 以 POST 提交候选范围清单", async () => {
+    const { session, calls } = sessionStub(() => ({
+      version: 4,
+      added: ["self"],
+      removed: ["school"],
+      affected_users: 2,
+      empties_scope: false,
+      retained_non_editable: ["class:c-1"],
+      newly_reaching_self: ["self"],
+      requires_confirmation: true,
+    }));
+    const preview = await createRbacApi(session).previewRoleScopes("r-1", ["self"]);
+    expect(calls[0].path).toBe("/api/v1/school/roles/r-1/scopes/preview");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ scope_types: ["self"] });
+    expect(preview.empties_scope).toBe(false);
+    expect(preview.requires_confirmation).toBe(true);
+  });
+
+  it("replaceRoleScopes 以 PUT 提交范围清单与版本", async () => {
+    const { session, calls } = sessionStub(() => ROLE_VIEW);
+    const updated = await createRbacApi(session).replaceRoleScopes("r-1", {
+      scope_types: ["school", "self"],
+      version: 3,
+      reason: "调整到全校可见",
+      self_grant_ack: true,
+    });
+    expect(updated).toEqual(ROLE_VIEW);
+    expect(calls[0].path).toBe("/api/v1/school/roles/r-1/scopes");
+    expect(calls[0].init?.method).toBe("PUT");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      scope_types: ["school", "self"],
+      version: 3,
+      reason: "调整到全校可见",
+      self_grant_ack: true,
+    });
   });
 });

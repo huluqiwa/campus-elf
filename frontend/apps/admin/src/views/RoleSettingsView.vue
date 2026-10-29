@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /**
- * 角色权限配置 + MFA 管理员重置（M2-UI2：TD-137/TD-143/TD-126）。
+ * 角色权限配置 + MFA 管理员重置（M2-UI2：TD-137/TD-143/TD-126；M2-UI3 TD-187g-B）。
  * - 只允许编辑后端标记 editable 的角色（超管/学生/教师只读并给出原因）；
  * - 保存是"全量替换 + 版本锁"：409 时用后端回传的 latest 刷新本地，绝不静默覆盖；
- * - 恢复出厂先预览影响面，再输入角色编码 + ≥10 字理由二次确认；只对内置角色开——
- *   自定义角色没有出厂定义，服务端恒 409 `ROLE_DEFAULTS_UNAVAILABLE`，按钮亮着就是死路；
+ * - 恢复出厂先预览影响面，再输入角色编码 + ≥10 字理由二次确认；按钮跟服务端下发的
+ *   `resettable` 走（TD-200），不再跟 `is_system` 走——`is_system` 只剩"内置/自建"标签的用处；
  * - 自扩权（TD-191）：本地预检命中就先挡；服务端判定与本页快照不一致（422 SELF_GRANT_*）时
  *   强制展开确认条并保留草稿——重新 load() 会把勾选和理由一起清掉，那是更糟的"修复"；
+ * - 新建/删除自定义角色与角色级数据范围在各自的子组件里（TD-187g-B）；
  * - MFA 重置按登录名精确定位、展示目标后填理由执行（仅持专用权限可见）。
  */
 import { toUserMessage } from "@campus-elf/api-client";
@@ -20,13 +21,18 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, ref } from "vue";
 
 import { rbacApi } from "../api";
+import RoleCreateDialog from "../components/RoleCreateDialog.vue";
+import RoleDeleteDialog from "../components/RoleDeleteDialog.vue";
+import RoleScopePanel from "../components/RoleScopePanel.vue";
 import {
   conflictedLatestRole,
   groupPermissions,
   isSelfLockRemoval,
   permissionDiff,
   resetConfirmError,
+  resetUnavailableReason,
   ROLE_MANAGE_CODE,
+  roleDeleteGate,
   selfExpansionCodes,
   selfGrantGate,
   selfGrantRejectionMessage,
@@ -203,14 +209,28 @@ const resetPreview = ref<ResetPreview | null>(null);
 const resetCode = ref("");
 const resetReason = ref("");
 const resetting = ref(false);
+/**
+ * 服务端判定这次「恢复出厂」是范围自扩权（出厂范围含 `school`，持有人点一次就拿回全校可见）。
+ * 预览不下发这个判据（要看操作者**自己**当前的范围，/auth/me 不返回），只能等服务端 422 —
+ * 与权限区同一套路：拒一次就把确认条逼出来，不刷新页面（刷新会丢掉已填的理由）。
+ */
+const forcedResetSelfGrant = ref<string | null>(null);
+const resetAck = ref(false);
+
+/** TD-200：按钮判据跟服务端下发的 `resettable` 走；不可用时给出原因而不是把按钮藏起来。 */
+const resetUnavailable = computed(() =>
+  selectedRole.value ? resetUnavailableReason(selectedRole.value) : null,
+);
 
 async function openReset(): Promise<void> {
   const role = selectedRole.value;
-  if (!role || !role.editable) return;
+  if (!role || !role.resettable) return;
   resetVisible.value = true;
   resetPreview.value = null;
   resetCode.value = "";
   resetReason.value = "";
+  resetAck.value = false;
+  forcedResetSelfGrant.value = null;
   try {
     resetPreview.value = await rbacApi.previewRoleReset(role.id);
   } catch (error) {
@@ -243,6 +263,7 @@ async function submitReset(): Promise<void> {
       confirm_role_code: resetCode.value.trim(),
       reason: resetReason.value.trim(),
       version: preview.version,
+      self_grant_ack: resetAck.value,
     });
     resetVisible.value = false;
     await load();
@@ -251,7 +272,12 @@ async function submitReset(): Promise<void> {
     );
     await auth.loadUser();
   } catch (error) {
-    if (applyConflict(error)) {
+    const rejected = selfGrantRejectionMessage(error);
+    if (rejected !== null) {
+      // 服务端判定这次重置会扩大本人可见范围：把确认条逼出来，理由不丢（resetReason 不清）
+      forcedResetSelfGrant.value = rejected;
+      ElMessage.warning("服务端判定本次为范围自扩权：勾选确认后再次提交");
+    } else if (applyConflict(error)) {
       resetVisible.value = false;
     } else {
       ElMessage.error(toUserMessage(error, "重置失败"));
@@ -264,6 +290,41 @@ async function submitReset(): Promise<void> {
 const canResetMfa = computed(
   () => auth.user?.permissions.includes("school.personnel.mfa.reset") ?? false,
 );
+
+/** 新建/删除自定义角色（TD-187g-B）：入口在页头与角色详情里，逻辑在子组件。 */
+const createVisible = ref(false);
+const deleteVisible = ref(false);
+/**
+ * 删除入口门禁（决策 B4）：内置角色不可删；真删另需 `school.role.delete`。
+ * 没有删除码时入口仍然给——但对话框只给只读影响面（能预览 ≠ 能执行）。
+ */
+const deleteGate = computed(() =>
+  selectedRole.value
+    ? roleDeleteGate(selectedRole.value, auth.user?.permissions ?? [])
+    : { visible: false, executable: false, reason: null },
+);
+
+async function onRoleCreated(role: RoleView): Promise<void> {
+  await load();
+  selectRole(role);
+}
+
+/**
+ * TD-202：权限区与范围区共用 `roles.version`。权限区有未保存改动时提交范围会推高版本，
+ * 把权限区的草稿变成必然 409 的死路——所以这里直接挡住，并说清先做什么。
+ */
+const scopeBlockedReason = computed(() =>
+  dirty.value ? "权限区有未保存改动，请先保存或撤销后再改数据范围" : null,
+);
+
+function onScopeUpdated(role: RoleView): void {
+  replaceRole(role);
+}
+
+function onScopeConflict(error: unknown): void {
+  applyConflict(error);
+}
+
 const lookupLoginId = ref("");
 const lookupLoading = ref(false);
 const mfaTarget = ref<UserLookupView | null>(null);
@@ -326,6 +387,15 @@ onMounted(() => {
         <div class="card-head">
           <span>角色权限</span>
           <span class="hint">权限按功能分组；保存后对该角色用户立即生效。</span>
+          <el-button
+            class="head-action"
+            type="primary"
+            plain
+            data-testid="role-create-open"
+            @click="createVisible = true"
+          >
+            新建角色
+          </el-button>
         </div>
       </template>
 
@@ -351,7 +421,20 @@ onMounted(() => {
           <div class="role-head">
             <strong>{{ selectedRole.name }}</strong>
             <el-tag size="small" type="info">{{ selectedRole.code }}</el-tag>
+            <el-tag size="small" :type="selectedRole.is_system ? 'warning' : 'success'">
+              {{ selectedRole.is_system ? "内置" : "自建" }}
+            </el-tag>
             <span class="hint">版本 {{ selectedRole.version }}</span>
+            <el-button
+              v-if="deleteGate.visible"
+              class="role-action"
+              type="danger"
+              plain
+              data-testid="role-delete-open"
+              @click="deleteVisible = true"
+            >
+              {{ deleteGate.executable ? "删除角色" : "查看删除影响面" }}
+            </el-button>
           </div>
 
           <el-alert
@@ -422,10 +505,24 @@ onMounted(() => {
             >
               保存权限（新增 {{ changes.added.length }} / 移除 {{ changes.removed.length }}）
             </el-button>
-            <el-button v-if="selectedRole.is_system" data-testid="role-reset" @click="openReset"
+            <el-button v-if="selectedRole.resettable" data-testid="role-reset" @click="openReset"
               >恢复出厂设置</el-button
             >
+            <span
+              v-else-if="resetUnavailable"
+              class="hint reset-unavailable"
+              data-testid="role-reset-unavailable"
+              >{{ resetUnavailable }}</span
+            >
           </div>
+
+          <RoleScopePanel
+            :role="selectedRole"
+            :blocked-reason="scopeBlockedReason"
+            :actor-roles="actorRoles"
+            @updated="onScopeUpdated"
+            @conflict="onScopeConflict"
+          />
         </section>
       </div>
     </el-card>
@@ -513,12 +610,28 @@ onMounted(() => {
           />
         </el-form-item>
       </el-form>
+      <el-alert
+        v-if="forcedResetSelfGrant !== null"
+        data-testid="reset-self-grant-forced"
+        type="warning"
+        show-icon
+        :closable="false"
+        :title="forcedResetSelfGrant"
+      />
+      <el-checkbox
+        v-if="forcedResetSelfGrant !== null"
+        v-model="resetAck"
+        data-testid="reset-self-grant-ack"
+        class="self-grant-ack"
+      >
+        我确认：这会扩大我本人可见的数据范围，并已填写理由
+      </el-checkbox>
       <template #footer>
         <el-button @click="resetVisible = false">取消</el-button>
         <el-button
           type="danger"
           data-testid="reset-submit"
-          :disabled="!resetPreview"
+          :disabled="!resetPreview || (forcedResetSelfGrant !== null && !resetAck)"
           :loading="resetting"
           @click="submitReset"
         >
@@ -526,6 +639,21 @@ onMounted(() => {
         </el-button>
       </template>
     </el-dialog>
+
+    <RoleCreateDialog
+      v-model="createVisible"
+      :roles="roles"
+      :permissions="permissions"
+      :actor-roles="actorRoles"
+      @created="onRoleCreated"
+    />
+    <RoleDeleteDialog
+      v-model="deleteVisible"
+      :role="selectedRole"
+      :can-execute="deleteGate.executable"
+      :denied-reason="deleteGate.reason"
+      @deleted="load"
+    />
   </div>
 </template>
 
@@ -539,6 +667,15 @@ onMounted(() => {
   display: flex;
   align-items: baseline;
   gap: 12px;
+}
+.head-action {
+  margin-left: auto;
+}
+.role-action {
+  margin-left: auto;
+}
+.reset-unavailable {
+  max-width: 420px;
 }
 .hint {
   color: var(--el-text-color-secondary);

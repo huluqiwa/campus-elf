@@ -67,6 +67,8 @@ test("给自己所在角色补敏感码：确认条出现、勾了确认还要�
         defaults_applied: true,
         user_count: 2,
         permission_codes: [...SCHOOL_ADMIN_DEFAULTS, "school.role.manage"],
+        bindable: true,
+        resettable: true,
       },
     ],
   });
@@ -211,6 +213,8 @@ test("保存遇到 409 版本冲突：载入后端回传的最新版本，不静
             defaults_applied: true,
             user_count: 3,
             permission_codes: ["school.dashboard.view", "school.kb.view"],
+            bindable: true,
+            resettable: true,
           },
         },
       },
@@ -267,9 +271,11 @@ test("恢复出厂：先预览影响面，编码/理由任一不合格都不提�
   await expect(page.getByText("版本 4")).toBeVisible();
 });
 
-test("自定义角色能配权限，但没有「恢复出厂」入口：editable 已不等于可重置", async ({ page }) => {
-  // TD-187b 把自定义角色翻成 editable=true。若入口只跟 editable 走，这里会出现一个
-  // 点了必然 409 的按钮（服务端对自建角色恒 `ROLE_DEFAULTS_UNAVAILABLE`），所以按钮跟 is_system。
+test("自定义角色能配权限，但没有「恢复出厂」入口：判据是服务端下发的 resettable", async ({
+  page,
+}) => {
+  // TD-200：按钮跟服务端下发的 `resettable` 走，不再跟 `is_system` 走。
+  // 自定义角色没有出厂定义（服务端恒 `ROLE_DEFAULTS_UNAVAILABLE`），resettable=false → 按钮不亮。
   const rbac = await mockRbacApi(page, {
     roles: [
       {
@@ -283,6 +289,8 @@ test("自定义角色能配权限，但没有「恢复出厂」入口：editable
         defaults_applied: false,
         user_count: 1,
         permission_codes: ["school.kb.view"],
+        bindable: true,
+        resettable: false,
       },
     ],
   });
@@ -361,6 +369,8 @@ test("撤掉自己所在角色的 role.manage：二次确认明确自锁后果�
         defaults_applied: true,
         user_count: 2,
         permission_codes: [...SCHOOL_ADMIN_DEFAULTS, "school.role.manage"],
+        bindable: true,
+        resettable: true,
       },
     ],
   });
@@ -400,6 +410,8 @@ test("恢复出厂也会自锁：预览差集含 role.manage 且本人在该角�
         defaults_applied: true,
         user_count: 2,
         permission_codes: [...SCHOOL_ADMIN_DEFAULTS, "school.role.manage"],
+        bindable: true,
+        resettable: true,
       },
     ],
   });
@@ -438,6 +450,8 @@ test("不在被重置角色里时不自称自锁", async ({ page }) => {
         defaults_applied: true,
         user_count: 2,
         permission_codes: [...SCHOOL_ADMIN_DEFAULTS, "school.role.manage"],
+        bindable: true,
+        resettable: true,
       },
     ],
   });

@@ -2,14 +2,29 @@ import { ApiError } from "@campus-elf/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
+  canCopyRoleCodes,
+  canDelegateCode,
   conflictedLatestRole,
+  deleteConfirmError,
+  deleteVersionConflict,
+  editableScopeTypes,
+  editableScopeUniverse,
   groupPermissions,
   isSelfLockRemoval,
   permissionDiff,
+  readOnlyScopeRows,
   resetConfirmError,
+  resetUnavailableReason,
+  roleCodeError,
+  roleDeleteGate,
+  roleNameError,
+  scopeDiff,
+  scopePlan,
   selfExpansionCodes,
   selfGrantGate,
   selfGrantRejectionMessage,
+  staleDeletionPreview,
+  EDITABLE_SCOPE_TYPES,
 } from "./rbac-logic";
 
 const SENSITIVE = new Set(["school.personnel.sensitive.read", "school.role.delete"]);
@@ -25,6 +40,8 @@ const ROLE = {
   defaults_applied: true,
   user_count: 2,
   permission_codes: ["school.dashboard.view", "school.role.manage"],
+  bindable: true,
+  resettable: true,
 };
 
 describe("groupPermissions", () => {
@@ -232,5 +249,269 @@ describe("selfExpansionCodes（TD-191 自扩权：与后端同一判据的前端
     expect(
       selfExpansionCodes(["school.role.delete"], "school_admin", ["school_admin"], [], new Set()),
     ).toEqual([]);
+  });
+});
+
+describe("roleCodeError（角色码格式：与后端 ROLE_CODE_PATTERN 同界）", () => {
+  it("合法码通过：小写字母开头 + 小写字母/数字/下划线，3 位起", () => {
+    expect(roleCodeError("campus_operator")).toBeNull();
+    expect(roleCodeError("a1_")).toBeNull();
+  });
+
+  it("空码给出输入提示", () => {
+    expect(roleCodeError("   ")).toContain("请输入角色编码");
+  });
+
+  it("大写字母开头 / 含空格 / 含连字符 / 太短一律拒绝", () => {
+    expect(roleCodeError("Campus")).toContain("小写字母");
+    expect(roleCodeError("campus operator")).toContain("小写字母");
+    expect(roleCodeError("campus-operator")).toContain("小写字母");
+    expect(roleCodeError("ab")).toContain("小写字母");
+  });
+
+  it("超长（64 位）拒绝：后端列宽 64、校验上界 63，放行会让它撞库 CHECK 变 500", () => {
+    expect(roleCodeError("a".repeat(64))).toContain("小写字母");
+    expect(roleCodeError("a".repeat(63))).toBeNull();
+  });
+});
+
+describe("roleNameError（TD-198：角色名去空白后必须非空）", () => {
+  it("全空白名拒绝——与后端同名判据同侧（否则落库成一行没有名字的角色）", () => {
+    expect(roleNameError("   ")).toContain("全空白");
+    expect(roleNameError("")).toContain("全空白");
+  });
+
+  it("正常名通过", () => {
+    expect(roleNameError("校区运营")).toBeNull();
+  });
+
+  it("超长（101 字）拒绝", () => {
+    expect(roleNameError("角".repeat(101))).toContain("100");
+    expect(roleNameError("角".repeat(100))).toBeNull();
+  });
+});
+
+describe("deleteConfirmError（删除确认：逐字 code + 理由 ≥10 字）", () => {
+  it("确认码不一致拒绝", () => {
+    expect(deleteConfirmError("campus_operator", "campus-operator", "岗位撤销不再使用")).toContain(
+      "角色编码",
+    );
+  });
+
+  it("理由不足 10 字拒绝", () => {
+    expect(deleteConfirmError("campus_operator", "campus_operator", "  撤销  ")).toContain("10");
+  });
+
+  it("两者都满足才通过", () => {
+    expect(
+      deleteConfirmError("campus_operator", " campus_operator ", "岗位撤销，角色不再使用"),
+    ).toBeNull();
+  });
+});
+
+describe("canDelegateCode（转授禁令：与后端 _assert_delegable 同口径）", () => {
+  it("校方超管放行一切（含 school.role.manage）", () => {
+    expect(canDelegateCode("school.role.manage", ["school_super_admin"])).toBe(true);
+  });
+
+  it("普通主体不能转授 school.role.manage", () => {
+    expect(canDelegateCode("school.role.manage", ["school_admin"])).toBe(false);
+  });
+
+  it("其余权限码不受影响", () => {
+    expect(canDelegateCode("school.kb.view", ["school_admin"])).toBe(true);
+  });
+});
+
+describe("roleDeleteGate（删除入口门禁：真删要 school.role.delete，内置角色不可删）", () => {
+  it("自定义角色 + 持删除码 → 入口可执行", () => {
+    expect(
+      roleDeleteGate({ is_system: false }, ["school.role.manage", "school.role.delete"]),
+    ).toEqual({ visible: true, executable: true, reason: null });
+  });
+
+  it("内置角色不亮入口（后端恒 409 ROLE_NOT_DELETABLE）", () => {
+    const gate = roleDeleteGate({ is_system: true }, ["school.role.delete"]);
+    expect(gate.visible).toBe(false);
+    expect(gate.executable).toBe(false);
+    expect(gate.reason).toContain("内置角色");
+  });
+
+  it("只持配置权（无删除码）→ 入口仍在但只给影响面，并说清缺哪个码", () => {
+    // 决策 B4：把入口整个藏掉就等于把「能预览影响面」也藏了（简报 §19.2 方案 C 被否的原因）
+    const gate = roleDeleteGate({ is_system: false }, ["school.role.manage"]);
+    expect(gate.visible).toBe(true);
+    expect(gate.executable).toBe(false);
+    expect(gate.reason).toContain("school.role.delete");
+  });
+});
+
+describe("canCopyRoleCodes（复制源里的权限码也得自己授得出去）", () => {
+  it("普通角色：不含不可转授码 → 可复制", () => {
+    expect(canCopyRoleCodes({ permission_codes: ["school.kb.view"] }, ["school_admin"])).toBe(true);
+  });
+
+  it("含 school.role.manage 且非超管 → 不可复制（后端 _assert_delegable 会 422）", () => {
+    expect(
+      canCopyRoleCodes({ permission_codes: ["school.kb.view", "school.role.manage"] }, [
+        "school_admin",
+      ]),
+    ).toBe(false);
+  });
+
+  it("超管不受限", () => {
+    expect(
+      canCopyRoleCodes({ permission_codes: ["school.role.manage"] }, ["school_super_admin"]),
+    ).toBe(true);
+  });
+});
+
+describe("deleteVersionConflict（删除时版本被推进：预览必须重取）", () => {
+  it("409 ROLE_VERSION_CONFLICT → 是版本冲突", () => {
+    const error = new ApiError("角色已被他人修改", 409, {
+      code: "ROLE_VERSION_CONFLICT",
+      message: "角色已被他人修改",
+      latest: ROLE,
+    });
+    expect(deleteVersionConflict(error)).toBe(true);
+  });
+
+  it("409 影响面过期不是版本冲突（两者出路不同：后者回带最新影响面，前者没有指纹）", () => {
+    const error = new ApiError("影响面已变化", 409, {
+      code: "ROLE_DELETE_PREVIEW_STALE",
+      message: "影响面已变化",
+      latest_preview: {
+        role_code: "x",
+        name: "x",
+        version: 1,
+        affected_users: 0,
+        permission_codes: [],
+        fingerprint: "f",
+      },
+    });
+    expect(deleteVersionConflict(error)).toBe(false);
+  });
+
+  it("422 不是版本冲突", () => {
+    const error = new ApiError("理由不足", 422, { code: "ROLE_DELETE_REASON_REQUIRED" });
+    expect(deleteVersionConflict(error)).toBe(false);
+  });
+});
+
+describe("resetUnavailableReason（TD-200：判据跟 resettable 走，不跟 is_system 走）", () => {
+  it("resettable=true → 没有不可用原因", () => {
+    expect(resetUnavailableReason({ resettable: true, lock_reason: null })).toBeNull();
+  });
+
+  it("自定义角色（无出厂定义）→ 说清是出厂定义缺失，不是「内置才有的待遇」", () => {
+    expect(resetUnavailableReason({ resettable: false, lock_reason: null })).toContain("出厂定义");
+  });
+
+  it("锁定内置角色 → 用服务端下发的 lock_reason", () => {
+    expect(
+      resetUnavailableReason({
+        resettable: false,
+        lock_reason: "内置角色，权限与数据范围由系统固定",
+      }),
+    ).toBe("内置角色，权限与数据范围由系统固定");
+  });
+});
+
+describe("数据范围（可手工授类型清单 + 提交计划）", () => {
+  it("可手工授的类型就是 school / self（前端副本，后端是唯一门禁）", () => {
+    expect([...EDITABLE_SCOPE_TYPES]).toEqual(["school", "self"]);
+  });
+
+  it("按服务端下发的 editable 拆成可勾选与只读两档", () => {
+    const rows = [
+      { scope_type: "school", scope_id: null, editable: true },
+      { scope_type: "self", scope_id: null, editable: true },
+      { scope_type: "class", scope_id: "c-1", editable: false },
+    ];
+    expect(editableScopeTypes(rows)).toEqual(["school", "self"]);
+    expect(readOnlyScopeRows(rows)).toEqual([
+      { scope_type: "class", scope_id: "c-1", editable: false },
+    ]);
+  });
+
+  it("范围差异与权限差异同算法", () => {
+    expect(scopeDiff(["school", "self"], ["self"])).toEqual({
+      added: [],
+      removed: ["school"],
+    });
+  });
+
+  it("提交计划只带可勾选类型：只读行不进提交清单（后端窄删除只清可编辑两类）", () => {
+    const rows = [
+      { scope_type: "school", scope_id: null, editable: true },
+      { scope_type: "class", scope_id: "c-1", editable: false },
+    ];
+    const plan = scopePlan(rows, ["school"]);
+    expect(plan.submitted).toEqual(["school"]);
+    expect(plan.retained).toHaveLength(1);
+    expect(plan.empties).toBe(false);
+  });
+
+  it("全部取消且没有只读行 → 提示该角色持有人将看不到任何数据", () => {
+    const rows = [{ scope_type: "school", scope_id: null, editable: true }];
+    const plan = scopePlan(rows, []);
+    expect(plan.submitted).toEqual([]);
+    expect(plan.empties).toBe(true);
+    expect(plan.removed).toEqual(["school"]);
+  });
+
+  it("取消可勾选类型但仍有只读行 → 不算空集（与后端 empties_scope 同判据）", () => {
+    const rows = [
+      { scope_type: "school", scope_id: null, editable: true },
+      { scope_type: "class", scope_id: "c-1", editable: false },
+    ];
+    expect(scopePlan(rows, []).empties).toBe(false);
+  });
+
+  it("可勾选全集 = 已有可编辑行 + 没有行的那些：只有 self 时也得能勾上 school", () => {
+    const rows = [{ scope_type: "self", scope_id: null, editable: true }];
+    expect(editableScopeUniverse(rows)).toEqual(["school", "self"]);
+  });
+
+  it("勾上一个还没有行的类型 → 提交清单要带上它（否则界面看着提交了、库里没变）", () => {
+    const rows = [{ scope_type: "self", scope_id: null, editable: true }];
+    const plan = scopePlan(rows, ["self", "school"]);
+    expect(plan.submitted).toEqual(["school", "self"]);
+    expect(plan.added).toEqual(["school"]);
+    expect(plan.removed).toEqual([]);
+  });
+
+  it("服务端标了可编辑、前端副本没有的类型 → 以服务端口径为准收进来", () => {
+    const rows = [{ scope_type: "campus", scope_id: null, editable: true }];
+    expect(editableScopeUniverse(rows)).toEqual(["school", "self", "campus"]);
+  });
+});
+
+describe("staleDeletionPreview（TD-199：删除影响面过期时后端回带最新预览）", () => {
+  it("取出最新预览，界面据此刷新确认框再重试", () => {
+    const preview = {
+      role_code: "campus_operator",
+      name: "校区运营",
+      version: 5,
+      affected_users: 4,
+      permission_codes: [],
+      fingerprint: "b".repeat(64),
+    };
+    const error = new ApiError("影响面已变化", 409, {
+      code: "ROLE_DELETE_PREVIEW_STALE",
+      message: "删除影响面已变化（持有人集合与预览不一致），请刷新后重新确认",
+      latest_preview: preview,
+    });
+    expect(staleDeletionPreview(error)).toEqual(preview);
+  });
+
+  it("版本冲突 / 其他 409 不回预览：分流不能混", () => {
+    expect(
+      staleDeletionPreview(
+        new ApiError("冲突", 409, { code: "ROLE_VERSION_CONFLICT", latest: ROLE }),
+      ),
+    ).toBeNull();
+    expect(staleDeletionPreview(new ApiError("x", 404, { code: "ROLE_NOT_FOUND" }))).toBeNull();
+    expect(staleDeletionPreview(new Error("网络错误"))).toBeNull();
   });
 });

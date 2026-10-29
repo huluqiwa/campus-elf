@@ -31,6 +31,7 @@ declare module 'vue' {
     ElMenuItem: typeof import('element-plus/es')['ElMenuItem']
     ElOption: typeof import('element-plus/es')['ElOption']
     ElProgress: typeof import('element-plus/es')['ElProgress']
+    ElRadio: typeof import('element-plus/es')['ElRadio']
     ElRadioButton: typeof import('element-plus/es')['ElRadioButton']
     ElRadioGroup: typeof import('element-plus/es')['ElRadioGroup']
     ElResult: typeof import('element-plus/es')['ElResult']
@@ -48,6 +49,9 @@ declare module 'vue' {
     ElUpload: typeof import('element-plus/es')['ElUpload']
     MfaEnrollPanel: typeof import('./components/MfaEnrollPanel.vue')['default']
     MfaQrCode: typeof import('./components/MfaQrCode.vue')['default']
+    RoleCreateDialog: typeof import('./components/RoleCreateDialog.vue')['default']
+    RoleDeleteDialog: typeof import('./components/RoleDeleteDialog.vue')['default']
+    RoleScopePanel: typeof import('./components/RoleScopePanel.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
   }

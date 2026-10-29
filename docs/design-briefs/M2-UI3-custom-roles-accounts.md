@@ -1006,3 +1006,228 @@ rebase 合并 → main CI 全绿 → 删分支 → 文档回填 PR → §9 八�
 3. **决策 3**：187g **拆 3 个 PR**（A 后端契约补齐 / B 前端角色页 / C 前端权限账号页）。
 
 本节只记录这三条已拍板结论；实现过程中的其余取舍按 §18.4/§18.6 执行，不再逐条回头确认。
+
+## 19. TD-187g-B：前端角色页（新建 / 删除 / 数据范围 / `resettable` 判据）
+
+> 状态：**用户 2026-10-30 已拍板**（§19.7 四条全按推荐）。TD-187g 拆 3 个 PR 的决策见 §18.3 决策 3，
+> 本节是 §18.4「187g-B（前端角色页）」的展开。本点是**纯前端 PR**——后端契约已随 PR #18
+> 合入 main（合并提交 `8936c3f`），本点**不改后端一行代码**。
+
+### 19.1 目标与验收
+
+**范围**：`docs/milestone.md` §5.2 T7 里「角色页」的那一半（账号页那半是 TD-187g-C）。
+
+**现状核对（2026-10-30 读代码得到的事实，不是设想）**：
+
+| 后端能力 | 端点 | 权限码 | 前端入口 |
+|---|---|---|---|
+| 自定义角色创建 | `POST /school/roles` | `school.role.manage` | **无** |
+| 删除预览 | `POST /school/roles/{id}/delete/preview` | `school.role.manage` | **无** |
+| 删除执行 | `POST /school/roles/{id}/delete` | **`school.role.delete`** | **无** |
+| 角色级数据范围读 | `GET /school/roles/{id}/scopes` | `school.role.manage` | **无** |
+| 角色级数据范围预览 | `POST /school/roles/{id}/scopes/preview` | `school.role.manage` | **无** |
+| 角色级数据范围写 | `PUT /school/roles/{id}/scopes` | `school.role.manage` | **无** |
+| 权限码替换 | `PUT /school/roles/{id}/permissions` | `school.role.manage` | 有（M2-UI2） |
+| 恢复出厂 | `POST /school/roles/{id}/reset/{preview,}` | `school.role.manage` | 有，但按钮跟 `is_system` 走 |
+| 角色列表 / 权限目录 | `GET /school/roles` · `GET /school/permissions` | `school.role.manage` | 有 |
+
+前端现状：`frontend/apps/admin/src/views/RoleSettingsView.vue`（636 行）、
+`frontend/apps/admin/src/rbac-logic.ts`（147 行）、`rbac-logic.test.ts`（236 行）、
+`frontend/e2e/admin-roles.spec.ts`（483 行）、`frontend/e2e/helpers/rbac-mock.ts`（382 行）、
+`frontend/packages/api-client/src/rbac.ts`（118 行）。
+
+**三处契约缺口**（前端补，后端不用改）：
+
+1. `RoleView` 缺 `bindable`（TD-187d 下发）与 `resettable`（TD-200，PR #18 下发）——
+   `frontend/` 全仓 grep `resettable|bindable` **0 命中**。
+2. `RoleResetInput` 缺 `self_grant_ack`——后端 `RoleResetPayload` 自 TD-194 起就有这个字段，
+   前端 `rbac.ts:48-52` 没带（今天没人给「恢复出厂」传 ack，是因为前端还没接自扩权那半）。
+3. 新端点一个都没接：`createRole` / `previewRoleDeletion` / `deleteRole` / `listRoleScopes` /
+   `previewRoleScopes` / `replaceRoleScopes`。
+
+**一个必须先知道的事实（影响决策 B2）**：**角色码与角色名的格式校验在 HTTP 路径上落不到后端的
+业务错误契约**。`RoleCreatePayload.code` 挂 `pattern=ROLE_CODE_PATTERN`（`^[a-z][a-z0-9_]{2,62}$`，
+`backend/app/rbac/admin.py:75`）、`name` 挂 `@field_validator` 抛 `ValueError`——**这两条都撞 Pydantic**，
+返回的是 FastAPI 的**数组形 422**（`[{loc,msg,type}]`），**不是** `{code,message}` 形状。
+而服务层那道 `ROLE_NAME_NOT_BLANK`（`admin.py:1266`）只在**直调服务层**时命中，走 HTTP 时 Pydantic 先拦了。
+→ 前端不预检，用户提交空名字会拿到 `String should match pattern ...` 这种读不懂的提示。
+
+**验收（对应 §18.1 的 A1–A4 角色页那半）**：
+
+- **B1** 能新建自定义角色：`code` / `name` 的前端校验与后端**同一判据**（TD-198 表单侧那半）；
+  初始权限二选一（显式清单 / 复制同租户可编辑角色）能被表达；同名同码冲突（409 `ROLE_CODE_TAKEN`）
+  有可读提示。
+- **B2** 能删除自定义角色：两步（预览 → 确认）→ 逐字 code + 理由 ≥10 字 + `version` + **影响面指纹**
+  （TD-199）原样回传；`409 ROLE_DELETE_PREVIEW_STALE` 时回带最新影响面，界面能重试。
+- **B3** 能编辑角色级数据范围：可改 `school`/`self` 两类；`class`/`course` 只读展示并写清
+  「为什么不可改」（§13.2 决策③：这两类必须绑具体 id，本端点没有那个入参通道）；
+  空清单合法且预览提示「N 名持有人将看不到任何数据」。
+- **B4** 「恢复出厂」按钮跟服务端下发的 **`resettable`** 走，**不再跟 `is_system` 走**（TD-200）；
+  `is_system` 降级为纯展示标签（内置/自建）。
+- **B5** 权限区与范围区共用 `roles.version`（TD-202）时**不静默互相踩**：范围保存 409 自动采用
+  `latest`（沿用现有 `conflictedLatestRole` 路径）。
+- **B6** 纯逻辑抽 `rbac-logic.ts` 走单测；配 mock E2E。
+
+**不做（本期）**：账号↔角色绑定、账号启停、MFA 重置入口搬迁（属 TD-187g-C / §18.6 已定）、
+角色继承/模板、权限码按人直授、账号硬删。
+
+### 19.2 候选方案
+
+#### 决策 B1：可手工授的数据范围类型清单（`{school, self}`）怎么给前端
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 | 对后端的影响 |
+|---|---|---|---|---|---|
+| **A（推荐）** 前端复刻一份常量 `EDITABLE_SCOPE_TYPES = {school, self}`，单测把字面量钉死并注释指向 `admin.py:83` | 不动后端；本点保持**纯前端 PR**（§18.3 决策 3） | 零契约变更；后端仍是唯一门禁（提交不可授类型 → 422 `SCOPE_TYPE_NOT_EDITABLE`） | 后端将来加一类可授范围，前端要跟着改；不同步时**少一个可选项**（不是给出错误选项） | 失败模式是「少给一个选项」，不是「做错操作」——运营点不到但不会做错 | 无 |
+| B 后端在 `GET /school/roles/{id}/scopes` 的响应里下发清单 | 响应从 `list[...]` 改成对象 | 前端零复刻 | **改已交付端点的响应形状** → 破坏已有后端用例；且本点变前后端混合 PR，与 §18.3 决策 3 冲突 | 前端从"少一个选项"变成"多一个错选项"（后端把 `class` 列成可授）——但后端自己不会这么写 | 改契约 + 改后端用例 |
+| C 新增只读端点下发清单 | 新端点 | 前端零复刻 | 多一个端点、多一次请求；且要回答「权限码是什么」——它是**租户域**的，端点要挂哪个码又是一次决策 | 同 B | 新端点 + 决策 |
+
+#### 决策 B2：角色码 / 角色名的格式校验放哪
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 | 对后端的影响 |
+|---|---|---|---|---|---|
+| **A（推荐）** 前端复刻 `code` 正则与 `name` 去空白非空两条判据，提交前本地拦 | 前端预检 | 用户拿到中文提示（「角色码只能是小写字母开头的 3–63 位小写字母/数字/下划线」「角色名不能为空或全空白」）；数组形 422 不再出现在这条路 | 前端复刻了一份**格式规则**（不是内容清单）——后端改正则时前端要跟着改 | 复刻漂移的后果是「前端放行、后端 422（数组形）」，不是「前端拦住合法输入」 | 无 |
+| B 后端把 `code`/`name` 的格式校验从 Pydantic 下放到服务层，返回 `{code,message}` | 契约升级 | 前端零复刻；错误契约统一（与 §18.1 A4 同族） | 改**已交付**端点的错误形状 → 已有后端用例要改；本点变前后端混合 PR | 改已交付契约要过一轮审查，且会让 187g-A 的「契约已定」结论作废 | 改契约 + 改用例 |
+| C 前端只做粗校验（长度 + 字符集），精确交给服务端 | 折中 | 复刻更少 | 非法码仍然撞数组形 422 | 用户体验没解决 | 无 |
+
+#### 决策 B3：新建角色的「初始权限」怎么在界面上表达
+
+后端 `RoleCreatePayload` 是**二选一**：给 `permission_codes`（默认空集）**或** `copy_from_role_id`
+（复制同租户可编辑角色）。**两份非空同时给 → 422 `ROLE_INITIAL_SOURCE_AMBIGUOUS`**（后端明确
+「不选以显式清单为准、静默忽略复制源」——配置类接口不能猜）。
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 |
+|---|---|---|---|---|
+| **A（推荐）** 对话框里单选「从空白开始 / 复制现有角色」；选复制时选一个**可编辑**角色；权限勾选框只在「空白」模式下可用 | 与后端二选一契约一一对应，用户不可能表达出后端拒绝的组合 | 复制源下拉要只列 `editable=true` 的角色 | 复制时看不到「会复制哪些权限码」的预览（后端也没提供这个预览端点） | 低 |
+| B 只做「从空白开始」，复制本期不做 | 最省 | 运营想「照着教师 B 端建一个」得手抄一遍权限码；后端能力白给 | 低 |
+| C 两个独立控件（复制源下拉 + 权限勾选区），提交时以勾选为准 | 界面上更自由 | 用户可能同时填了两份，提交后 422 `ROLE_INITIAL_SOURCE_AMBIGUOUS`（或更糟：以为复制生效了） | 中 |
+
+#### 决策 B4：删除入口按哪个权限码显示
+
+后端**预览**要 `school.role.manage`、**执行**要 `school.role.delete`（决策 #6：删角色另给专用码）。
+页面路由本身要 `school.role.manage`，所以「只有 `role.manage`、没有 `role.delete`」的管理员
+**能进页面、能看到角色、但删不了**。
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 |
+|---|---|---|---|---|
+| **A（推荐）** **执行控件**按 `school.role.delete` **是否在 `auth.user.permissions` 里**决定给不给；**入口**按「是不是内置角色」决定给不给（内置角色服务端恒 409 `ROLE_NOT_DELETABLE`，给了也是死路）。没有执行码时对话框降级为**只读影响面 + 一句「你没有删除角色权限（school.role.delete）」**，不给必然 403 的按钮 | 界面与后端权限一致；权限拆分（决策 #6）在前端也看得见 | 多一条只读分支 | 无 |
+| B 入口按 `school.role.manage` 显示，执行时才 403 | 简单 | 给一个必然 403 的按钮——死路 | 中 |
+| C 两个码都要才显示入口 | 简单 | 把「能预览影响面」也藏了，运营连影响面都看不到 | 低 |
+
+> **2026-10-30 实施后修正（独立审查 m13）**：本节 A 方案原措辞「删除按钮按 `school.role.delete` 决定显不显示」自相矛盾——它随后又说没有执行码时要给只读影响面（那就必须先把入口给出来）。
+> 落地的口径是**入口与执行分成两件事**：入口按「是不是内置角色」给（自定义角色恒给，内置角色不给），
+> **执行控件**按 `school.role.delete` 给；缺执行码时入口文案变成「查看删除影响面」，对话框只给影响面
+> 不给确认表单。§19.3、§19.4 的同一处措辞一并按此修正。
+
+### 19.3 选择结论
+
+**决策 B1 选 A**（前端复刻清单 + 单测钉字面量 + 登记 TD）：理由——① 本点的核心约束是
+「保持纯前端 PR」（§18.3 决策 3 已拍板），B/C 都要动后端；② 失败模式是**少一个可选项**，
+不是给出错误选项（后端仍是唯一门禁，提交不可授类型会 422 `SCOPE_TYPE_NOT_EDITABLE`）；
+③ 复刻的是**可授清单**这一条窄规则，且用单测把字面量钉死并注释指向后端常量行号。
+**登记 TD-247**：可手工授的范围类型清单未由后端下发，前端复刻了一份（已延后到 M3 / 与 TD-226 同批）。
+
+**决策 B2 选 A**（前端预检 `code` 正则 + `name` 非空）：理由——① 撞 Pydantic 的两条校验在 HTTP
+路径上返回**数组形 422**，用户读不懂，前端不预检就是让用户去撞它；② B/C 要么改已交付契约、
+要么体验没解决；③ 复刻的是**格式规则**（不是内容清单），与 `sensitive_self_grant` 那条
+「清单必须后端下发」的原则不冲突——那条原则针对的是**会增删的内容集合**，格式规则前端必须知道
+才能做即时校验。**后端改正则时前端要跟着改**：登记 TD-248（格式规则双份维护，钉在单测里）。
+
+**决策 B3 选 A**（单选二选一 + 复制源只列可编辑角色）：理由——后端契约就是二选一且明确拒绝
+「两份非空」，界面必须能表达这个约束；C 会造出后端拒绝的组合。
+
+**决策 B4 选 A**（**执行控件**跟 `school.role.delete`，无执行码时给只读影响面）：理由——决策 #6
+把「能配」与「能删」分成两个码，前端若不跟着分，就等于把后端特意拆开的职责又合回去；
+B 会给一个必然 403 的按钮；C 会把「能预览影响面」也藏了（运营连影响面都看不到）。
+**落地口径（2026-10-30 实施后修正，见 §19.2 的说明）**：入口按「是不是内置角色」给（自定义角色恒给），
+**执行控件**按 `school.role.delete` 给；缺执行码时入口文案改成「查看删除影响面」、对话框降级为只读预览。
+
+### 19.4 实现顺序（TDD 红 → 绿）
+
+**第 0 步（契约对齐，先做）**：`frontend/packages/api-client/src/rbac.ts`
+1. `RoleView` 加 `bindable: boolean` + `resettable: boolean`（后端 PR #18 已下发）。
+2. `RoleResetInput` 加 `self_grant_ack?: boolean`。
+3. 新增类型与方法：`RoleCreateInput` / `createRole`、`RoleDeletionPreview` /
+   `previewRoleDeletion` / `RoleDeleteInput` / `deleteRole`、`RoleScopeRow` /
+   `listRoleScopes`、`ScopeChangePreview` / `previewRoleScopes`、`RoleScopeInput` /
+   `replaceRoleScopes`。
+4. **同步**：`rbac.test.ts` 的 `ROLE_VIEW` fixture 加两个字段；`rbac-mock.ts` 的 `RoleFixture`
+   加两个字段（**必填**，让 TS 把所有漏改的 fixture 点出来）。
+
+**第 1 步（纯逻辑，先红后绿）**：`frontend/apps/admin/src/rbac-logic.ts` + `rbac-logic.test.ts`
+- `ROLE_CODE_PATTERN`（字面量复制 + 注释指向 `admin.py:75`）、`roleCodeError(code)`、
+  `roleNameError(name)`（TD-198 表单侧）。
+- `deleteConfirmError(roleCode, confirmCode, reason)`（逐字 code + 理由 ≥10，与
+  `resetConfirmError` 同型）。
+- `EDITABLE_SCOPE_TYPES`、`SCOPE_LABELS`、`scopeDiff(current, next)`。
+- `roleDeleteGate(permissions)` → 能不能显示删除入口 / 能不能执行。
+- `resetUnavailableReason(role)` → `resettable=false` 时的一句人话（前端不再自己判 `is_system`）。
+
+**第 2 步（页面）**：`RoleSettingsView.vue`
+1. **「恢复出厂」按钮改跟 `resettable` 走**（`RoleSettingsView.vue:425`）——`is_system` 只做标签。
+2. **新建角色对话框**：code / name / 初始权限二选一 / 复制源 / 理由。
+3. **删除角色**：入口按「是不是内置角色」给（自定义角色恒给），**执行控件**按
+   `school.role.delete` 给（缺码时对话框降级为只读影响面）；预览（影响面 + 指纹）→ 确认框
+   （逐字 code + 理由）→ 执行（回传 `version` + `fingerprint`）；`ROLE_DELETE_PREVIEW_STALE` 时
+   回带最新影响面并可重试。
+4. **数据范围卡片**：读 `GET /roles/{id}/scopes` → 可改两类 checkbox + 不可改两类只读说明 →
+   预览（added/removed/affected_users/empties_scope/retained_non_editable/newly_reaching_self/
+   requires_confirmation）→ 确认 → `PUT`（带 `version` + `reason` + `self_grant_ack`）。
+5. **TD-202**：范围区保存用**当前** `role.version`（权限区保存后 `version` 已 +1 并回写 `roles`
+   数组 → 自动同步）；409 走现有 `applyConflict`（载入 `latest` + 提示），不静默覆盖。
+
+**第 3 步（mock E2E）**：`frontend/e2e/helpers/rbac-mock.ts` 扩路由与 `captures`
+（create / deletePreview / delete / scopes 读 / scopes 预览 / scopes 写，**有状态**：删掉后列表里
+真的没有它）；新建 `frontend/e2e/admin-role-pages.spec.ts`；现有 `admin-roles.spec.ts` 只改
+fixture 字段与「恢复出厂」那条用例的判据注释。
+
+**第 4 步（收尾）**：本地前端门禁（lint / format / typecheck / 单测 / mock E2E）→ 独立审查 →
+commit → push → PR → 远端 CI 全绿 → rebase 合并 → main CI 全绿 → 删分支 → 文档回填 PR → §9 八段汇报。
+
+### 19.5 测试策略与门禁
+
+- **单元（`rbac-logic.test.ts`）**：新建表单校验（code 正则的**每个**拒绝分支 + name 全空白）、
+  删除确认校验、范围差异、`roleDeleteGate`（有/无 `school.role.delete`）、
+  `resetUnavailableReason`。
+- **单元（`packages/api-client/src/rbac.test.ts`）**：新方法的路径 / 方法 / 请求体形状
+  （尤其 `deleteRole` 必须带 `fingerprint`、`replaceRoleScopes` 必须带 `scope_types`+`version`）。
+- **mock E2E（`admin-role-pages.spec.ts`）**：新建成功 / 同码冲突 409 有提示 / 删除两步（预览 →
+  确认 → 执行，断言捕获的请求体带 `fingerprint` 与 `version`）/ 删除理由不足 10 字不发请求 /
+  `resettable=false` 时「恢复出厂」按钮**不出现** / 范围保存（断言 `PUT` 体）/ 范围 409 自愈 /
+  范围预览 `empties_scope` 提示 / `class`/`course` 行不可改且有说明。
+- **门禁**：前端 `lint` / `format` / `typecheck` / 单测 / mock E2E；**后端零改动**，
+  本点不需要 `ruff`/`mypy`/`bandit`/`alembic check`（`app/**` 与 `alembic/**` 都不碰）。
+- **无全栈 E2E**：本批不做（TD-183/192 仍在 backlog；本地 8000 端口被占）。
+
+### 19.6 预判技术债
+
+- **TD-247（新增）**：可手工授的数据范围类型清单未由后端下发，前端复刻了
+  `EDITABLE_SCOPE_TYPES = {school, self}`。失败模式是「少一个可选项」不是「做错操作」，
+  故本期不阻塞；处置 = 已延后（M3 或与 TD-226 的 API 契约统一同批）。
+- **TD-248（新增）**：角色码格式规则（`^[a-z][a-z0-9_]{2,62}$`）在前后端各存一份。
+  用单测把字面量钉死并注释指向后端常量行号；后端改正则时必须同批改前端。
+- **TD-239（既有余债，本点相关）**：库层 `roles.name` 的 CHECK 只覆盖 ASCII 空白，
+  接口层用 Python `strip()` 更严（U+3000 接口拒、库收）。**前端表单按 `strip()` 口径**
+  （全 Unicode 空白）→ 与接口层一致，与库层差一档（库收、前端拒，方向安全）。
+- **TD-202（既有余债，本点缓解）**：权限区与范围区共享 `roles.version` → 一侧保存会让另一侧草稿
+  409。本点缓解：**保存时用当前 `role.version`**（权限保存后 `version` 已回写），
+  409 时自动采用 `latest` 并提示。**没有**做「两个区同时脏」——那需要两个独立版本列（后端改动），
+  本期不做。
+- **MFA 重置入口仍在角色页**：权限账号页（TD-187g-C）做出来后它更贴切，但搬走要动 M2-UI2
+  已交付的页面与它的 E2E → 本期**不搬**（§18.6 已定），187g-C 收尾时复核。
+- **`school.role.delete` 缺失时的半死路**：按决策 B4 处理（只读影响面 + 一句说明），
+  不是新债，但**要在界面上说清楚**，否则运营会以为按钮坏了。
+
+### 19.7 高风险确认
+
+本点动的是**权限面**（角色增删、范围编辑），按 AGENTS.md §11.7 属「权限」类，
+**需用户确认后才编码**。§18.7 已拍板的三条（决策 1/2/3）覆盖了 TD-187g 的整体形状。
+**§19.2 的四条取舍（B1–B4）用户 2026-10-30 已拍板，四条全按推荐**：
+
+| 决策 | 拍板结论 | 关键理由 |
+|---|---|---|
+| **B1** 可手工授范围类型清单 | **前端自己写一份**（`EDITABLE_SCOPE_TYPES = {school, self}`） | 保持本点为纯前端 PR；失败模式是「少一个可选项」不是「做错操作」；后端仍是唯一门禁（422 `SCOPE_TYPE_NOT_EDITABLE`） |
+| **B2** `code`/`name` 格式校验 | **前端先查一遍** | 这两条撞 Pydantic → 数组形 422，用户读不懂；后端那道 `ROLE_NAME_NOT_BLANK` 只在直调服务层时命中，走 HTTP 时 Pydantic 先拦 |
+| **B3** 新建角色初始权限 | **单选，只能选一种** | 后端契约就是二选一且明确拒绝「两份非空」；界面必须能表达出这个约束 |
+| **B4** 删除入口权限码门禁 | **按 `school.role.delete` 显示** | 决策 #6 特意把「能配」与「能删」分成两个码；没有执行码时给只读影响面 + 一句说明，不给必然 403 的按钮 |
+
+落地时不得偏离这四条。
