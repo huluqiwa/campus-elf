@@ -4,12 +4,12 @@
 的最小助手，避免每个测试文件各写一份 SQL。
 """
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pyotp
 from sqlalchemy import text
 
-from app.auth import service
+from app.auth import revocation, service
 from app.config import get_settings
 from app.db.session import db_session
 from app.security.encryption import (
@@ -213,6 +213,55 @@ async def platform_refresh_rows() -> list[dict[str, object]]:
                 await session.execute(
                     text(
                         "select mfa_verified, revoked_reason from platform_refresh_tokens "
+                        "order by issued_at, id"
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row) for row in rows]
+
+
+async def seed_platform_session(user_id: UUID, *, ttl_seconds: int = 86400) -> UUID:
+    """插入平台刷新令牌行并登记 Redis 会话标记，返回 family_id。
+
+    `ttl_seconds` 传负数得到**已过期**家族：未撤销但换不出新令牌，用来钉住"只数还活着的"。
+    过期家族不登记 Redis 标记——标记的 TTL 就是刷新令牌有效期，过期行在生产里本来就没有
+    活着的标记，硬登记会造出"过期了还能过访问令牌检查"的假状态。
+    """
+
+    family_id = uuid4()
+    async with db_session(platform=True) as session:
+        await session.execute(
+            text(
+                "insert into platform_refresh_tokens "
+                "(jti, family_id, platform_user_id, token_hash, expires_at, last_seen_at) "
+                "values (:jti, :fid, :uid, :hash, "
+                "now() + make_interval(secs => :ttl), now())"
+            ),
+            {
+                "jti": uuid4(),
+                "fid": family_id,
+                "uid": user_id,
+                "hash": uuid4().hex + uuid4().hex,
+                "ttl": ttl_seconds,
+            },
+        )
+    if ttl_seconds > 0:
+        await revocation.register_session(family_id, realm="platform", ttl_seconds=ttl_seconds)
+    return family_id
+
+
+async def platform_refresh_families() -> list[dict[str, object]]:
+    """读取平台刷新令牌行的家族与撤销状态。"""
+
+    async with db_session(platform=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "select family_id, revoked_at, revoked_reason from platform_refresh_tokens "
                         "order by issued_at, id"
                     )
                 )

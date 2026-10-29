@@ -56,7 +56,7 @@ from app.personnel.account_admin import (
     activate_user,
     deactivate_user,
 )
-from app.personnel.mfa_admin import MfaAdminError, reset_user_mfa
+from app.personnel.mfa_admin import MfaAdminError, MfaResetResult, reset_user_mfa
 from app.security.encryption import decode_kek, encrypt_secret, mfa_aad
 from app.security.totp import generate_totp_secret
 from tests.support.auth import seed_tenant_user
@@ -300,7 +300,8 @@ async def _seed_session(
     """插一条刷新令牌并登记 Redis 会话标记，返回 family_id（= session_id 口径）。
 
     `ttl` 传负数（如 `timedelta(hours=-1)`）得到**已过期**家族：它未撤销但换不出新令牌，用来钉住
-    "停用只撤还活着的那批"。
+    "停用只撤还活着的那批"。过期家族不登记 Redis 标记——标记 TTL 就是刷新令牌有效期，
+    过期行在生产里本来就没有活着的标记，硬登记会造出假状态。
     """
 
     family_id = uuid4()
@@ -320,7 +321,10 @@ async def _seed_session(
                 "ttl": ttl,
             },
         )
-    await revocation.register_session(family_id, realm="tenant")
+    if ttl > timedelta(0):
+        await revocation.register_session(
+            family_id, realm="tenant", ttl_seconds=int(ttl.total_seconds())
+        )
     return family_id
 
 
@@ -511,6 +515,45 @@ async def test_deactivate_revokes_every_family_and_clears_redis_state(stack: Non
     # "谁停用的"必须查得出来：actor 落的是操作者本人，不是目标账号
     assert audits[0]["actor_id"] == str(seeded["operator_id"])
     assert audits[0]["resource_id"] == str(seeded["teacher_id"])
+
+
+async def test_mfa_reset_counts_only_live_families(stack: None) -> None:
+    """Given 教师两条活跃会话与一条已过期家族；When 管理员重置其 MFA；Then 只数还活着的那些。
+
+    停用侧已经这么算了（`test_deactivate_revokes_every_family_and_clears_redis_state`），
+    MFA 重置侧此前按"全部未撤销"计数，同一个 `sessions_revoked` 键跨动作对比会误判（TD-231）。
+    """
+
+    school_code = f"SCH-STATUS{uuid4().hex[:6].upper()}"
+    seeded = await _seed(school_code)
+    tenant_id = seeded["tenant_id"]
+    operator = _principal(seeded["operator_id"], tenant_id)
+    teacher_id = seeded["teacher_id"]
+    await _enable_mfa(tenant_id, teacher_id)
+    first_family = await _seed_session(tenant_id, teacher_id)
+    second_family = await _seed_session(tenant_id, teacher_id)
+    expired_family = await _seed_session(tenant_id, teacher_id, ttl=timedelta(hours=-1))
+
+    result = await reset_user_mfa(operator, teacher_id, reason=REASON)
+
+    assert isinstance(result, MfaResetResult)
+    assert result.sessions_revoked == 2
+    families = {first_family, second_family}
+    for family_id in families:
+        assert await revocation.session_exists(family_id) is False
+
+    # 撤销动作仍是全量（死行一并标上），但计数的只有活着的那些
+    rows = await _refresh_rows(tenant_id, teacher_id)
+    assert {row["family_id"] for row in rows} == families | {expired_family}
+    assert all(row["revoked_at"] is not None for row in rows)
+
+    audits = await _audit_rows("school.user.mfa_reset", tenant_id)
+    assert len(audits) == 1
+    metadata = audits[0]["metadata_json"]
+    assert set(metadata) == {"sessions_revoked", "reason"}
+    # 布尔是 int 的子类：`True == 2` 恒假，但 `True == 1` 会蒙混过关，类型也得钉住
+    assert type(metadata["sessions_revoked"]) is int
+    assert metadata["sessions_revoked"] == 2
 
 
 async def test_status_matrix_guards_and_denied_audits(stack: None) -> None:

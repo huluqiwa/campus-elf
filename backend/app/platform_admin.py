@@ -226,8 +226,12 @@ async def reset_platform_mfa(*, account: str, email: str | None = None) -> Reset
             (
                 await session.execute(
                     text(
+                        # 只数**还活着**的家族（未撤销且未过期），与租户侧 MFA 重置、
+                        # 停用侧口径一致：审计里的 `sessions_revoked` = "断了几台设备"（TD-231）。
+                        # 撤销语句仍是全量未撤销——死行一并标上不花钱，但计数要准。
                         "select distinct family_id from platform_refresh_tokens "
-                        "where platform_user_id = :uid and revoked_at is null"
+                        "where platform_user_id = :uid "
+                        "and revoked_at is null and expires_at > now()"
                     ),
                     {"uid": user_id},
                 )

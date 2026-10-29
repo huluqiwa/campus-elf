@@ -130,6 +130,26 @@ async def _audit_actions() -> list[str]:
         return list((await session.execute(text("select action from audit_logs"))).scalars().all())
 
 
+async def _audit_metadata(action: str) -> list[dict[str, object]]:
+    """按时间顺序读取某动作的审计 metadata。"""
+
+    async with db_session(platform=True) as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "select metadata_json from audit_logs where action = :action "
+                        "order by created_at, event_id"
+                    ),
+                    {"action": action},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(row["metadata_json"] or {}) for row in rows]
+
+
 async def test_bs_m1c_first_login_password_gate_and_change(client: AsyncClient) -> None:
     """首登必须改密：门禁拦截业务接口 → 改密 → 新令牌可用、旧令牌与刷新令牌立即失效。"""
 
@@ -175,6 +195,11 @@ async def test_bs_m1c_first_login_password_gate_and_change(client: AsyncClient) 
     actions = await _audit_actions()
     assert "auth.login.success" in actions
     assert "auth.password.changed" in actions
+
+    # 布尔语义改用新键 `sessions_all_revoked`；`sessions_revoked` 现在只放整数条数（TD-231）
+    changed_metadata = (await _audit_metadata("auth.password.changed"))[-1]
+    assert changed_metadata["sessions_all_revoked"] is True
+    assert "sessions_revoked" not in changed_metadata
 
 
 async def test_bs_m1c_refresh_reuse_revokes_family(client: AsyncClient) -> None:
