@@ -6,8 +6,14 @@
   查询本身留审计（防枚举/滥用，限流见 M6）；
 - 不能重置自己（自助走恢复码/关闭 MFA）、不能重置校方超管（由平台 CLI 兜底）、
   不能经此接口触碰平台账号（租户连接 + users 表双重隔离）；
-- 重置即账号级安全事件：撤销全部刷新家族、清空 MFA 与锁定状态、`token_version+1`，
-  提交后删除 Redis 会话标记与待激活 secret；日志/审计不含 secret、恢复码或登录名明文。
+- 重置即账号级安全事件：撤销全部**未撤销**的刷新家族（含已过期还没清理的死行，所以
+  `sessions_revoked` 按"未撤销"而非"仍活跃"计数——与停用侧的口径差异见 TD-231 与
+  `design.md` §5.12）、清空 MFA 与锁定状态、`token_version+1`，
+  提交后删除 Redis 会话标记与待激活 secret；日志/审计不含 secret、恢复码或登录名明文；
+- 取账号级 advisory lock **之前**先做一次无锁的本租归属探针，且探针跑在自己的短事务里
+  （跑完即归还连接，未命中的 404 不会连同拒绝审计占住两条连接）：那把锁的 key 只有
+  `realm + user_id`、不含租户，先取锁会让一次注定 404 的跨租请求排进**别租账号**的
+  登录/刷新队列（TD-230，与 `app/personnel/account_admin.py` 同口径）。
 """
 
 import logging
@@ -222,6 +228,28 @@ async def reset_user_mfa(
         raise MfaAdminError(
             "MFA_SELF_RESET", "不能重置自己的 MFA；请使用恢复码或自助关闭", 409
         )
+
+    # 取账号锁之前先做一次**不带锁**的本租归属探针，且探针跑在**自己的短事务**里（跑完即归还
+    # 连接），与 `account_admin._change_status` 同一口径。advisory lock 的 key 只有
+    # `realm + user_id`、不含 tenant_id，让跨租 id 直接进锁区间，本事务就会排在**别租那个账号**
+    # 的登录/刷新事务后面——404 的耗时既泄露"这个 id 存在且正在写会话"，反复提交还能定向拖慢
+    # 那条登录链路；探针若挂在主事务里，未命中的 404 还会连同拒绝审计占住两条连接。
+    async with db_session(tenant_id=tenant_id) as probe_session:
+        belongs = (
+            await probe_session.execute(
+                text("select 1 from public.users where id = :uid and tenant_id = :tid"),
+                {"uid": user_id, "tid": tenant_id},
+            )
+        ).scalar_one_or_none()
+    if belongs is None:
+        await _audit_denied(
+            principal,
+            action="school.user.mfa_reset_denied",
+            resource_id=user_id,
+            metadata={"reason": "USER_NOT_FOUND"},
+            request_id=request_id,
+        )
+        raise MfaAdminError("USER_NOT_FOUND", "用户不存在", 404)
 
     async with db_session(tenant_id=tenant_id) as session:
         await acquire_user_lock(session, realm="tenant", user_id=user_id)

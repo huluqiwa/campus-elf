@@ -1070,8 +1070,9 @@ async def test_unbinding_revokes_capability_without_touching_the_session(
 async def test_binding_rejections_are_audited_and_change_nothing(client: AsyncClient) -> None:
     """BS-M2UI3-D：自绑 / 超管角色 / 超管目标 / 学生目标，四类拒绝各自留痕，库里绑定不变。
 
-    自绑禁令是"建含敏感码的角色 → 绑给自己"这条链的唯一承重墙（简报 §14.5）：它必须在任何
-    数据库读写之前生效。其余三条把"谁能被绑定"收在服务端，前端过滤 `bindable` 只是体验。
+    自绑禁令是"建含敏感码的角色 → 绑给自己"这条链的承重墙（简报 §14.5）：它先于对目标账号的
+    任何读取与状态写入生效（判据只比较 `Principal` 与路径参数；拒绝审计另起独立事务）。其余
+    三条把"谁能被绑定"收在服务端，前端过滤 `bindable` 只是体验。
     """
 
     school_code = f"SCH-CR{uuid4().hex[:6].upper()}"

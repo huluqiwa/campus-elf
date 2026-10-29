@@ -91,12 +91,22 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
         "role_permissions": "同上：绑定 diff 要做两次「角色集合 → 权限码并集」（替换前后各一次）",
         "users": "同上：目标账号的存在性/类型/状态与 `roles_version` CAS 都在同一把 `FOR UPDATE` 行锁内",
     },
+    "app/personnel/account_admin.py": {
+        "*": (
+            "权限账号停用/启用（M2-UI3 TD-187e）：写的是 `users.status`/`token_version` 与 "
+            "`refresh_tokens` 撤销——安全状态迁移与凭证吊销，不是业务数据读取（与 "
+            "`app/auth/service.py`、`app/personnel/mfa_admin.py` 同类）；目标行按 user_id + "
+            "显式 `tenant_id` 在无锁归属探针 → advisory lock → `FOR UPDATE` 行锁内定位，"
+            "租户连接 + RLS 双重隔离；拒绝路径在独立事务写 denied 审计"
+        )
+    },
 }
 
 # 豁免条目上限：超过就说明"直连"正在变成常态，必须回头收敛到仓储。
 # M2-UI2 +2（rbac/admin.py 与 personnel/mfa_admin.py 都是授权判据/凭证本身，无仓储原语）。
 # M2-UI3 +1（rbac/binding.py 同理：绑定行就是授权判据，且需按集合批量读写）。
-MAX_EXEMPT_MODULES = 14
+# M2-UI3 +1（personnel/account_admin.py：状态迁移与凭证吊销，与 auth/service.py 同类）。
+MAX_EXEMPT_MODULES = 15
 
 # 已知命名盲区（M2-ORG02 复审登记）：`sa_update(Model)` 形态不匹配下方 update 正则。
 # 当前两处使用（retry CAS / 看门狗收口）均为「行经仓储取得 + 条件更新」的正当路径且 RLS 生效；

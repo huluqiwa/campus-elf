@@ -71,6 +71,13 @@ jobs:
           uv run mypy app tests
           uv run mypy scripts
 
+      - name: 迁移漂移检查（TD-223）
+        # 此前 CI 只跑应用测试，模型与迁移漂移要到本地手动 `alembic check` 才暴露。
+        # `-x db_url` 是 alembic/env.py 支持的显式连接入口（不依赖 MIGRATION_DATABASE_URL）。
+        run: |
+          uv run alembic -x db_url="$TEST_DATABASE_URL" upgrade head
+          uv run alembic -x db_url="$TEST_DATABASE_URL" check
+
       - name: 测试（单元 + 集成 + 业务场景 + 关键包分支覆盖率）
         # `--cov-fail-under` 只比较 TOTAL，会把四个关键包的平均值当门槛、掩盖单包倒退；
         # 因此只产出 coverage.json，逐包阈值由下一步脚本检查。
