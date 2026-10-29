@@ -178,7 +178,7 @@
 **业务场景（真实基础设施，全链路）**
 - `BS-M2UI3-A 从零建角色并授人`：超管建「教务处职员」→ 勾 `school.personnel.view`+`school.personnel.update` → 绑给某教师 → 该教师**不重登**下一个请求 `PUT /school/students/{id}` 由 403 变 200；审计两段（角色创建 + 绑定）串得上。
 - `BS-M2UI3-B 回收即时生效`：解绑 → 下一个请求 403；会话不断（与 M2-UI2 场景 1 同口径）。
-- `BS-M2UI3-C 停用在读账号`：给一位教务人员开号并绑定 → 停用 → 该账号所有接口 401、`/auth/me` 401、刷新重放 401、登录被拒；审计不含明文；重启用后恢复。
+- `BS-M2UI3-H 停用在读账号`：给一位教务人员开号并绑定 → 停用 → 该账号所有接口 401、`/auth/me` 401、刷新重放 401、登录被拒；审计不含明文；重启用后恢复。（原拟编号 C 与 §13.5 的范围场景冲突，TD-187e 改用 H。）
 - `BS-M2UI3-D 自扩权路径`：持 `role.manage` 的管理员 ① 新建角色含 `school.personnel.sensitive.read` 并绑给自己 → 无 ack 422 / 有 ack 200 且 `school.role.self_grant` 留痕；② 试图给自己绑已有角色 → 403/422（按 §8 的待确认项）。
 - `BS-M2UI3-E 删除角色`：预览显示 `affected_users=2` → 未逐字确认 422、理由过短 422、版本过期 409 → 正确提交后角色与其映射消失，两个账号权限并集立即缩小，审计含删除前完整码集快照。
 - `BS-M2UI3-F 越权与跨租`：无 `school.role.manage` 的角色接口 403；无 `permission_account.manage` 的绑定/启停 403；他租角色 id / 用户 id 一律 404 且不泄露存在性；平台域码出现在权限集 → 422。
@@ -447,7 +447,7 @@
 
 ### 14.8 TD-194 helper 与 `reset_role` 接线
 
-- 抽 `guard_self_grant(...)`：把"判据结果 → 422（ack/理由）→ `*.denied` + `school.role.self_grant`（打断）→ 成功侧 `school.role.self_grant`"封在一处，`kind` 作为入参（不拆两个函数）。
+- 抽 `_guard_self_grant(...)`：把"判据结果 → 422（ack/理由）→ `*.denied` + `school.role.self_grant`（打断）→ 成功侧 `school.role.self_grant`"封在一处，`kind` 作为入参（不拆两个函数）。
 - 接线范围：`replace_role_permissions`、`replace_role_scopes`、`reset_role`（**权限 + 范围两个维度**）。绑定不接（§14.5）。
 - `reset_role` 的 payload 增加 `self_grant_ack: bool = False`；范围侧是可达路径（`school_admin` 出厂范围含 `school`，见 TD-194 备注），未带 ack 的重置会 422。**187g 之前**，前端没有确认条，调用方需显式传 ack——这是本批已知的接口契约变化。
 - 权限侧的"出厂默认 ∩ 敏感码 = ∅"不变量与两侧用例保持不变；抽取 helper 后仍需通过。
@@ -455,7 +455,7 @@
 ### 14.9 实现顺序（TDD 红→绿）
 
 1. 迁移：`users.roles_version integer not null default 0`。
-2. 纯逻辑单测先红：绑定 diff、空集、超管角色/目标、自绑、版本冲突、`guard_self_grant` 的 ack/理由/超管豁免、删除指纹（含"绑了又解回原集合"）。
+2. 纯逻辑单测先红：绑定 diff、空集、超管角色/目标、自绑、版本冲突、`_guard_self_grant` 的 ack/理由/超管豁免、删除指纹（含"绑了又解回原集合"）。
 3. 服务层 `app/rbac/binding.py`：`get_user_bindings` / `replace_user_bindings`（目标 `users` 行 `SELECT … FOR UPDATE` 串行化 + `users.roles_version` CAS + 目标/角色校验 + 审计）；`admin.py` 的删除预览/删除加指纹计算与比对（`ROLE_DELETE_PREVIEW_STALE`）。
    - 实现对齐（2026-10-29）：串行化没有复用 `auth.sessions.acquire_user_lock`（advisory lock 的语义是"会话写操作串行化"，会把绑定和登录/刷新挤成一条队列）；改用目标用户行锁——只与同账号的另一次绑定、以及 MFA 重置（同样锁用户行）互斥，范围正好。
 4. API：两条绑定路由 + payload/response + `bindable` 字段 + 删除契约的 `fingerprint` + 错误映射。
@@ -469,7 +469,7 @@
 
 - 绑定 diff（增/删/不变/空集）、超管角色拒绝、自绑拒绝（在服务入口、任何写之前）。
 - 删除指纹：同集合不同顺序哈希相同；绑了又解回原集合哈希不变；不同角色同集合哈希不同（`role_id` 入哈希）；空集合稳定。
-- `guard_self_grant`：权限/范围两 kind 的 ack/理由/超管豁免；`reset_role` 范围净增 `school` 时 422、带 ack 200 且写 `school.role.self_grant`。
+- `_guard_self_grant`：权限/范围两 kind 的 ack/理由/超管豁免；`reset_role` 范围净增 `school` 时 422、带 ack 200 且写 `school.role.self_grant`。
 
 **集成（真实 PG）**
 
@@ -498,3 +498,89 @@
 | `users.roles_version` 与 `token_version` 易混淆 | 前者管绑定并发，后者管令牌失效；改错会让绑定触发全端重登或完全不设防 | 已在 design.md/handoff 写明；仅绑定服务读写 `roles_version` |
 | 删除要同时回传 `version` 与 `fingerprint` | 指纹管持有人集合、版本管角色权限/范围；前端漏传任一个都拿不到 409 的正确语义 | 已采纳：TD-187g 的删除确认框同时回传两者；错误码按 `ROLE_VERSION_CONFLICT` / `ROLE_DELETE_PREVIEW_STALE` 分流 |
 | 改绑不再让角色编辑草稿失效 | 这是选指纹换来的收益；代价是删除契约多一个必填字段 | 已按 §14.3 定稿 |
+
+## 15. TD-187e：权限账号停用 / 启用（2026-10-29）
+
+### 15.1 目标与验收
+
+- 里程碑 M2 §5.4「删除权限账号后无法登录、token 失效、审计写入」；简报 §4.2 第 3 条「停用使其立刻不能登录、既有 token 全部失效，可重新启用」。
+- 验收：停用后旧 access 每请求 401、旧 refresh 401、重新登录被拒；重新启用后可登录且角色绑定原样保留；两条动作都有审计；拒绝路径留痕。
+- 前端按钮与确认框在 TD-187g；本点只交付接口、服务与测试。
+
+### 15.2 候选方案
+
+| 方案 | 做法 | 优点 | 缺点 / 风险 | 结论 |
+|---|---|---|---|---|
+| A | 在 API 里内联照抄 MFA 重置的撤会话 + 审计时序 | 改动面最小 | 第三份「锁账号 → 撤家族 → token_version → Redis」拷贝；漏一步就是安全缺口 | 不选 |
+| B | 新建 `app/personnel/account_admin.py`，`_change_status(...)` 内部收口状态机、锁、撤会话与审计；API 只做鉴权与错误映射 | 与 `mfa_admin.py` 同构；撤会话时序只写一次；单测可直接打服务层 | 多一个模块 | **选 B** |
+| C | 把 `status` 并进 `PUT /users/{id}/roles` | 少一个端点 | 绑定与停用是两个权限面、两种确认流；合并会让「改绑定」误触停用，且停用要理由而绑定不要 | 不选 |
+| D | 只写 `status='disabled'`，不撤 refresh | 最简单 | 旧 refresh 在 15 分钟内仍能换发 access，等于没停用 | 不选 |
+
+### 15.3 契约（接口 / 状态机 / 审计）
+
+| 端点 | 权限 | 行为 |
+|---|---|---|
+| `POST /api/v1/school/users/{user_id}/deactivate` | `school.permission_account.manage` | 请求体 `{reason}`（≥10 字）；`status='disabled'` + 撤**未撤销且未过期**的刷新家族（谓词 `revoked_at is null and expires_at > now()`，`revoked_reason='admin_revoke'`）+ `token_version+1`；提交后删 Redis 会话标记与 MFA 待激活 secret；审计 `school.user.deactivated` |
+| `POST /api/v1/school/users/{user_id}/activate` | 同上 | 请求体为空；`status='active'` 并清空 `failed_login_attempts` / `failed_login_window_started_at` / `locked_until`；**不动 MFA、不动角色绑定、不换 token**；审计 `school.user.activated` |
+
+状态机（先做**无锁的本租归属探针**，探针跑在自己的短事务里、跑完即归还连接，再取账号级 advisory lock + `users` 行锁，最后判状态）。判据顺序：
+realm → 理由长度 → 自停用 → **无锁归属探针（404，必须先于取锁：advisory key 不含 `tenant_id`，见 `design.md` §5.12 / TD-230；也必须跑在独立短事务里：否则未命中的 404 连同拒绝审计同时占两条连接，见第七轮 m3）** → 加锁/取行 → 不存在/跨租 → **已删除（先于角色）** → 超管 → **目标类型** → 状态机：
+
+| 当前状态 | 停用 | 启用 |
+|---|---|---|
+| `active` | → `disabled`（撤会话） | 409 `ACCOUNT_ALREADY_ACTIVE` |
+| `locked` | → `disabled`（撤会话；锁定本身即不可登录） | 409 `ACCOUNT_NOT_DISABLED`（解锁走锁定窗口到期或重置流程） |
+| `disabled` | 409 `ACCOUNT_ALREADY_DISABLED` | → `active`（清锁定计数） |
+| `deleted` | 404 `USER_NOT_FOUND` | 404 `USER_NOT_FOUND` |
+
+拒绝判据（除理由过短、`REALM_MISMATCH` 这类**入参/调用方非法**外，全部写 `school.user.status_denied` 审计，独立事务，只落判据码；理由过短与 `RESET_REASON_REQUIRED` 同口径不落安全审计）。`REALM_MISMATCH` 在 HTTP 上到不了服务层（平台 principal 会先被租户依赖拒绝，由 `auth.permission.denied` 留痕），服务层这一条是纵深防御，不重复写业务拒绝审计：
+
+| 场景 | 结果 |
+|---|---|
+| 目标账号持有 `school_super_admin` | 403 `ACCOUNT_SUPER_ADMIN_FORBIDDEN`（与绑定、MFA 重置同口径；**任何超管都不行**，不只是最后一名） |
+| 目标已删除且仍挂超管绑定 | 404 `USER_NOT_FOUND`——删除判据**先于**角色判据，否则会回 403 泄露"这个 id 曾是超管" |
+| 目标 `user_type` 不是教师/校方管理员（如学生） | 422 `ACCOUNT_TARGET_NOT_ALLOWED`（与用户↔角色绑定共用 `BINDABLE_USER_TYPES`；学生是 C 端账号，不在这条权限的射程内；判据先于状态机，两个方向同码） |
+| 操作者停用自己 | 409 `ACCOUNT_SELF_DEACTIVATE`（比较 `Principal` 与路径参数，先于对目标账号的任何读取与状态写入；拒绝审计是另一条独立事务） |
+| 跨租 / 不存在 / 已删除 | 404 `USER_NOT_FOUND`（同形，不泄露存在性；跨租与不存在两条在**取账号锁之前**由无锁探针给出，避免排进别租账号的锁队列；探针在独立短事务里，整条 404 路径任一时刻只占一条连接，由 `test_probe_denial_paths_hold_one_connection_at_a_time` 断言占用峰值 =1——该用例把同一个计数垫片依次挂到 `account_admin.db_session` 与 `mfa_admin.db_session` 上，**停用与 MFA 重置两条 404 路径都跑**） |
+| 主体不是租户 realm | 403 `REALM_MISMATCH` |
+| 停用理由缺失或 <10 字 | 422 `DEACTIVATE_REASON_REQUIRED` |
+
+审计字段：成功 `status_before` + `sessions_revoked` +（停用）`reason`；拒绝 `operation`（deactivate/activate）+ `reason`（判据码）。系统**自己**不往审计里写登录名、邮箱、手机号——`metadata` 只由服务端派生（`reason` 判据码是常量字符串，不含目标身份）。但**停用的 `reason` 是操作者手写的自由文本，原样入库，本点没有做任何 PII 筛查或词表脱敏**：管理员如果在校验理由里写"该教师手机号 138xxxxxxxxxx 已离职"，那串号码就会留在 `audit_logs.metadata_json` 里（只有 500 字上限防超大字符串）。这与 §3 红线「敏感字段加密或脱敏、审计不得出现明文敏感信息」存在缺口，处置见 TD-232（写入侧掩码 + 前台提示，去向 M3）。`sessions_revoked` 在本点只数**未撤销且未过期**的家族（谓词与撤销语句逐字一致），与 MFA 重置侧的「全部未撤销（含过期死行）」不同口径，跨动作做告警前先看 `design.md` §5.12 与 TD-231。
+
+### 15.4 用户裁决（2026-10-29）
+
+1. **超管一律不能被租户管理员停用**（403，平台侧兜底）——「最后一名超管」因此自然安全，不做并发计数。
+2. **不能停用自己**（409），与「不能给自己绑角色」同思路。
+3. **停用必须填理由（≥10 字）**；启用不需要理由。
+
+### 15.5 实现顺序（TDD 红 → 绿 → 重构）
+
+1. 集成用例先红：`tests/integration/test_account_status.py`（撤会话全断言、状态矩阵、自停用、超管、跨租/删除、并发恰好一路成功、`locked → disabled`、启用清锁定）。
+2. 业务场景先红：`tests/business/test_bs_m2ui3_account_status.py`（BS-M2UI3-H 全链路；C 已被 TD-187c 的范围场景占用，见 §13.5）。
+3. 服务层：`app/personnel/account_admin.py`。
+4. API：`app/api/school_rbac.py` 两个端点 + 错误映射。
+5. 同 PR 落实 TD-223：`backend.yml` 静态检查后加 `alembic upgrade head` + `alembic check`。
+6. 文档回写：`design.md` §4 权限矩阵说明、§5.12 错误码；本简报；`tech-debt.md`。
+
+### 15.6 测试策略
+
+- **集成（服务层，不走 HTTP）**：停用后 `users.status='disabled'`、`token_version+1`、**未撤销且未过期**的 `refresh_tokens` 家族全部 `revoked_reason='admin_revoke'`、Redis 会话标记消失（`session_exists` 为假），**已过期家族保持 `revoked_at is null`/`revoked_reason is null` 且不计进 `sessions_revoked`**（它本来就换不出令牌，算进去等于虚报断开的设备数）；启用只回 `active` 并清 `failed_login_attempts`/窗口/`locked_until`，**不动** `mfa_enabled`、角色绑定与 `roles_version`；状态矩阵与 11 条拒绝逐条断言 `AccountAdminError` 的码与 HTTP 状态（超管两向 403、realm 403、跨租与已删除同形 404、学生 422、重复动作 409）+ 拒绝审计逐条对码（该用例租户内恰好 11 条，且 `metadata` 只含 `operation`/`reason`、不含登录名/校码）+ 被拒目标的库内状态与会话一个字节都没变；**成功与拒绝两侧的 `actor_id` 都断言等于操作者本人**（"谁停用的/谁在试探"必须查得出来，`_audit_rows` 因此 `select actor_id::text`）；**理由过短这条断言的是「不落 `status_denied`」**——那 11 条清单里没有它，与 `RESET_REASON_REQUIRED` 同口径；自停用另测「先于对目标账号的任何读取就回 409」（操作者 id 在库里不存在时也得是 409 而不是 404）；同动作并发恰好一路 204、一路 409，且两条审计的 `actor_id` 分别是两个不同的操作者（用第二个同权限账号 `second_operator_id`，不是把同一个人写两遍）；**在途会话写入**（`test_deactivate_waits_for_an_inflight_session_write`）： holder 事务持账号锁并插入新家族未提交，用 `pg_blocking_pids()` 探针确认停用确实被挡住、提交后 `sessions_revoked=1` 把新家族一起撤销；**纯锁 holder**（`test_deactivate_waits_for_a_lock_only_holder`）：holder 只取 advisory lock、不写任何行，停用仍必须排在它后面（TD-227 的决定性用例）；**跨租 id 不进锁队列**（`test_cross_tenant_user_id_does_not_take_their_account_lock`）：别租账号正持着自己的会话写事务时，本租管理员拿那个 id 停用应立刻 404、一次都不排进那把锁（TD-230。承重的断言是「`pytest.raises` 真的拿到了异常」——排进队列就走不到这一步，只会撞到 `timeout = 120`；`not holder_task.done()` 在 `release` 未置位时恒真，只算兜底断言）；**探针 404 只占一条连接**（`test_probe_denial_paths_hold_one_connection_at_a_time`）：用 `monkeypatch` 给 `db_session` 包一层借还计数，同一个 `_SessionLedger` 依次挂到 `account_admin` 与 `mfa_admin` 两个模块上，各自走一次别租 id 的 404 后断言占用峰值 `== 1`、序列为 `open/close/open/close`，并断言两侧各落一条 `*_denied` 审计（`reason`/`actor_id` 逐条对；把任一模块的探针挪回主事务即转红，见下面第 ⑥ 组）；**校方管理员账号可被停启**（`test_school_admin_target_can_be_deactivated_and_restored`）：`BINDABLE_USER_TYPES` 的另一半不能只靠"学生被拒"反证——拿第二个同权限账号（`second_operator_id`）当目标，断言 `disabled` → `sessions_revoked == 0`（无会话可撤也要落状态）→ `school.user.deactivated` 的 `status_before == "active"` → 启用回 `active` 并落 `school.user.activated`。旧 access `/auth/me` 401、旧 refresh 401、重新登录 401 这三条是 **HTTP 链路**的断言，落在下面的业务场景用例，不在这一层。
+- **业务场景**：BS-M2UI3-H（开号 → 绑角色 → 停用 → 全接口 401/刷新 401/重新登录 401「账号不可用」→ 启用恢复）；另加 **Redis 清理丢失降级**（打桩点在**真实客户端**上——`revocation._redis()` 返回一个 `delete()` 必抛 `RedisError` 的包装，其余方法原样转发；比整段打桩更接近真实故障，且避免在 patch 的 lambda 里再调 `revocation._redis()` 造成自递归）：停用仍回 204，access/refresh/重新登录三条路都由库内 `status` + `token_version` 断开；并**把"没有用户可见差异"变成断言**——启用 → 重新登录 → `GET /api/v1/auth/sessions`，断言被撤的家族不在设备列表里（`list_sessions` 取的是「库内未撤销 ∩ Redis 标记存在」，孤儿标记加不进列表）。
+- **单元**：状态迁移表与理由校验（纯函数），不碰数据库。
+- **摘锁 / 摘探针实测（2026-10-29，共 7 组，跑完即恢复原实现并 `grep MUTATION` 确认无残留）**：①停用侧只摘 `acquire_user_lock` → 在途用例**绿**、同动作并发用例**绿**、纯锁 holder 用例**红**（探针 10s 内观察不到任何会话排在 holder 上，说明停用没排队就提交了）；②只摘 `users ... FOR UPDATE` → 三条全**绿**；③两层同摘 → 在途与纯锁两条**红**，并发用例同时**红**（两路都返回 `StatusChangeResult`，`assert 2 == 1`）；④把无锁归属探针判据摘掉 → 跨租用例卡在**别租账号**的锁等待上，直到 `backend/pyproject.toml` 的 `timeout = 120` 由 pytest-timeout 打断整轮；⑤把 `revocation.delete_session` 吞 `RedisError` 那段摘掉 → Redis 降级用例**红**（证明它测的是降级代码本身，不是被桩打空的壳）。**结论**：advisory lock 在本链路**独立承重**（①里唯一转红的那条正是为它设计的交错，行锁够不着）→ **TD-227 收口**；归属探针承重（④）→ **TD-230 收口**；⑥把探针从独立短事务挪回主事务 → `test_probe_denial_paths_hold_one_connection_at_a_time` **红**（`opens` 变 `open/open/close/close`，占用峰值 2），恢复后 `md5sum` 与备份一致 → 第七轮 m3 的"404 路径只占一条连接"是真断言而非摆设；⑦**只**把 `mfa_admin.py` 的探针判断挪进探针自己的事务里（停用侧保持原样）→ 同一条用例在 **MFA 那一段**转红、停用段仍先通过 → 第八轮 m5 的"两个模块各测一遍"两边都真承重，不是把停用侧的断言复读了一次。
+- **不做**：前端（187g）。
+
+### 15.7 预判技术债
+
+| 事项 | 说明 | 处置 |
+|---|---|---|
+| 平台侧没有停用租户超管的 CLI | 租户内一律 403 之后，超管离职只能靠平台运维直接改库，缺可审计入口 | 登记 **TD-224**（已采纳，M6 SaaS 运营硬化） |
+| 没有独立的「解锁账号」动作 | `locked` 只能等 15 分钟窗口到期或走密码/MFA 重置 | 登记 **TD-225**（已延后，M6 与平台账号锁定一起评估） |
+| ~~advisory lock 与 `users` 行锁在本链路互为兜底？~~ **已收口** | 原疑问是 advisory lock 有没有**自己**承重的交错。第六轮新增 `test_deactivate_waits_for_a_lock_only_holder`（holder 只取账号锁、不写任何行）并复跑摘锁：只摘 `acquire_user_lock` 时**这条转红**（另两条竞态用例仍绿，由行锁兜住），只摘 `FOR UPDATE` 三条全绿，两层同摘三条齐红 → **advisory lock 独立承重**，`app/auth/sessions.py` 的「同一账号的登录/刷新/撤销/改密共享事务级 advisory lock，避免撤销与轮换竞态」表述保留 | **已完成**（TD-227，本 PR 内收口：`design.md` §5.12 竞态段与两处用例 docstring 已回改为实测口径；`tech-debt.md` TD-227 状态改「已完成」） |
+| 账号级 advisory lock 的 key 不含 `tenant_id` | `hashtextextended(f"{realm}:session:{user_id}")` 让同一 id 在任何租户落到同一把锁上；启停与 MFA 重置原先"先取锁再判归属"，别租管理员可用一次注定 404 的请求排进**对方**账号的登录/刷新队列，404 的耗时同时变成侧信道。实测摘掉探针判据后跨租用例卡死到 pytest-timeout | **已实现**（`account_admin.py`、`mfa_admin.py` 在取锁前加无锁本租归属探针，第七轮 m3 再把它挪进**自己的短事务**——未命中的 404 不再连同拒绝审计同时占两条连接（每引擎 `pool_size=10 / max_overflow=10`）；停用侧用例 `test_cross_tenant_user_id_does_not_take_their_account_lock` + `test_probe_denial_paths_hold_one_connection_at_a_time`；MFA 侧同形用例登记 **TD-230** → 去向 TD-187f。并进 key 的方案**已拒绝**：会改全站登录/刷新锁语义） |
+| `sessions_revoked` 跨动作口径不一致 | 停用侧只数「未撤销且未过期」，租户/平台 MFA 重置数「全部未撤销」（含过期死行）；同名字段进告警后跨动作对比会误判严重度，安全结论本身不受影响 | 登记 **TD-231**（已采纳，去向 TD-187f 同批；本点只在 `design.md` §5.12 写清三处口径与收口改法，不改两条已交付链路） |
+| 新服务模块漏登记裸 SQL 豁免清单 | `app/personnel/account_admin.py` 直连 `users/refresh_tokens/roles/user_roles`，但没进 `tests/test_bare_sql_scope_guard_unit.py` 的 `SCOPE_EXEMPTIONS`——该守卫只在被跑到时报警，本点前几轮的"受影响子集"没包含它，于是拖到第六轮复测才转红 | **已实现**（补登记 + 理由 + 上限 `MAX_EXEMPT_MODULES` 14→15；把该文件固定进本功能的受影响子集，避免再靠偶然覆盖） |
+| 并发用例失败路径悬挂任务（本点已修两处） | 探针/断言失败后未 `cancel()` 的任务会在用例之后才提交，占用连接、结果被静默丢弃 | **已实现**（`test_account_status.py` 在途用例、`test_rbac_binding.py` 并发删角色用例各补 `except BaseException: cancel → await → raise`） |
+| 其余测试文件的审计助手仍不按用例租户收窄 | `test_rbac_binding.py:228`（`_audits`）、`test_auth_sessions.py`、`test_bs_m1c2_sessions.py`、`test_bs_m2ui2_mfa_admin.py`、`test_campus_chat_rbac.py` 用全表 `action` 查询配「精确条数」断言；同用例内的跨租子场景会直接命中，未修的悬挂任务只是再叠一层随机性 | 登记 **TD-228**（已采纳，去向 TD-187f；本点只把自己新增的两个文件的 `_audit_rows` 加了 `tenant_id` 过滤） |
+| `alembic/` 不在 ruff 门禁范围内 | 本地与 CI 都只跑 `ruff check app tests scripts`；实测 `ruff check alembic` 有 3 条存量告警（`c688c44dec81` 的 `I001`、`e2a6c8d4b0f2`/`f7a9b1c3d5e8` 各一个空 `f` 前缀 `F541`），迁移目录的笔误没有任何机械提醒 | 登记 **TD-229**（已采纳，去向 TD-187f 同批或独立小 PR；先清零 3 条再把 `alembic` 加进门禁，改后跑 `alembic check` + 迁移相关用例证明无漂移） |
+| 停用的校验理由是操作者手写的自由文本，未做 PII 筛查 | `reason` 除 `max_length=500` 外没有任何掩码/词表，原样进 `audit_logs.metadata_json`——管理员在里面写"手机号 138xxxxxxxxxx 已离职"，那串号码就长期留在审计里，有审计读取权的人（本校超管、平台运维）都看得到，备份/导出一起带走；`app/api/platform_audit.py:23` 那句「metadata_json 已在写入时脱敏」因此是个当前不成立的 blanket 承诺（第八轮 m4） | 登记 **TD-232**（已采纳，去向 M3 与 TD-226 同批：写入侧正则掩码 + 命中记 `pii_masked` + 前台输入提示 + 该注释按动作分列）；本点只把简报 §15.3 的表述收口成"系统自己不写、自由文本未筛查"，不偷改判据 |

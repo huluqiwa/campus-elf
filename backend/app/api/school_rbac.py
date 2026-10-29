@@ -1,14 +1,18 @@
-"""校方侧角色权限配置、自定义角色、用户↔角色绑定与 MFA 管理员重置（M2-UI2 + M2-UI3 部分）。
+"""校方侧角色权限配置、自定义角色、用户↔角色绑定、MFA 重置与权限账号启停
+（M2-UI2 + M2-UI3 部分）。
 
 本模块只做鉴权、请求/响应形状与错误映射；判定与落库在
-`app/rbac/admin.py`、`app/rbac/binding.py` 与 `app/personnel/mfa_admin.py`：
+`app/rbac/admin.py`、`app/rbac/binding.py`、`app/personnel/mfa_admin.py`
+与 `app/personnel/account_admin.py`：
 
 - 角色配置要求 `school.role.manage`；删除角色另要 `school.role.delete`（决策 #6：拆角色与
   配权限分离，能改配置的人不一定能让人失去角色），删除预览只读仍走 `school.role.manage`；
 - 用户↔角色绑定要求 `school.permission_account.manage`（TD-187d）：读/写同一个码；绑定/解绑
   下一请求即生效、不作废在线会话；操作者不能改自己的绑定（403 `BINDING_SELF_FORBIDDEN`），
   目标不许是超管账号、提交的角色不许含超管角色；
-- MFA 重置要求 `school.personnel.mfa.reset`，三者都是租户域权限（`realm="tenant"`）；
+- MFA 重置要求 `school.personnel.mfa.reset`，上述权限码都是租户域权限（`realm="tenant"`）；
+- 权限账号启停（TD-187e）与绑定共用 `school.permission_account.manage`：停用要理由、撤未撤销且
+  未过期的刷新家族并轮换 token 版本，启用只恢复状态并清锁定；超管账号一律不走租户侧启停；
 - 角色数据范围编辑（TD-187c）与权限替换同用 `school.role.manage`、同一列 `roles.version`；
   范围只可手工授 `school`/`self`——`class`/`course` 必须绑定到具体 id 而本端点没有「选哪个班」的
   入参通道，一律拒授并留痕（`course` 本期还不贡献可见性，TD-151）。
@@ -26,7 +30,8 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth.principal import Principal, require_permission
-from app.personnel import mfa_admin
+from app.personnel import account_admin, mfa_admin
+from app.personnel.account_admin import AccountAdminError
 from app.personnel.mfa_admin import MfaAdminError
 from app.rbac import admin, binding
 from app.rbac.admin import (
@@ -275,6 +280,19 @@ class MfaResetPayload(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class DeactivateAccountPayload(BaseModel):
+    """停用账号请求。
+
+    body 合法但理由缺失/空串/全空白/不足 10 字时，一律走服务层的
+    `{code,message}` 形状 `DEACTIVATE_REASON_REQUIRED`，而非 FastAPI 的数组形 422。
+    **缺整个 body 或 `reason` 类型不符**仍由 Pydantic 先拦（数组形 422）——那是框架
+    层的类型错误，和"理由不合法"是两件事（全局统一形状登记 TD-226）。
+    `max_length` 只防超大字符串进内存，与 MFA 侧同界。
+    """
+
+    reason: str = Field(default="", max_length=500)
+
+
 def _role_response(summary: RoleSummary) -> RoleResponse:
     return RoleResponse(
         id=summary.id,
@@ -377,6 +395,12 @@ def _binding_error(exc: BindingAdminError) -> HTTPException:
 
 
 def _mfa_error(exc: MfaAdminError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.http_status, detail={"code": exc.code, "message": exc.message}
+    )
+
+
+def _account_error(exc: AccountAdminError) -> HTTPException:
     return HTTPException(
         status_code=exc.http_status, detail={"code": exc.code, "message": exc.message}
     )
@@ -772,4 +796,62 @@ async def reset_user_mfa(
         )
     except MfaAdminError as exc:
         raise _mfa_error(exc) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT)
+async def deactivate_account(
+    user_id: UUID,
+    payload: DeactivateAccountPayload,
+    request: Request,
+    account_manager: Annotated[Principal, AccountManagerDep],
+) -> Response:
+    """停用账号并撤销其活跃会话（旧 access/refresh 立即失效，重新登录被拒）。
+
+    `reason` 去空白后不足 10 字 → 422 `DEACTIVATE_REASON_REQUIRED`；不能停用自己、
+    不能停用超管账号、只能停教师/校方管理员（学生 422）；重复停用 409。
+    拒绝路径写 `school.user.status_denied`。
+
+    异常:
+        HTTPException: 403（缺权限码/realm 不符/目标超管）、404（不存在/跨租/已删除）、
+            409（停用自己/已停用）、422（理由过短 `DEACTIVATE_REASON_REQUIRED`、
+            目标类型不是教师或校方管理员 `ACCOUNT_TARGET_NOT_ALLOWED`）。
+    """
+
+    try:
+        await account_admin.deactivate_user(
+            account_manager,
+            user_id,
+            reason=payload.reason,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except AccountAdminError as exc:
+        raise _account_error(exc) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/users/{user_id}/activate", status_code=status.HTTP_204_NO_CONTENT)
+async def activate_account(
+    user_id: UUID,
+    request: Request,
+    account_manager: Annotated[Principal, AccountManagerDep],
+) -> Response:
+    """重新启用已停用账号并清空失败计数与锁定；不动 MFA、角色绑定与令牌版本。
+
+    启用不需要理由，但目标类型判据与停用同一个入口、同码同形：学生账号 422。
+
+    异常:
+        HTTPException: 403（缺权限码/realm 不符/目标超管）、404（不存在/跨租/已删除）、
+            409（账号未停用/已启用）、422（目标类型不是教师或校方管理员，两个方向同码
+            `ACCOUNT_TARGET_NOT_ALLOWED`）。
+    """
+
+    try:
+        await account_admin.activate_user(
+            account_manager,
+            user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except AccountAdminError as exc:
+        raise _account_error(exc) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

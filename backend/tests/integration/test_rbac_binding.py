@@ -5,7 +5,8 @@
 
 1. 落库形状：全量替换写成 `user_roles` 的精确行集、`users.roles_version` 每次 +1，
    返回的 diff 与审计 diff 都是"同一份数据"（不是让调用方拿两个时刻的快照去猜）；
-2. 自绑禁令在任何数据库读写之前生效：它不依赖目标存在，因此连"用户不存在"的 404 都不该覆盖它；
+2. 自绑禁令先于对目标账号的任何读取生效：它不依赖目标存在，因此连"用户不存在"的 404 都不该覆盖它
+   （拒绝审计另起独立事务，不算对目标的读取）；
 3. 目标保护分层：学生 422、超管账号 403、超管角色 422、跨租 user/role 404、`deleted` 404，
    而 `locked`/`disabled` 仍可绑（绑定 ≠ 允许登录）——每类拒绝都留痕，且锁文件之外一个字节都没变；
 4. 版本 CAS：两个人拿同一个 `roles_version` 并发改绑，恰好一个成功、另一个 409 并拿到最新快照，
@@ -18,6 +19,7 @@
 """
 
 import asyncio
+import contextlib
 import os
 import time
 from collections.abc import AsyncIterator, Coroutine, Iterator
@@ -612,8 +614,16 @@ async def test_role_deleted_mid_binding_yields_404_instead_of_a_foreign_key_erro
                 {"rid": role_id, "tid": tenant_id},
             )
             task = asyncio.create_task(_outcome())
-            await _wait_until_binding_waits_on_the_operator(engine, holder_pid)
-            assert not task.done(), "绑定应被角色行锁挡住"
+            try:
+                await _wait_until_binding_waits_on_the_operator(engine, holder_pid)
+                assert not task.done(), "绑定应被角色行锁挡住"
+            except BaseException:
+                # 失败路径收掉还在等锁的绑定：否则用例结束后它才提交，白占一条连接、
+                # 返回值被静默丢弃（若它已抢先提交，写入仍会落库——cancel 此时是空操作）
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+                raise
             await session.execute(
                 text("delete from public.roles where id = :rid and tenant_id = :tid"),
                 {"rid": role_id, "tid": tenant_id},
