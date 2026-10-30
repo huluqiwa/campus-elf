@@ -858,3 +858,17 @@
   - **第 4 轮整改后复跑（2026-10-31）**：`bash -n`、`ruff`+`mypy`（3 文件 0 错误）、`pnpm typecheck`/`lint`/`format:check` 全绿；重新 `up`（含新种子）后 `icacls deploy\.e2e-accounts.json` 仍只剩 `DESKTOP-1RE5J9J\Hasee:(F)`；全栈 **18 passed（Playwright 40.2s，整轮 60s，EXIT=0）**——本轮读数取代第 3 轮 49.5s/72s 写入状态文档，1.3m/1.8m/49.5s 作为各轮历史保留。
   - **TD 处置（本点）**：**TD-183 / TD-192 已完成**（2026-10-31，18 例全绿）；**TD-207** 补记「欠账已补、夜间化仍未做」；新登记 **TD-266**（worker 无业务级健康检查，已延后 M6）、**TD-267**（种子口令固定值，已拒绝）、**TD-268**（全栈 TS 无单测，已延后 M6）、**TD-269**（bandit 不扫 scripts，已延后 M6）、**TD-270**（健康等待短于 compose 健康检查最坏耗时，已延后 M6）。
   - **本点交付事实（合并后回填，2026-10-31）**：PR #27 经 rebase 合并，**合并提交 `a928645`**（PR 内原提交 `e734d57`/`a5e1d31` 重写为 `01da06f`/`a928645`），远端与本地功能分支均已删除。**合并后 main（tip `a928645`）推送 CI**：backend run `41121065536` success（**834 passed / 696.52s**，四包分支覆盖率与 PR run 逐条一致：rbac 79.92% / auth 82.41% / tenant 81.25% / audit 66.67%，门槛全过）、frontend run `41121065630` success（单测 67 + 96、Playwright **96 passed / 2.0m**）、security run `41121065476` success；`evals` 按路径过滤未触发。
+
+- **M2 边界评审（2026-10-31，分支 `docs/m2-boundary-review`）的独立审查**：本点把 M2 期间登记的 78 条台账条目逐条处置（状态/去向以 `docs/tech-debt.md` 为准），并落地四项口径整改：TD-254（Playwright 配置加载时校 `dist` 新鲜度）、TD-262（文档只抄脚本读数）、TD-263（`.gitattributes` 统一 LF）、TD-264（CI 打印解释器与 coverage 版本）。`backend/app/**` 与前端业务代码零改动。
+  - 第 1 轮（独立只读子智能体，审 `git diff --staged`）：**0 Blocker / 3 Major / 1 Minor**。
+    - **Major 1（文档状态自相矛盾）**：`docs/milestone.md` §5.6 把 TD-136/144/253/259/260/261/265 写成「已延后」，台账实为「已采纳」，且漏掉 TD-226/237/240/241/247～251 等 M2 条目，却声称「逐条处置」→ 重写为按台账状态归类的 78 条索引（已完成 28 / 跨期复核 5 / 已拒绝 3 / 已采纳→M3 10+TD-258 / 已延后→M3 17 / 已采纳→M6 7 / 已延后→M6 11 / M5-M6 1），简报 §5 同步。
+    - **Major 2（CI 锁校验被绕过）**：新增步骤用 `uv run`，默认会按 `pyproject.toml` 改写 `uv.lock`，使下一步 `uv lock --check` 永远通过 → 改为 `uv run --frozen`。
+    - **Major 3（前检漏构建输入）**：只比 `src` 的 mtime，漏 `index.html`/`vite.config.ts`/`package.json`/`.env*`/锁文件，删除源文件也不会降低 mtime，且会误扫单测与生成的 d.ts → 扩为全部构建输入 + 目录 mtime（捕获新增/删除）+ 忽略 `*.test.ts`/`*.spec.ts`/`*.d.ts`；残余限制（不校验产物内容哈希、不感知 shell 注入变量）写进 TD-254 证据栏。
+    - **Minor 已修**：handoff 把「TD-264 CI 打印」写成既成事实（首次运行要等本 PR 的 CI）→ 改为「从本 PR 起……首次运行＝本 PR 的 backend CI」；补本条审查记录。
+  - **第 1 轮后复测（2026-10-31）**：前检四向实测——`pnpm build` 后 `playwright test --list` **exit 0（96 例）**；touch `apps/admin/src/main.ts` → **exit 1**；临时移走 `dist/index.html` → **exit 1**（提示 `pnpm build`）；删除源文件（建临时文件 → build → 删除）→ **exit 1**；再 build → exit 0；只 touch 单测文件 → **exit 0**。全量 mock E2E **96 passed（2.3m）**；`pnpm typecheck` / `lint` / `format:check` 全绿（format 首跑因新 helper 风格红，`prettier --write` 单文件后复跑绿）。
+  - **TD 处置（本点）**：TD-254/262/263/264 已完成；TD-233 延后至 M3 首个后端点，TD-259/260/261 已采纳并落到 M3 首个前端点；无新增 TD。
+  - 第 2 轮（复审，独立只读子智能体，审修复后的 staged diff）：**0 Blocker / 0 Major / 3 Minor**，结论「可提交」；三项 Major 逐条判定已到位（78 条与台账逐项一致、`--frozen` 可用且锁未变、前检覆盖清单并捕获删除）。3 条 Minor 同批处理：
+    - m1 前检补 `apps/<app>/tsconfig.json` 与 `packages/config/tsconfig.base.json`（Vite/esbuild 读 target）；注释不再称「全部」，注明新增/删除单测与 d.ts 可能多提示一次 build（安全方向）；缺少输入时给出 `pnpm install` 提示。
+    - m2 TD-187 证据仍写「缺创建/删除接口与页面」→ 改为已由 187b/d/e/g-B/g-C 补齐；TD-264 状态改为「本 PR 落地、CI 首次打印待本 PR backend run 验证」；TD-254 证据补 tsconfig、缺输入提示与忽略项副作用。
+    - m3 §5.6 明确跨期 5 条不计入 78；末句改为「未处置的 M2 条目不得带入 M3」；T2 标注「新增即绿」；读数统一 2.2m；TD-263 区分索引 463 个文本文件全 `i/lf` 与工作区待重新检出；README 的「其余 M6」改为按台账落位。
+  - **第 2 轮后复测（2026-10-31）**：前检输入补 tsconfig 后 `playwright test --list` **exit 0（96 例）**；`pnpm typecheck` / `lint` / `format:check` 全绿；`git diff --staged --check` 干净。

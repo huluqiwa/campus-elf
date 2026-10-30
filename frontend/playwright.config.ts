@@ -1,5 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
+import { assertDistFresh } from "./e2e/helpers/dist-freshness";
+
+assertDistFresh("admin", __dirname);
+assertDistFresh("campus", __dirname);
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,

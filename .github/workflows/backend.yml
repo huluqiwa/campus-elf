@@ -62,6 +62,13 @@ jobs:
       - name: 安装依赖
         run: uv sync --frozen
 
+      - name: 解释器与覆盖率工具版本（TD-264）
+        # 同一 commit 出现两个读数时，先比对版本：本地与 CI 的补丁版本差异是第一嫌疑。
+        # 必须 --frozen：uv run 默认会按 pyproject 改写 uv.lock，否则下一步 uv lock --check 抓不到漂移。
+        run: |
+          uv run --frozen python -VV
+          uv run --frozen coverage --version
+
       - name: 依赖锁校验
         run: uv lock --check
 
