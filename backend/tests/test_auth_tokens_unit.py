@@ -163,6 +163,37 @@ class TestAccessToken:
         assert excinfo.value.code == "TOKEN_INVALID"
 
 
+    @pytest.mark.parametrize("amr", ["pwd", {"totp": True}, 42, None])
+    def test_malformed_amr_claim_degrades_to_empty(self, amr: object) -> None:
+        """`amr` 不是字符串列表时按「未完成 MFA」解析：字符串不能被拆成字符、dict 不能被当成已验证。"""
+
+        settings = _settings()
+        now = datetime.now(UTC)
+        forged = pyjwt.encode(
+            {
+                "sub": str(uuid4()),
+                "realm": "tenant",
+                "tenant_id": str(uuid4()),
+                "jti": str(uuid4()),
+                "sid": str(uuid4()),
+                "token_version": 0,
+                "must_change_password": False,
+                "amr": amr,
+                "iss": settings.jwt_issuer,
+                "aud": settings.jwt_audience_tenant,
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(seconds=300)).timestamp()),
+            },
+            settings.jwt_secret.get_secret_value(),
+            algorithm=settings.jwt_algorithm,
+        )
+
+        claims = decode_access_token(settings, forged)
+
+        assert claims.amr == frozenset(), f"畸形 amr 被解析成了 {claims.amr!r}"
+        assert claims.mfa_verified is False
+
+
 class TestRefreshToken:
     """刷新令牌串与哈希。"""
 
@@ -248,3 +279,29 @@ class TestMfaToken:
         )
         with pytest.raises(TokenError):
             decode_mfa_token(settings, forged, expected_purpose="mfa_challenge")
+
+    def test_tenant_realm_requires_tenant_id(self) -> None:
+        """租户 realm 铸造 MFA 令牌缺 tenant_id 必须拒发：发出去就是跨租可用的凭据。"""
+
+        with pytest.raises(ValueError, match="租户 realm 的 MFA 令牌必须有 tenant_id"):
+            create_mfa_token(
+                _settings(),
+                purpose="mfa_challenge",
+                user_id=uuid4(),
+                realm="tenant",
+                tenant_id=None,
+                token_version=0,
+            )
+
+    def test_platform_realm_rejects_tenant_id(self) -> None:
+        """平台 realm 携带 tenant_id 必须拒发：两个 realm 的令牌命名空间互斥。"""
+
+        with pytest.raises(ValueError, match="平台 realm 的 MFA 令牌不得携带 tenant_id"):
+            create_mfa_token(
+                _settings(),
+                purpose="mfa_challenge",
+                user_id=uuid4(),
+                realm="platform",
+                tenant_id=uuid4(),
+                token_version=0,
+            )

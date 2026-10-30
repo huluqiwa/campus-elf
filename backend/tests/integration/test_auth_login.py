@@ -2,18 +2,23 @@
 
 import os
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import jwt as pyjwt
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import text
+from starlette.requests import Request
 
 from app.auth import principal as principal_module
 from app.auth import revocation, service
 from app.auth.passwords import hash_password
 from app.auth.principal import get_current_principal
-from app.auth.tokens import create_access_token
+from app.auth.tokens import create_access_token, decode_access_token
 from app.config import Settings, get_settings
 from app.db.session import db_session, dispose_engine
+from app.tenant import context as tenant_context
 from tests.support.auth import (
     TEST_PLATFORM_PASSWORD,
     as_token_pair,
@@ -301,8 +306,6 @@ async def test_principal_uses_realm_specific_connection(
     auth_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """TD-074：平台主体只走平台连接，租户主体只走租户连接。"""
-
-    from starlette.requests import Request
 
     tenant_id, user_id = await _seed_tenant_user(login_id="S-1005", password=TENANT_PASSWORD)
     engine = make_test_engine("admin")
@@ -695,3 +698,105 @@ async def test_selfcheck_detects_tenant_role_with_out_of_realm_permission(
                 )
         finally:
             await engine.dispose()
+
+
+def _auth_me_request() -> Request:
+    """构造 `/auth/me` 的最小请求对象（只填 `get_current_principal` 读取的字段）。"""
+
+    return Request(
+        scope={
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/auth/me",
+            "headers": [],
+            "query_string": b"",
+            "state": {},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_principal_rejects_access_token_after_version_bump(auth_env: None) -> None:
+    """权限/状态变更推进 token_version 后，旧访问令牌必须立刻 401，且不绑定身份上下文。"""
+
+    tenant_id, user_id = await _seed_tenant_user(login_id="S-1101", password=TENANT_PASSWORD)
+    settings = get_settings()
+    session_id = uuid4()
+    await revocation.register_session(session_id, realm="tenant")
+    stale_token, _ = create_access_token(
+        settings,
+        user_id=user_id,
+        realm="tenant",
+        tenant_id=tenant_id,
+        token_version=0,
+        must_change_password=False,
+        family_id=session_id,
+    )
+
+    engine = make_test_engine("admin")
+    try:
+        factory = make_session_factory(engine)
+        async with factory() as session, session.begin():
+            await session.execute(
+                text("update users set token_version = token_version + 1 where id = :uid"),
+                {"uid": user_id},
+            )
+    finally:
+        await engine.dispose()
+
+    tenant_context.clear_request_context()
+    with pytest.raises(HTTPException) as excinfo:
+        await get_current_principal(_auth_me_request(), f"Bearer {stale_token}")
+
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.detail == "登录已失效，请重新登录"
+    assert tenant_context.current_context() is None, "旧令牌被拒后仍绑定了身份上下文"
+
+
+@pytest.mark.asyncio
+async def test_principal_rejects_tenant_claims_without_tenant_id(
+    auth_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """租户 audience 的令牌缺 tenant_id → 401「令牌无效」，且在打开任何数据库连接之前拒绝。"""
+
+    _, user_id = await _seed_tenant_user(login_id="S-1102", password=TENANT_PASSWORD)
+    settings = get_settings()
+    session_id = uuid4()
+    await revocation.register_session(session_id, realm="tenant")
+
+    now = datetime.now(UTC)
+    forged = pyjwt.encode(
+        {
+            "sub": str(user_id),
+            "realm": "tenant",
+            "jti": str(uuid4()),
+            "sid": str(session_id),
+            "token_version": 0,
+            "must_change_password": False,
+            "amr": ["pwd"],
+            "iss": settings.jwt_issuer,
+            "aud": settings.jwt_audience_tenant,
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(minutes=5)).timestamp()),
+        },
+        settings.jwt_secret.get_secret_value(),
+        algorithm=settings.jwt_algorithm,
+    )
+
+    decoded = decode_access_token(settings, forged)
+    assert decoded.tenant_id is None, "前提：解码层不拦缺 tenant_id 的租户令牌，才轮到 principal 兜底"
+
+    opened: list[dict[str, object]] = []
+
+    def _spy(**kwargs: object) -> object:
+        opened.append(kwargs)
+        return db_session(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(principal_module, "db_session", _spy)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await get_current_principal(_auth_me_request(), f"Bearer {forged}")
+
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.detail == "令牌无效"
+    assert opened == [], f"缺 tenant_id 的租户令牌不应打开数据库连接：{opened}"
