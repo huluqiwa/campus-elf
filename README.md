@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-**当前阶段：M2 组织与人员收尾中（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台已交付并过 CI；M2-UI3 自定义角色 / 多角色绑定 / 权限账号的十批已全部交付并过 CI——最后一批是**前端权限账号页 TD-187g-C**（2026-10-30，PR #22 → 合并提交 `fb6513d`）；**M2 收尾三件已完成一件**：`app/auth` 分支覆盖率抬到 82%（2026-10-30，PR #25 → 合并提交 `77ac33c`，CI 读数 417/506 = 82.41%；门槛由单独的门槛 PR（`ci/234-auth-threshold-82`）从 80 抬到 82（合并条件＝该 PR 的 backend CI 读数 ≥82，否则自身红）），**只剩两件**：TD-183/192 全栈 E2E 补跑、M2 边界评审（台账逐条过处置）；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
+**当前阶段：M2 组织与人员收尾中（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台已交付并过 CI；M2-UI3 自定义角色 / 多角色绑定 / 权限账号的十批已全部交付并过 CI——最后一批是**前端权限账号页 TD-187g-C**（2026-10-30，PR #22 → 合并提交 `fb6513d`）；**M2 收尾三件已完成一件**：`app/auth` 分支覆盖率抬到 82%（2026-10-30，PR #25 → 合并提交 `77ac33c`，CI 读数 417/506 = 82.41%；门槛由单独的门槛 PR（#26）从 80 抬到 82（其 backend CI 读数 417/506 = 82.41%，≥82）），**只剩两件**：TD-183/192 全栈 E2E 补跑、M2 边界评审（台账逐条过处置）；简报见 `docs/design-briefs/`）。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
 
 已完成：
 
@@ -37,12 +37,13 @@
 - **PR #25 远端 CI**（M2 收尾③，后端点）：backend run `41078941427` **833 passed / 830.96s（13:50）**，`app/auth` 分支覆盖率 **417/506 = 82.41%**（82% 需 415 条、余量 2 条；当时门槛仍是 80），`app/rbac` 79.92%（211/264）、`app/tenant` 81.25%（13/16）、`app/audit` 66.67%（4/6）全过；security 绿
 - **合并后 `main`（tip `77ac33c`）推送 CI**：backend run `41082150650` **833 passed / 822.47s（13:42）**（四包分支覆盖率与 PR run 逐包一致，auth 417/506 = 82.41%）；security run `41082150684` success
 - **点级本地门禁（M2 收尾③，2026-10-30 实测）**：全量 **833 passed**（30:42，win32 / CPython 3.13.13，改门槛与新增边界用例前）；**改门槛后复跑** `scripts/check_coverage.py` 在 `THRESHOLDS["app/auth"]=82` 下四包全 PASS（auth 417/506 = 82.41%）、门槛脚本单测 **5 passed**；`ruff check app tests scripts alembic`（All checks passed!）/ `mypy scripts`（3 文件 0 错误）/ bandit 两条（无告警）
+- **PR #26 远端 CI**（同点门槛 PR）：backend run `41086807009` **834 passed / 704.24s（11:44）**，`app/auth` **417/506 = 82.41%** PASS 门槛 82；security run `41086806889` success
 - **前端规模（2026-10-30）**：单测 **163**（api-client 67 + admin 96）、mock E2E **96** 条（`frontend/e2e/`，全部走 `page.route()` 有状态 mock，见 TD-253「mock 判据是手抄的，抄错不会红」）。**12 条全栈 E2E 仍是 M2-UI2 时点的数字**，M2-UI1/UI2/UI3 新增用例因本机 8000 端口被另一项目容器占用待补跑（TD-183/192）
 - 覆盖率门槛脚本 `backend/scripts/check_coverage.py`（`--cov-fail-under` 只看 TOTAL，不用）；取用例数要加 `-o addopts=""`；每个功能点一个 PR，受影响侧的全量套件由该 PR 的远端 CI 跑，合并条件＝CI 全绿 + 独立审查无 Blocker/Major
 
 进行中/待做：
 
-- **M2 收尾两件**（M2-UI3 十批全部合入 `main`；收尾③ `app/auth` 抬 82% 已于 2026-10-30 交付——PR #25 → 合并提交 `77ac33c`，CI 读数 417/506 = 82.41%，门槛由单独的门槛 PR 抬到 82（合并条件＝该 PR 的 backend CI 读数 ≥82））：① **TD-183 / TD-192 全栈 E2E 补跑**——本机 8000 端口被另一项目容器占用（不可强杀），`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6 跑；② **M2 边界评审**——`docs/tech-debt.md` 台账逐条过处置，重点 TD-233（台账外同类全表口径）、TD-254（前端 E2E 跑法口径）与 TD-264（本地/CI 解释器补丁版本）。**M3/M4**（知识库闭环、AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。
+- **M2 收尾两件**（M2-UI3 十批全部合入 `main`；收尾③ `app/auth` 抬 82% 已于 2026-10-30 交付——PR #25 → 合并提交 `77ac33c`，CI 读数 417/506 = 82.41%，门槛由单独的门槛 PR（#26）抬到 82（CI 读数 417/506 = 82.41%））：① **TD-183 / TD-192 全栈 E2E 补跑**——本机 8000 端口被另一项目容器占用（不可强杀），`bash scripts/e2e-stack.sh up` 后按 `docs/m1-acceptance.md` §6 跑；② **M2 边界评审**——`docs/tech-debt.md` 台账逐条过处置，重点 TD-233（台账外同类全表口径）、TD-254（前端 E2E 跑法口径）与 TD-264（本地/CI 解释器补丁版本）。**M3/M4**（知识库闭环、AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。
 
 - **M2-UI3 第七批：审计字段 `sessions_revoked` 收口（TD-231，2026-10-29，PR #16 → 合并提交 `0ffdb2d`）**：整数键 `sessions_revoked` **全仓只写整数**，含义统一为「本次真正断开的**活跃**会话家族数」（未撤销且未过期，与设备列表 `list_sessions` 取数一致）——租户 MFA 重置、平台 MFA 重置、密码重置三条链路的取家族 SELECT 都加了 `and expires_at > now()`（**撤销语句保持全量未撤销**：把已过期的死行一并标上撤销不花钱，计数准就行），与停用侧口径对齐；自助链路 4 个动作（`auth.mfa.activated`/`auth.mfa.disabled`/`auth.password.changed`/`auth.password.reset`）的布尔语义改用新键 **`sessions_all_revoked`**，`auth.password.reset` 原先另开的并行整数键 `sessions_revoked_count` 并入同名整数键后消失——改名前布尔与整数混写同一个键，巡检 SQL `sum((metadata_json->>'sessions_revoked')::int)` 在布尔行上直接报错（PG 不能把 `true` cast 成 int）。四条「过期家族不计入」用例补齐（租户 MFA 重置 / 平台 MFA 重置 / 租户密码重置 / **平台密码重置**——最后一条是独立审查的唯一阻塞项：审查实测「只把平台侧 SQL 改回旧写法，全部 57 条相关用例照样全绿」，即平台侧那处收窄改错了也没有用例会红），且用 `type(...) is int` 钉住类型——`True == 1` 在 Python 成立，只断言值会让布尔蒙混过关。口径与键名对照表见 `docs/design.md` §5.12。**遗留**（TD-235，已延后到 M3）：自助链路另外 3 个动作只写布尔不写条数，真要做跨动作设备数对比时才补。
 
