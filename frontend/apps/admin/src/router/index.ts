@@ -12,6 +12,7 @@ import ImportsView from "../views/ImportsView.vue";
 import LoginView from "../views/LoginView.vue";
 import MfaEnrollView from "../views/MfaEnrollView.vue";
 import PeopleView from "../views/PeopleView.vue";
+import PermissionAccountsView from "../views/PermissionAccountsView.vue";
 import ResetPasswordView from "../views/ResetPasswordView.vue";
 import RoleSettingsView from "../views/RoleSettingsView.vue";
 import RolloverView from "../views/RolloverView.vue";
@@ -80,6 +81,13 @@ export const router = createRouter({
           name: "role-settings",
           component: RoleSettingsView,
           meta: { requiresAuth: true, permission: "school.role.manage" },
+        },
+        {
+          // TD-187g-C：权限账号页（改绑 / 启停 / MFA 重置）
+          path: "settings/accounts",
+          name: "permission-accounts",
+          component: PermissionAccountsView,
+          meta: { requiresAuth: true, permission: "school.permission_account.manage" },
         },
       ],
     },

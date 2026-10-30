@@ -32,6 +32,16 @@ const ROLE_VIEW = {
   resettable: true,
 };
 
+const BINDINGS_VIEW = {
+  user_id: "u-1",
+  display_name: "张三",
+  user_type: "teacher",
+  status: "active",
+  roles_version: 4,
+  roles: [{ id: "r-1", code: "teacher", name: "教师", is_system: true, bindable: true }],
+  permission_codes: ["school.personnel.view"],
+};
+
 describe("createRbacApi", () => {
   it("listRoles / listPermissions 走 GET 且不带查询参数", async () => {
     const { session, calls } = sessionStub(() => []);
@@ -263,5 +273,74 @@ describe("createRbacApi", () => {
       reason: "调整到全校可见",
       self_grant_ack: true,
     });
+  });
+
+  it("listPermissionAccounts 只带 limit/cursor（后端没有搜索参数）", async () => {
+    const { session, calls } = sessionStub(() => ({ items: [], next_cursor: null }));
+    const api = createRbacApi(session);
+    await api.listPermissionAccounts({ limit: 50, cursor: "cur-2" });
+    await api.listPermissionAccounts();
+    expect(calls[0].path).toBe("/api/v1/school/permission-accounts?limit=50&cursor=cur-2");
+    expect(calls[1].path).toBe("/api/v1/school/permission-accounts");
+    expect(calls[0].init).toBeUndefined();
+  });
+
+  it("listBindableRoles 走 GET，返回的身份清单不含权限矩阵", async () => {
+    const { session, calls } = sessionStub(() => [
+      { id: "r-1", code: "teacher", name: "教师", is_system: true },
+    ]);
+    const roles = await createRbacApi(session).listBindableRoles();
+    expect(calls[0].path).toBe("/api/v1/school/bindable-roles");
+    expect(calls[0].init).toBeUndefined();
+    expect(roles).toEqual([{ id: "r-1", code: "teacher", name: "教师", is_system: true }]);
+    expect(Object.keys(roles[0])).not.toContain("permission_codes");
+  });
+
+  it("getUserBindings 读回快照：每行带 bindable、整体带 roles_version", async () => {
+    const { session, calls } = sessionStub(() => BINDINGS_VIEW);
+    const view = await createRbacApi(session).getUserBindings("u-1");
+    expect(calls[0].path).toBe("/api/v1/school/users/u-1/roles");
+    expect(calls[0].init).toBeUndefined();
+    expect(view.roles_version).toBe(4);
+    expect(view.roles[0].bindable).toBe(true);
+    expect(view.permission_codes).toEqual(["school.personnel.view"]);
+  });
+
+  it("replaceUserBindings 以 PUT 全量提交 role_ids 与 version（空数组=收回全部，照样发）", async () => {
+    const { session, calls } = sessionStub(() => ({
+      ...BINDINGS_VIEW,
+      roles_version: 5,
+      added_role_codes: [],
+      removed_role_codes: ["teacher"],
+      added_permission_codes: [],
+      removed_permission_codes: ["school.personnel.view"],
+    }));
+    const result = await createRbacApi(session).replaceUserBindings("u-1", {
+      role_ids: [],
+      version: 4,
+    });
+    expect(calls[0].path).toBe("/api/v1/school/users/u-1/roles");
+    expect(calls[0].init?.method).toBe("PUT");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ role_ids: [], version: 4 });
+    expect(result.roles_version).toBe(5);
+    expect(result.removed_role_codes).toEqual(["teacher"]);
+  });
+
+  it("deactivateUser 以 POST 提交理由，204 不解析响应体", async () => {
+    const { session, calls } = sessionStub(() => undefined);
+    await expect(
+      createRbacApi(session).deactivateUser("u-1", { reason: "教师离职，交接已完成" }),
+    ).resolves.toBeUndefined();
+    expect(calls[0].path).toBe("/api/v1/school/users/u-1/deactivate");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ reason: "教师离职，交接已完成" });
+  });
+
+  it("activateUser 发 POST 但不带任何请求体（后端连 body 参数都不接）", async () => {
+    const { session, calls } = sessionStub(() => undefined);
+    await expect(createRbacApi(session).activateUser("u-1")).resolves.toBeUndefined();
+    expect(calls[0].path).toBe("/api/v1/school/users/u-1/activate");
+    expect(calls[0].init).toEqual({ method: "POST" });
+    expect(calls[0].init?.body).toBeUndefined();
   });
 });

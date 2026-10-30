@@ -331,7 +331,7 @@ test("MFA 重置：按登录名定位目标、理由门禁、确认后清除绑�
   // 登录名不存在：透出后端原因，不泄露是否存在于其他租户
   await page.getByTestId("mfa-lookup-input").fill("E-0000");
   await page.getByTestId("mfa-lookup-submit").click();
-  await expect(page.getByText("未找到该登录名对应的用户")).toBeVisible();
+  await expect(page.getByText("用户不存在")).toBeVisible();
   expect(rbac.captures.lookup).toEqual(["E-9001", "E-0000"]);
 });
 

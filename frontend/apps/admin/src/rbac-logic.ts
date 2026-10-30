@@ -124,7 +124,7 @@ export function selfGrantGate(
  * 判据码与展示文案是两条线：文案给人看（`detail.message`），码给程序分支用。
  * 中间这层提取集中在一处，避免每个调用点各写一遍形状判断（写漏一个字段就静默失配）。
  */
-function rbacErrorCode(error: unknown): string | null {
+export function rbacErrorCode(error: unknown): string | null {
   if (!(error instanceof ApiError)) return null;
   const detail = error.detail;
   if (!detail || typeof detail !== "object") return null;
