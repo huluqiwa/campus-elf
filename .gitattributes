@@ -1,3 +1,6 @@
+# 文本文件统一 LF（索引 blob；检出按 LF 写出），不随各机 core.autocrlf 漂移；混合行尾不会在 diff 里隐身（TD-263）
+* text=auto eol=lf
+
 # 二进制文件禁止行尾转换
 *.pdf binary
 *.png binary

@@ -1,5 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
+import { assertDistFresh } from "./e2e/helpers/dist-freshness";
 import { loadAccounts } from "./e2e-fullstack/helpers/support";
 
 // M1 验收（TD-110）全栈 E2E 配置：真实后端容器 + 真实测试栈，不引入接口 mock；
@@ -7,6 +8,8 @@ import { loadAccounts } from "./e2e-fullstack/helpers/support";
 // 后端地址不写死：账号文件里的 e2e_base_url 经 VITE_API_PROXY_TARGET 注入两个 preview 的代理。
 // loadAccounts 会拒绝非本机地址与 8000——旧账号文件或跨项目路径都不可能把真实口令发出去。
 const backendUrl = loadAccounts().e2e_base_url;
+assertDistFresh("admin", __dirname);
+assertDistFresh("campus", __dirname);
 const inheritedEnv = Object.fromEntries(
   Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
 );
