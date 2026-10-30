@@ -58,7 +58,7 @@ TD-207 全栈 E2E 进 CI/nightly（M2-UI3 剩余点完成后）、TD-208 变异�
   `app/rbac` 73.87%（164/222）、`app/auth` 81.15%（409/504）、`app/tenant` 81.25%（13/16）、
   `app/audit` 66.67%（4/6）。原阈值取向下取整：73 / 81 / 81 / 66（auth 后经 CI 校准为 80，见下条），写在
   `backend/scripts/check_coverage.py`；`backend.yml` 与 `scripts/ci.sh` 的 pytest 步骤产出
-  `coverage.json` 后调用该脚本。反证：把 `app/auth` 临时抬到 99% → 脚本 exit 1，恢复当时的 81% → exit 0（现阈值为 80，见下条）。
+  `coverage.json` 后调用该脚本。反证：把 `app/auth` 临时抬到 99% → 脚本 exit 1，恢复当时的 81% → exit 0（当时阈值为 80，见下条；2026-10-30 已抬到 82，见 TD-221）。
 - **CI 校准（2026-10-28 PR #1 首跑）**：Linux CI 全量同 commit 两次 run 均 **757 passed**，
   `app/auth` 分别为 **407/504=80.75%**（run 40681833037）与 **408/504=80.95%**
   （run 40681807497），本地 409/504=81.15%；缺口在 `service.py` 的 1342–1343 与
