@@ -90,7 +90,7 @@ bash scripts/e2e-stack.sh up                     # 重置库→迁移→backend+
 # 每次跑前都必须 up：用例会改口令/角色绑定/MFA，seed 同时重置这些状态
 cd frontend
 export E2E_ACCOUNTS_FILE=../deploy/.e2e-accounts.json
-pnpm test:e2e:fullstack                          # 18 passed（2026-10-31 实测；首次全绿 50.8s、整改后复跑 1.3m，默认端口 18000）
+pnpm test:e2e:fullstack                          # 18 passed（2026-10-31 实测；首次全绿 50.8s、四轮审查整改后复跑 40.2s〔Playwright 计时，整轮 60s〕，默认端口 18000）
 pnpm test:e2e                                    # 96 passed（mock 回归）
 
 # 后端基线

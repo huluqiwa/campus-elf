@@ -133,7 +133,13 @@ export async function apiLoginMfa(
     mfa_token?: string;
     access_token?: string;
   };
-  if (response.ok && body.access_token) return body.access_token;
+  // 这里期待的是「密码 → 挑战 → TOTP」两步登录：直接拿到 access_token 说明目标账号
+  // 的 MFA 已被上一次运行重置过，报误导性的断言失败前先给出可操作的提示。
+  if (response.ok && body.access_token) {
+    throw new Error(
+      "登录直接返回 access_token：目标账号 MFA 已关闭（上次运行重置过）——先运行 scripts/e2e-stack.sh up 重建种子",
+    );
+  }
   if (!response.ok || body.status !== "mfa_required" || !body.mfa_token) {
     throw new Error(`真实 MFA 登录未进入挑战：HTTP ${response.status}`);
   }

@@ -38,7 +38,7 @@
 - **合并后 `main`（tip `77ac33c`）推送 CI**：backend run `41082150650` **833 passed / 822.47s（13:42）**（四包分支覆盖率与 PR run 逐包一致，auth 417/506 = 82.41%）；security run `41082150684` success
 - **点级本地门禁（M2 收尾③，2026-10-30 实测）**：全量 **833 passed**（30:42，win32 / CPython 3.13.13，改门槛与新增边界用例前）；**改门槛后复跑** `scripts/check_coverage.py` 在 `THRESHOLDS["app/auth"]=82` 下四包全 PASS（auth 417/506 = 82.41%）、门槛脚本单测 **5 passed**；`ruff check app tests scripts alembic`（All checks passed!）/ `mypy scripts`（3 文件 0 错误）/ bandit 两条（无告警）
 - **PR #26 远端 CI**（同点门槛 PR）：backend run `41086807009` **834 passed / 704.24s（11:44）**，`app/auth` **417/506 = 82.41%** PASS 门槛 82；security run `41086806889` success
-- **前端规模（2026-10-31）**：单测 **163**（api-client 67 + admin 96）、mock E2E **96** 条（`frontend/e2e/`，全部走 `page.route()` 有状态 mock，见 TD-253「mock 判据是手抄的，抄错不会红」）、全栈 E2E **18 条**（`frontend/e2e-fullstack/`，真实后端 + 真实库；2026-10-31 实测 **18 passed（首次全绿 50.8s、整改后复跑 1.3m）**，默认端口 18000）
+- **前端规模（2026-10-31）**：单测 **163**（api-client 67 + admin 96）、mock E2E **96** 条（`frontend/e2e/`，全部走 `page.route()` 有状态 mock，见 TD-253「mock 判据是手抄的，抄错不会红」）、全栈 E2E **18 条**（`frontend/e2e-fullstack/`，真实后端 + 真实库；2026-10-31 实测 **18 passed（首次全绿 50.8s；四轮审查整改后复跑 40.2s〔Playwright 计时，整轮 60s〕）**，默认端口 18000）
 - 覆盖率门槛脚本 `backend/scripts/check_coverage.py`（`--cov-fail-under` 只看 TOTAL，不用）；取用例数要加 `-o addopts=""`；每个功能点一个 PR，受影响侧的全量套件由该 PR 的远端 CI 跑，合并条件＝CI 全绿 + 独立审查无 Blocker/Major
 
 进行中/待做：

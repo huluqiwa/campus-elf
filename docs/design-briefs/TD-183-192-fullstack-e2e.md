@@ -78,7 +78,7 @@
 ## 7. 高风险确认
 
 - 本点不改 `backend/app/**`、不改任何权限判据或会话撤销逻辑；只改测试基础设施、种子与前端构建期代理配置。
-- TOTP secret 只写入 git 忽略的 `deploy/.e2e-accounts.json`；账号口令是种子脚本里的测试域固定值（仅 127.0.0.1 测试栈，不用于真实环境）；都不打印、不入库、不入日志。账号文件写入后尽力收紧到 `0600`：Linux/macOS 上生效；Windows 上 Python 的 `chmod` 只改只读位，实际访问控制由 NTFS ACL 决定（本机账号目录默认就是当前用户私有），失败也不中止种子。
+- TOTP secret 只写入 git 忽略的 `deploy/.e2e-accounts.json`；账号口令是种子脚本里的测试域固定值（仅 127.0.0.1 测试栈，不用于真实环境）；都不打印、不入库、不入日志。账号文件**创建时**就以 `0600` 打开：POSIX 上不留「先按 umask 建文件、事后 chmod」的可读窗口；Windows 上 `0o600` 只影响只读位、不改 ACL，文件在创建到执行 `icacls` 之间仍按目录继承 ACL，写后立刻 `icacls <file> /inheritance:r /grant:r <当前用户>:F` 去掉继承权限并只授当前用户（失败只打印警告、不中止种子）。POSIX 上写后再 `chmod 0600` 兜底。
 - 不触碰用户另一项目的容器；换端口后与 8000 完全解耦。
 
 ## 8. 实施回填（2026-10-31，首跑后补记）
@@ -90,8 +90,8 @@
 3. **对象存储要跨容器共享**：API 把上传文件写到 `OBJECT_STORE_DIR`，worker 再按 key 读取；原 `tmpfs` 是每容器独立。改为具名卷 `e2e_objects` 双挂载；具名卷首次创建归 root，因此再加一次性 `object-init` 容器 `chown appuser`，`backend`/`worker` 以 `service_completed_successfully` 依赖它。
 4. **两处用例断言问题**：Element Plus 原生 checkbox 输入是隐藏的，`openSchoolAdminRole` 改为断言外层勾选行可见（状态仍用 `toBeChecked()`）；首登改密实测改密请求 ~4s（bcrypt + 口令历史），默认 5s 断言窗口会误判，URL 断言放宽到 15s。
 
-5. **独立审查后的加固**：`up` 开始即删除旧账号文件、Playwright 端拒绝非本机地址与 8000（防旧文件把口令发到别的项目）；`object-init` 每次清空对象卷再改属主（垃圾不跨运行累积）；worker 等待改为「连续两次 running + RestartCount=0」，拦住启动即崩的重启循环；账号文件写后尽力收紧到 `0600`（Linux/macOS 生效，Windows 仅清只读位，见 §7）。
+5. **独立审查后的加固**：`up` 开始即删除旧账号文件（含端口非法等提前退出路径）、Playwright 端拒绝非本机地址与 8000（防旧文件把口令发到别的项目）；`object-init` 每次清空对象卷再改属主（垃圾不跨运行累积）；worker 等待改为「连续两次 running + RestartCount=0」，拦住启动即崩的重启循环；账号文件以 `0600` 创建，Linux/macOS 用 `chmod`、Windows 用 `icacls` 去继承，见 §7；`down` 在残缺环境下也必须可用（端口非法退回默认、必填变量缺失补占位、`.env.test` 缺失不给 `--env-file`，均不阻止拆除）、所有 compose 调用 `-p campus-elf-e2e` 钉死 project（防用户全局 `COMPOSE_PROJECT_NAME` 把 `down --remove-orphans` 作用到别的项目）、`status` 以 shell 显式端口优先并保留账号文件端口回退。
 
 另：导入用例补了业务结果断言——任务 `success_rows=1` 之外，还要求该教师能从 `/school/personnel` 查到（计数正确不等于档案真的建了）。
 
-**实测结果（2026-10-31，本机）**：`18 passed`（首次全绿 50.8s；第一轮审查整改后复跑 1.3m；第二轮审查整改后复跑 **1.8m**——该次与 `pnpm typecheck/lint` 等门禁并行跑，耗时偏高，是当前代码的读数）；端口 `18000`（`photo-memory` 的 8000 全程未受影响）。
+**实测结果（2026-10-31，本机）**：`18 passed`（首次全绿 50.8s；第一轮审查整改后复跑 1.3m；第二轮审查整改后 1.8m〔与门禁并行跑，受负载影响〕；第三轮审查整改后 49.5s〔整轮 72s〕；**第四轮审查整改后复跑 40.2s〔Playwright 计时，整轮含 preview 启动 60s〕，为当前代码读数**）；端口 `18000`（`photo-memory` 的 8000 全程未受影响）。
