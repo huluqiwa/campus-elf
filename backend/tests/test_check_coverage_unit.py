@@ -1,6 +1,6 @@
 """覆盖率门槛脚本的单元测试：阈值边界、逐文件明细与缺失报告。
 
-不依赖测试栈：用合成 `coverage.json` 钉住 80% 门槛的通过/失败边界与输出。
+不依赖测试栈：用合成 `coverage.json` 钉住门槛的通过/失败边界与输出（合成用例用 80/82 作示例阈值，生产阈值见 `THRESHOLDS`）。
 """
 
 import importlib.util
@@ -35,9 +35,25 @@ def _write_report(tmp_path: Path, files: dict[str, Any]) -> None:
 
 
 def test_production_auth_threshold_is_the_ci_floor() -> None:
-    """生产阈值钉在 CI 最低观测（407/504）；抬升须连同 TD-221/187f 一起改。"""
+    """生产阈值取 PR #25 CI run `41078941427` 的 417/506 = 82.41% 向下取整；抬升须连同 TD-221 一起改。"""
 
-    assert _load_script().THRESHOLDS["app/auth"] == 80
+    assert _load_script().THRESHOLDS["app/auth"] == 82
+
+
+def test_auth_floor_boundary_is_415_of_506(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """82% 门槛的边界：415/506 = 82.02% 过，414/506 = 81.82% 红。"""
+
+    script = _load_script()
+    monkeypatch.setattr(script, "THRESHOLDS", {"app/auth": 82})
+    monkeypatch.chdir(tmp_path)
+
+    _write_report(tmp_path, {"app/auth/service.py": _entry(415, 506)})
+    assert script.main() == 0
+
+    _write_report(tmp_path, {"app/auth/service.py": _entry(414, 506, missing=1)})
+    assert script.main() == 1
 
 
 def test_guard_passes_at_the_ci_floor_and_fails_below_it(
