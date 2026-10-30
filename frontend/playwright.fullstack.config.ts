@@ -1,8 +1,16 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// M1 验收（TD-110）全栈 E2E 配置：真实后端容器（127.0.0.1:8000）+ 真实测试栈，
-// 不引入接口 mock；与 playwright.config.ts（mock E2E）完全独立，互不影响。
-// 前置：scripts/e2e-stack.sh up（并按其输出导出 E2E_ACCOUNTS_FILE）。
+import { loadAccounts } from "./e2e-fullstack/helpers/support";
+
+// M1 验收（TD-110）全栈 E2E 配置：真实后端容器 + 真实测试栈，不引入接口 mock；
+// 与 playwright.config.ts（mock E2E）完全独立，互不影响。
+// 后端地址不写死：账号文件里的 e2e_base_url 经 VITE_API_PROXY_TARGET 注入两个 preview 的代理。
+// loadAccounts 会拒绝非本机地址与 8000——旧账号文件或跨项目路径都不可能把真实口令发出去。
+const backendUrl = loadAccounts().e2e_base_url;
+const inheritedEnv = Object.fromEntries(
+  Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+);
+
 export default defineConfig({
   testDir: "./e2e-fullstack",
   timeout: 60_000,
@@ -37,14 +45,17 @@ export default defineConfig({
     {
       command: "pnpm --filter admin preview",
       url: "http://127.0.0.1:4173",
-      reuseExistingServer: !process.env.CI,
+      // 不复用已有 preview：旧进程可能带着错误的代理目标，复用会把请求打到别的后端。
+      reuseExistingServer: false,
       timeout: 120_000,
+      env: { ...inheritedEnv, VITE_API_PROXY_TARGET: backendUrl },
     },
     {
       command: "pnpm --filter campus preview",
       url: "http://127.0.0.1:4174",
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 120_000,
+      env: { ...inheritedEnv, VITE_API_PROXY_TARGET: backendUrl },
     },
   ],
 });

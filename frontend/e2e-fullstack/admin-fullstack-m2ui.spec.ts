@@ -128,13 +128,22 @@ test("批量导入链路：上传教师 CSV → 轮询完成 → 成功计数正
   const jobId = ((await upload.json()) as { id: string }).id;
 
   // 轮询到终态（bcrypt 建档较慢，上限 60s）
-  let job: { status: string; success_rows: number } | null = null;
+  let job: { status: string; success_rows: number; failed_rows: number } | null = null;
   for (let i = 0; i < 60; i += 1) {
     const poll = await apiGet(accounts, `/api/v1/school/imports/${jobId}`, token);
-    job = poll.json as { status: string; success_rows: number };
+    job = poll.json as { status: string; success_rows: number; failed_rows: number };
     if (job.status !== "pending" && job.status !== "running") break;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   expect(job?.status).toBe("completed");
   expect(job?.success_rows).toBe(1);
+  expect(job?.failed_rows).toBe(0);
+
+  // 计数不是唯一事实来源：导入的人要真的出现在人事列表里（业务结果断言）
+  const people = await apiGet(accounts, "/api/v1/school/personnel?limit=100", token);
+  expect(people.status).toBe(200);
+  const imported = (people.json as Array<{ display_name: string }>).find(
+    (item) => item.display_name === "导入老师",
+  );
+  expect(imported, "导入完成的教师应能从 /school/personnel 查到").toBeTruthy();
 });

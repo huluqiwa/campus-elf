@@ -28,12 +28,14 @@ TD-110（M1-C-UI 时登记）处置承诺：「M1 验收阶段用专用 compose 
 **基础设施（全部为测试资产，零生产代码改动）：**
 
 - `deploy/backend/Dockerfile`：python:3.13-slim + uv `--frozen`（105 包）、非 root 运行、uvicorn 启动——生产容器化路径首次真实演练（生产硬化另行登记 TD-171）。
-- `deploy/docker-compose.e2e.yml`：专用 compose 栈（project `campus-elf-e2e`），经 external 网络 `campus-elf-test-net` 复用既有测试依赖栈；发布 `127.0.0.1:8000`。
-- `scripts/e2e-stack.sh`：up（重置测试库/Redis → 迁移 → 起 backend → seed）｜down｜status；E2E 专用 JWT/KEK 随机生成写入 git 忽略的 `deploy/.env.test`。
+- `deploy/docker-compose.e2e.yml`：专用 compose 栈（project `campus-elf-e2e`），经 external 网络 `campus-elf-test-net` 复用既有测试依赖栈；默认发布 `127.0.0.1:18000`（`E2E_BACKEND_PORT` 可配，2026-10-31 起不再占用 8000）；M2 收尾① 增加 arq `worker` 与共享对象卷 `e2e_objects`（导入任务由 worker 消费，API 与 worker 需读同一份上传文件）。
+- `scripts/e2e-stack.sh`：up（重置测试库/Redis → 迁移 → 起 backend/worker → seed）｜down｜status；E2E 专用 JWT/KEK 随机生成写入 git 忽略的 `deploy/.env.test`。
 - `backend/scripts/e2e_seed.py`：平台账号直写 + **真实 HTTP 注册→审核→开通**（与 BS-M1-B 同链路）+ 服务层造教师/学生/运营账号；初始密码从 MailHog 真实邮件提取；全部账号登录烟测 fail-fast。
 - `frontend/playwright.fullstack.config.ts` + `frontend/e2e-fullstack/`：独立 Playwright 配置与用例，不引入接口 mock，不影响既有 28 个 mock E2E。
 
 **12 个用例全部通过（29.4s，2026-10-24 实测）：**
+
+> 2026-10-31 回填：M2 收尾① 把全栈栈扩到 **18 例**（+3 TD-183 学年流转/导入、+3 TD-192 权限/重置/MFA 真实后端链路），并补了 arq worker 与共享对象卷；当前复现命令与读数见 §6。
 
 | 用例 | 验证的业务结果（非 HTTP 200） |
 |---|---|
@@ -59,8 +61,8 @@ TD-110（M1-C-UI 时登记）处置承诺：「M1 验收阶段用专用 compose 
 | 后端全量（单元/集成/业务场景） | `REQUIRE_TEST_SERVICES=1 uv run pytest -q` | **578 passed**（exit 0，2026-10-24 实测；含 M1-F 第三轮复审补充的 6 例——verify_chain 负路径单测 5 例 + M1-F downgrade 回归 1 例；历史文档曾记 561/574，以本次实测为准） |
 | 后端静态 | `ruff check app tests`、`mypy --no-incremental app tests`、`alembic check` | 全绿；新增 `scripts/e2e_seed.py` 单独 ruff/mypy 通过；迁移无漂移（head=`a8c3e9f1b5d7`） |
 | 前端质量门禁 | `pnpm lint` / `format:check` / `typecheck` / `test:unit` / `build` | 全绿（32 单测 passed） |
-| E2E（mock，回归） | `pnpm test:e2e` | **28 passed**（47.8s，无回归） |
-| E2E（全栈，TD-110 新增） | `pnpm test:e2e:fullstack` | **12 passed**（29.4s） |
+| E2E（mock，回归） | `pnpm test:e2e` | **28 passed**（47.8s，M1 收口时读数；2026-10-31 已扩到 96） |
+| E2E（全栈，TD-110 新增） | `pnpm test:e2e:fullstack` | **12 passed**（29.4s，M1 收口时读数；2026-10-31 已扩到 18） |
 | 一键本地 CI | `bash scripts/ci.sh` | 由上述各项构成；远端 CI 以最后推送为准（§5） |
 
 ## 4. M1 边界技术债评审（milestone §12）
@@ -83,12 +85,13 @@ TD-110（M1-C-UI 时登记）处置承诺：「M1 验收阶段用专用 compose 
 ## 6. 复现命令
 
 ```bash
-# 全栈 E2E（TD-110）
-bash scripts/e2e-stack.sh up                     # 重置库→迁移→backend 容器→seed
+# 全栈 E2E（TD-110 起，M2 收尾① 扩到 18 例）
+bash scripts/e2e-stack.sh up                     # 重置库→迁移→backend+worker 容器→seed
+# 每次跑前都必须 up：用例会改口令/角色绑定/MFA，seed 同时重置这些状态
 cd frontend
-export E2E_ACCOUNTS_FILE="$(cd .. && pwd)/deploy/.e2e-accounts.json"
-pnpm test:e2e:fullstack                          # 12 passed
-pnpm test:e2e                                    # 28 passed（mock 回归）
+export E2E_ACCOUNTS_FILE=../deploy/.e2e-accounts.json
+pnpm test:e2e:fullstack                          # 18 passed（2026-10-31 实测；首次全绿 50.8s、整改后复跑 1.3m，默认端口 18000）
+pnpm test:e2e                                    # 96 passed（mock 回归）
 
 # 后端基线
 cd ../backend && eval "$(bash ../scripts/test-stack.sh env)"

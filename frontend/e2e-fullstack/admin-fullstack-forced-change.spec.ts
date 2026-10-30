@@ -29,7 +29,8 @@ test("首登强制改密：初始口令登录→强制改密→旧口令失效�
   await field(page, "confirm-password").fill(NEW_PASSWORD);
   await page.getByTestId("change-submit").click();
 
-  await expect(page).toHaveURL(/\/$/);
+  // 改密要跑 bcrypt + 口令历史校验；并发下实测后端耗时 ~4s，默认 5s 断言窗口会误判成失败。
+  await expect(page).toHaveURL(/\/$/, { timeout: 15_000 });
   await expect(page.getByTestId("identity")).toContainText("校方");
 
   // 3) 登出后旧口令必须失效（密码历史生效）

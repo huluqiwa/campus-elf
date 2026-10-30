@@ -1,6 +1,7 @@
 """M1 验收（TD-110）全栈 E2E 种子数据。
 
-前置：scripts/e2e-stack.sh up 已完成（依赖栈 healthy、迁移到 head、backend 容器 8000 就绪）。
+前置：scripts/e2e-stack.sh up 已完成（依赖栈 healthy、迁移到 head、backend 容器就绪，
+宿主端口见 E2E_BASE_URL，默认 18000）。
 
 造数策略（能走真实链路的走真实链路）：
 - 平台账号不开放注册 → 复用业务测试支撑 `seed_platform_user` 直写（管理连接），
@@ -8,6 +9,9 @@
 - 租户走**真实 HTTP 注册 → 平台审核 → 自动开通**链路（与 BS-M1-B 同一链路），
   超管账号与初始密码由开通流程产生，初始密码从 MailHog 真实邮件提取；
 - 校方运营管理员/教师/学生复用 `seed_tenant_user`（真实角色链 user_roles→role_permissions）；
+- M2 收尾（TD-192）专用：角色操作员（role.manage + mfa.reset）、绑定内置 school_admin 的
+  权限目标、已绑定 TOTP 的 MFA 目标；TOTP secret 用 E2E_ENCRYPTION_KEK 加密入库，
+  明文只写 git 忽略的账号文件；
 - 全部账号做登录烟测，失败即中止（fail fast，避免 E2E 拿着坏数据假失败）。
 
 输出：deploy/.e2e-accounts.json（git 忽略）供 frontend/e2e-fullstack 用例读取。
@@ -17,9 +21,13 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
+from uuid import UUID
 
 import httpx
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -34,9 +42,19 @@ from tests.support.mailhog import (  # noqa: E402
     wait_for_message,
 )
 
+from app.security.encryption import (  # noqa: E402
+    decode_kek,
+    decrypt_secret,
+    encrypt_secret,
+    mfa_aad,
+)
+from app.security.totp import generate_totp_secret  # noqa: E402
+
 API_PREFIX = "/api/v1"
 
-# 测试域固定口令（≥10 字符、≥3 类字符、不含登录名）；不入库、不入 git，仅进 git 忽略的账号文件。
+# 测试域固定口令（≥10 字符、≥3 类字符）：只用于本地全栈 E2E，不用于任何真实环境，
+# 因此不套用生产口令策略（历史账号沿用了含登录名子串的写法，新增账号不再这样写）。
+# 账号文件 git 忽略；口令不入库、不打印、不入日志。
 PLATFORM_ACCOUNT = "e2e-ops"
 PLATFORM_PASSWORD = "E2E-Platform-Pass-1"
 SCHOOL_NAME = "E2E 全栈验收中学"
@@ -55,6 +73,15 @@ RESETTER_PASSWORD = "E2E-Resetter-Pass-1"
 # 会话设备管理专用账号：独占使用（设备限额 tenant=3，并行用例不得共用账号登录）。
 DEVICES_LOGIN_ID = "e2e-devices"
 DEVICES_PASSWORD = "E2E-Devices-Pass-1"
+# M2 收尾（TD-192）专用：角色操作员不绑定内置 school_admin（否则改它会自锁），
+# 权限目标绑内置 school_admin（撤权/恢复出厂的热更新都要作用在一个真实角色上）；
+# MFA 目标已绑定 TOTP，供「管理员重置 → 旧 access 立即 401」链路使用。
+ROLE_ADMIN_LOGIN_ID = "e2e-role-admin"
+ROLE_ADMIN_PASSWORD = "Campus-Elf-RoleA-2026x"
+ROLE_TARGET_LOGIN_ID = "e2e-role-target"
+ROLE_TARGET_PASSWORD = "Campus-Elf-RoleB-2026x"
+MFA_TARGET_LOGIN_ID = "e2e-mfa-target"
+MFA_TARGET_PASSWORD = "Campus-Elf-MfaC-2026x"
 
 PDF_BYTES = b"%PDF-1.4\n% e2e seed qualification\n%%EOF\n"
 
@@ -73,11 +100,83 @@ async def _clear_mailhog(api_base: str) -> None:
         await client.delete(f"{api_base}/api/v1/messages")
 
 
+async def _bind_builtin_role(
+    engine: AsyncEngine,
+    tenant_id: UUID,
+    user_id: UUID,
+    role_code: str,
+) -> None:
+    """挂到开通流程种下的内置角色（真实 user_roles 链路，不另建自定义角色）。"""
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session, session.begin():
+        role_id = await session.scalar(
+            text("select id from roles where tenant_id = :tenant_id and code = :code"),
+            {"tenant_id": tenant_id, "code": role_code},
+        )
+        if role_id is None:
+            raise SystemExit(f"[e2e-seed] 内置角色 {role_code} 不存在（开通流程未种角色）")
+        await session.execute(
+            text(
+                "insert into user_roles (tenant_id, user_id, role_id) "
+                "values (:tenant_id, :user_id, :role_id)"
+            ),
+            {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
+        )
+
+
+async def _enable_tenant_mfa(
+    engine: AsyncEngine,
+    tenant_id: UUID,
+    user_id: UUID,
+    *,
+    secret: str,
+    kek: bytes,
+) -> None:
+    """写入加密后的 TOTP secret；水位留空，E2E 首次登录可直接用当前窗口的码。"""
+
+    ciphertext = encrypt_secret(secret, kek=kek, aad=mfa_aad("tenant", user_id))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "update users set mfa_enabled = true, mfa_secret_enc = :enc, "
+                "mfa_last_used_step = null "
+                "where tenant_id = :tenant_id and id = :user_id"
+            ),
+            {"enc": ciphertext, "tenant_id": tenant_id, "user_id": user_id},
+        )
+
+
+async def _assert_mfa_roundtrip(
+    engine: AsyncEngine,
+    tenant_id: UUID,
+    user_id: UUID,
+    *,
+    secret: str,
+    kek: bytes,
+) -> None:
+    """读回库里的密文并解密比对：绑定写坏了就在 seed 阶段中止，不留给 E2E 假失败。"""
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        stored = await session.scalar(
+            text("select mfa_secret_enc from users where tenant_id = :tenant_id and id = :user_id"),
+            {"tenant_id": tenant_id, "user_id": user_id},
+        )
+    if not stored:
+        raise SystemExit(f"[e2e-seed] MFA 目标 {user_id} 的密文未写入")
+    decrypted = decrypt_secret(str(stored), kek=kek, aad=mfa_aad("tenant", user_id))
+    if decrypted != secret:
+        raise SystemExit(f"[e2e-seed] MFA 目标 {user_id} 的密文解密结果不一致")
+
+
 async def main() -> None:
     # 护栏：TEST_DATABASE_URL 必须指向 *_test 库（防止误伤开发/业务库）。
     assert_test_database_dsn(_require_env("TEST_DATABASE_URL"))
     mailhog_api = _require_env("TEST_MAILHOG_API")
-    base_url = os.environ.get("E2E_BASE_URL", "http://127.0.0.1:8000")
+    kek = decode_kek(_require_env("E2E_ENCRYPTION_KEK"))
+    base_url = os.environ.get("E2E_BASE_URL", "http://127.0.0.1:18000")
 
     engine = make_test_engine("admin")
     try:
@@ -146,7 +245,13 @@ async def main() -> None:
             login_id=SCHOOL_OPS_LOGIN_ID,
             password=SCHOOL_OPS_PASSWORD,
             user_type="school_admin",
-            permissions=("school.personnel.view",),
+            # TD-183 链路：建班/学年流转要 org.manage（同时决定「学年流转」菜单可见），
+            # 批量导入要 personnel.import；两者都是校方运营岗的真实职责范围。
+            permissions=(
+                "school.personnel.view",
+                "school.org.manage",
+                "school.personnel.import",
+            ),
             scope_types=("school",),
         )
         await seed_tenant_user(
@@ -182,6 +287,38 @@ async def main() -> None:
             password=DEVICES_PASSWORD,
             user_type="school_admin",
         )
+        await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=ROLE_ADMIN_LOGIN_ID,
+            password=ROLE_ADMIN_PASSWORD,
+            user_type="school_admin",
+            permissions=(
+                "school.role.manage",
+                "school.personnel.mfa.reset",
+                "school.personnel.view",
+            ),
+            scope_types=("school",),
+        )
+        role_target_tenant_id, role_target_user_id = await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=ROLE_TARGET_LOGIN_ID,
+            password=ROLE_TARGET_PASSWORD,
+            user_type="teacher",
+            scope_types=("school",),
+        )
+        await _bind_builtin_role(engine, role_target_tenant_id, role_target_user_id, "school_admin")
+        mfa_tenant_id, mfa_user_id = await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=MFA_TARGET_LOGIN_ID,
+            password=MFA_TARGET_PASSWORD,
+            user_type="teacher",
+        )
+        mfa_secret = generate_totp_secret()
+        await _enable_tenant_mfa(engine, mfa_tenant_id, mfa_user_id, secret=mfa_secret, kek=kek)
+        await _assert_mfa_roundtrip(engine, mfa_tenant_id, mfa_user_id, secret=mfa_secret, kek=kek)
     finally:
         await engine.dispose()
 
@@ -207,6 +344,18 @@ async def main() -> None:
                 "login_id": STUDENT_LOGIN_ID,
                 "password": STUDENT_PASSWORD,
             },
+            {
+                "realm": "tenant",
+                "school_code": school_code,
+                "login_id": ROLE_ADMIN_LOGIN_ID,
+                "password": ROLE_ADMIN_PASSWORD,
+            },
+            {
+                "realm": "tenant",
+                "school_code": school_code,
+                "login_id": ROLE_TARGET_LOGIN_ID,
+                "password": ROLE_TARGET_PASSWORD,
+            },
         ):
             response = await client.post(f"{API_PREFIX}/auth/login", json=payload)
             if response.status_code != 200:
@@ -214,6 +363,21 @@ async def main() -> None:
                     f"[e2e-seed] 登录烟测失败 {payload.get('account') or payload.get('login_id')}: "
                     f"{response.status_code} {response.text[:200]}"
                 )
+
+        # MFA 目标：密码登录必须停在挑战（证明认证层读到了刚写入的绑定）。
+        response = await client.post(
+            f"{API_PREFIX}/auth/login",
+            json={
+                "realm": "tenant",
+                "school_code": school_code,
+                "login_id": MFA_TARGET_LOGIN_ID,
+                "password": MFA_TARGET_PASSWORD,
+            },
+        )
+        if response.status_code != 200 or response.json().get("status") != "mfa_required":
+            raise SystemExit(
+                f"[e2e-seed] MFA 目标登录未进入挑战: {response.status_code} {response.text[:200]}"
+            )
 
     # 7) 写账号文件（git 忽略）
     accounts = {
@@ -254,6 +418,22 @@ async def main() -> None:
             "login_id": DEVICES_LOGIN_ID,
             "password": DEVICES_PASSWORD,
         },
+        "role_admin": {
+            "school_code": school_code,
+            "login_id": ROLE_ADMIN_LOGIN_ID,
+            "password": ROLE_ADMIN_PASSWORD,
+        },
+        "role_target": {
+            "school_code": school_code,
+            "login_id": ROLE_TARGET_LOGIN_ID,
+            "password": ROLE_TARGET_PASSWORD,
+        },
+        "mfa_target": {
+            "school_code": school_code,
+            "login_id": MFA_TARGET_LOGIN_ID,
+            "password": MFA_TARGET_PASSWORD,
+            "totp_secret": mfa_secret,
+        },
     }
     accounts_file = Path(
         os.environ.get("E2E_ACCOUNTS_FILE", BACKEND_ROOT.parent / "deploy" / ".e2e-accounts.json")
@@ -261,6 +441,9 @@ async def main() -> None:
     accounts_file.write_text(
         json.dumps(accounts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    # Windows 上 chmod 只影响只读位，失败可忽略；Linux/macOS 上收紧到仅属主可读。
+    with suppress(OSError):
+        accounts_file.chmod(0o600)
     print(f"[e2e-seed] 完成：school_code={school_code}，账号文件={accounts_file}")
 
 

@@ -63,4 +63,9 @@ regexes = [
   "PermAcct-Student-Pass-1",
   "PermAcct-Plain-Pass-1",
   "PermAccount-Pass-1",
+  # M2 收尾① TD-183/192 全栈 E2E 种子账号口令（仅 127.0.0.1 测试栈使用；非真实凭证）。
+  # 仍按精确字符串放行，不做目录豁免——tests/backend/scripts 同样可能误粘真实凭证。
+  "Campus-Elf-RoleA-2026x",
+  "Campus-Elf-RoleB-2026x",
+  "Campus-Elf-MfaC-2026x",
 ]
