@@ -20,8 +20,8 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
-from contextlib import suppress
 from pathlib import Path
 from uuid import UUID
 
@@ -91,6 +91,39 @@ def _require_env(name: str) -> str:
     if not value:
         raise SystemExit(f"[e2e-seed] 缺少环境变量 {name}（先运行 scripts/e2e-stack.sh up）")
     return value
+
+
+def _tighten_accounts_file(path: Path) -> None:
+    """账号文件只留当前用户可读写。
+
+    Windows 上 Python 的 chmod 只改只读位，真正生效的是 ACL，故用 icacls 去掉继承并只授当前用户；
+    POSIX 上 os.open(0o600) 已生效，这里再补一次 chmod 兜底（失败不静默：提示但继续）。
+    """
+    if os.name == "nt":
+        user = os.environ.get("USERNAME")
+        if not user:
+            print("[e2e-seed] 警告：无法确定当前用户，账号文件 ACL 未收紧", file=sys.stderr)
+            return
+        try:
+            result = subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError as error:
+            print(f"[e2e-seed] 警告：无法执行 icacls 收紧账号文件 ACL：{error}", file=sys.stderr)
+            return
+        if result.returncode != 0:
+            print(
+                f"[e2e-seed] 警告：收紧账号文件 ACL 失败（icacls 返回 {result.returncode}）",
+                file=sys.stderr,
+            )
+        return
+    try:
+        path.chmod(0o600)
+    except OSError as error:
+        print(f"[e2e-seed] 警告：账号文件 chmod 0600 失败：{error}", file=sys.stderr)
 
 
 async def _clear_mailhog(api_base: str) -> None:
@@ -438,12 +471,18 @@ async def main() -> None:
     accounts_file = Path(
         os.environ.get("E2E_ACCOUNTS_FILE", BACKEND_ROOT.parent / "deploy" / ".e2e-accounts.json")
     )
-    accounts_file.write_text(
-        json.dumps(accounts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    # Windows 上 chmod 只影响只读位，失败可忽略；Linux/macOS 上收紧到仅属主可读。
-    with suppress(OSError):
-        accounts_file.chmod(0o600)
+    # 以 0600 创建再写：POSIX 上避免「按 umask 建文件 → 事后 chmod」之间可被读取的窗口；
+    # Windows 的 0o600 不改 ACL，真正的收紧由写后的 icacls 完成。
+    serialized = json.dumps(accounts, ensure_ascii=False, indent=2) + "\n"
+    fd = os.open(accounts_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except OSError:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(serialized)
+    _tighten_accounts_file(accounts_file)
     print(f"[e2e-seed] 完成：school_code={school_code}，账号文件={accounts_file}")
 
 

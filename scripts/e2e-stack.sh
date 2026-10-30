@@ -24,9 +24,17 @@ E2E_COMPOSE_FILE="${DEPLOY_DIR}/docker-compose.e2e.yml"
 DEFAULT_BACKEND_PORT=18000
 BACKEND_PORT=""
 ACCOUNTS_FILE="${DEPLOY_DIR}/.e2e-accounts.json"
+E2E_PROJECT_NAME="campus-elf-e2e"
 
 e2e_compose() {
-  docker compose --env-file "${ENV_FILE}" -f "${E2E_COMPOSE_FILE}" "$@"
+  # -p 钉死 project：COMPOSE_PROJECT_NAME 的优先级高于 compose 文件的 name:，
+  # 用户全局设了它就会让 down --remove-orphans 作用到别的项目。
+  # .env.test 缺失时不给 --env-file（down 在残缺环境下也必须能拆）。
+  if [[ -f "${ENV_FILE}" ]]; then
+    docker compose -p "${E2E_PROJECT_NAME}" --env-file "${ENV_FILE}" -f "${E2E_COMPOSE_FILE}" "$@"
+  else
+    docker compose -p "${E2E_PROJECT_NAME}" -f "${E2E_COMPOSE_FILE}" "$@"
+  fi
 }
 
 test_compose() {
@@ -35,7 +43,8 @@ test_compose() {
 
 read_env_value() {
   # 键不存在是正常情况（如首次运行），pipefail 下必须显式吞掉 grep 的非零状态。
-  grep -E "^${1}=" "${ENV_FILE}" 2>/dev/null | head -1 | cut -d= -f2- || true
+  # 去掉 CR：手工用 CRLF 编辑器改过 .env.test 时，值尾的 \r 会让端口校验/密码比对失败。
+  grep -E "^${1}=" "${ENV_FILE}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r' || true
 }
 
 resolve_backend_port() {
@@ -131,9 +140,7 @@ wait_worker_running() {
 }
 
 cmd_up() {
-  # 放在最前：任何失败路径（含端口被占、迁移失败）都不能留下上一轮的账号文件——
-  # 它含旧口令与 TOTP secret，且可能指向旧端口，被 Playwright 读到就会发到别处。
-  rm -f "${ACCOUNTS_FILE}"
+  # 账号文件已在 up) 入口删除（含端口非法等提前退出路径），这里不再重复。
   # 1) 依赖栈（幂等；同时修正角色口令漂移）；其 compose 文件不含 E2E 必填变量，
   #    先于 ensure_e2e_secrets 执行也不会插值失败。
   bash "${REPO_ROOT}/scripts/test-stack.sh" up
@@ -174,13 +181,21 @@ cmd_up() {
 }
 
 cmd_down() {
-  # down 不需要宿主端口，但 compose 解析文件时仍要插值它：非法值会让 down 本身失败。
-  # 退回默认端口而不是拦住 down——拆除必须永远可用。
-  local rc=0
-  if [[ -n "${E2E_BACKEND_PORT:-}" ]] && ! [[ "${E2E_BACKEND_PORT}" =~ ^[1-9][0-9]{0,4}$ ]]; then
-    echo "[e2e-stack] 注意：E2E_BACKEND_PORT=${E2E_BACKEND_PORT} 不是合法端口，down 按默认 ${DEFAULT_BACKEND_PORT} 解析 compose 文件" >&2
-    export E2E_BACKEND_PORT="${DEFAULT_BACKEND_PORT}"
+  # down 不需要宿主端口，但 compose 解析文件时仍要插值端口与必填变量：
+  # 端口非法（含 .env.test 里的）就退回默认，变量缺失就补占位值——拆除必须永远可用。
+  local rc=0 port
+  port="${E2E_BACKEND_PORT:-$(read_env_value E2E_BACKEND_PORT)}"
+  port="${port:-${DEFAULT_BACKEND_PORT}}"
+  if ! [[ "${port}" =~ ^[1-9][0-9]{0,4}$ ]] || (( 10#${port} > 65535 )); then
+    echo "[e2e-stack] 注意：E2E_BACKEND_PORT=${port} 不是合法端口，down 按默认 ${DEFAULT_BACKEND_PORT} 解析 compose 文件" >&2
+    port="${DEFAULT_BACKEND_PORT}"
   fi
+  export E2E_BACKEND_PORT="${port}"
+  export TEST_APP_PASSWORD="${TEST_APP_PASSWORD:-down-placeholder}"
+  export TEST_PLATFORM_PASSWORD="${TEST_PLATFORM_PASSWORD:-down-placeholder}"
+  export TEST_REDIS_PASSWORD="${TEST_REDIS_PASSWORD:-down-placeholder}"
+  export E2E_JWT_SECRET="${E2E_JWT_SECRET:-down-placeholder}"
+  export E2E_ENCRYPTION_KEK="${E2E_ENCRYPTION_KEK:-down-placeholder}"
   e2e_compose down --remove-orphans || rc=$?
   rm -f "${ACCOUNTS_FILE}"
   if (( rc != 0 )); then
@@ -197,14 +212,17 @@ accounts_file_port() {
 }
 
 cmd_status() {
-  local effective_port="${BACKEND_PORT}" from_file configured
+  # $1 = shell 里显式设置的 E2E_BACKEND_PORT（可为空）。resolve_backend_port 已把
+  # 生效值导出到环境，不能再用环境变量判断「用户是否显式配置过」。
+  local shell_port="${1:-}" effective_port="${BACKEND_PORT}" from_file configured
   from_file="$(accounts_file_port || true)"
-  configured="${E2E_BACKEND_PORT:-$(read_env_value E2E_BACKEND_PORT)}"
+  configured="${shell_port:-$(read_env_value E2E_BACKEND_PORT)}"
   if [[ -n "${from_file}" ]]; then
     if [[ -n "${configured}" && "${from_file}" != "${BACKEND_PORT}" ]]; then
       # 显式配置优先，但把不一致说出来：账号文件可能是上一轮另一端口的残留。
       echo "[e2e-stack] 注意：账号文件记录端口 ${from_file}，当前配置 ${BACKEND_PORT}（改过端口需重新 up）" >&2
     elif [[ -z "${configured}" ]]; then
+      # 没有显式配置也没有 .env.test 值：以账号文件为准，否则临时改端口后 status 会报错端口。
       effective_port="${from_file}"
     fi
   fi
@@ -220,13 +238,17 @@ cmd_status() {
 
 case "${1:-}" in
   up)
+    # 先删：端口非法等任何提前退出的路径都不能留下上一轮的账号文件
+    # （它含旧口令与 TOTP secret，且可能指向旧端口）。
+    rm -f "${ACCOUNTS_FILE}"
     resolve_backend_port
     cmd_up
     ;;
   down) cmd_down ;;
   status)
+    status_shell_port="${E2E_BACKEND_PORT:-}"
     resolve_backend_port
-    cmd_status
+    cmd_status "${status_shell_port}"
     ;;
   *) echo "用法：scripts/e2e-stack.sh {up|down|status} [E2E_BACKEND_PORT=18000]" >&2; exit 2 ;;
 esac
