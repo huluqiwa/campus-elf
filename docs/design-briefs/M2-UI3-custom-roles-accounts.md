@@ -1231,3 +1231,262 @@ commit → push → PR → 远端 CI 全绿 → rebase 合并 → main CI 全绿
 | **B4** 删除入口权限码门禁 | **按 `school.role.delete` 显示** | 决策 #6 特意把「能配」与「能删」分成两个码；没有执行码时给只读影响面 + 一句说明，不给必然 403 的按钮 |
 
 落地时不得偏离这四条。
+
+
+## 20. TD-187g-C：前端权限账号页（列表 / 绑定 / 启停 / MFA 重置）
+
+> 状态：**待拍板**（§20.2 的 C1、C2、C5、C6 四张卡需用户裁决；C3、C4 由契约事实与已拍板结论
+> **唯一确定**，列出来只为留痕，不重开决策）。本节是 §18.4「187g-C（前端权限账号页）」的展开，
+> 对应 §18.1 验收 **A5**，也是 M2-UI3 的**最后一批**。
+> **纯前端 PR**（§18.3 决策 3 的第 3 块）：`backend/` 一行不改——账号侧 8 个端点都已在 `main` 上
+> （绑定与启停分别随 TD-187d / TD-187e 交付，两个只读列表端点随 187g-A / PR #18 → `8936c3f` 交付，
+> MFA 重置与登录名定位随 M2-UI2 交付）。
+
+### 20.1 目标与验收
+
+**现状核对（2026-10-30 读代码得到的事实，不是设想）**：
+
+| 后端能力 | 端点（前缀 `/api/v1/school`） | 权限码 | 前端入口 |
+|---|---|---|---|
+| 权限账号列表 | `GET /permission-accounts`（`school_rbac.py:767`） | `school.permission_account.manage` | **无** |
+| 可授角色目录 | `GET /bindable-roles`（`:488`） | 同上 | **无** |
+| 单账号绑定快照 | `GET /users/{id}/roles`（`:837`） | 同上 | **无** |
+| 绑定全量替换 | `PUT /users/{id}/roles`（`:858`） | 同上 | **无** |
+| 账号停用 | `POST /users/{id}/deactivate`（`:917`） | 同上 | **无** |
+| 账号启用 | `POST /users/{id}/activate`（`:948`） | 同上 | **无** |
+| MFA 重置（按 `user_id`） | `POST /users/{id}/mfa/reset`（`:891`） | `school.personnel.mfa.reset` | 有（角色页底部「安全工具」卡片，**只能先按登录名查**） |
+| 按登录名定位 | `GET /users/lookup?login_id=`（`:809`） | `school.personnel.mfa.reset` | 有（同上卡片） |
+
+前端现状（文件与行号）：`frontend/apps/admin/src/router/index.ts`（140 行，`settings/roles` 的
+`meta.permission` 写法在 `:79-82`，权限守卫在 `:135-137`，**没有账号页路由**）；
+`frontend/apps/admin/src/views/AdminLayout.vue`（MENU 数组 `:19-26` 共 6 项、`:33` 按权限过滤菜单）；
+`frontend/packages/api-client/src/rbac.ts`（223 行，`RbacApi` `:144-162` 的 12 个方法里**账号侧 0 个**）；
+`frontend/e2e/helpers/rbac-mock.ts`（786 行，无账号侧路由）。
+
+**九条契约事实**（每条都在界面上有对应决策，先摆事实再谈方案）：
+
+1. **列表没有搜索参数，也没有 `login_id`**。`GET /permission-accounts` 只接 `limit`（1–100，默认 50；
+   上限 `binding.py:47`）与 `cursor`（≤256）（`school_rbac.py:770-771`）；行字段是
+   `id/display_name/user_type/status/role_codes/roles_version/mfa_enabled/is_super_admin`（`:298`），
+   **故意不回显 `login_id`**（学号/工号属敏感标识符，`:299` 注释）
+   → 运营手里只有「姓名 + 角色 + 状态」，没有可直接查的工号。这条决定 **C1**。
+2. **状态可达集合只有三个**：`active` / `locked` / `disabled`。列表按 `BINDABLE_USER_TYPES`
+   （`binding.py:44` = `{teacher, school_admin}`）过滤并**排除 `deleted`**（SQL 在 `binding.py:402`）；
+   DB CHECK `ck_users_status_valid`（`alembic/versions/779f731db342_m1a_tenant_base.py:153`）里**没有** `pending`
+   → 标签映射只需三档；出现第四档说明后端契约变了，要显式暴露而不是静默显示英文原码。
+3. **`is_super_admin` 是服务端派生的判据**（`binding.py:427`，从同一批 `role_codes` 派生，不另开 join）。
+   §18.6 TD-242 已定：绑定入口据此关掉，**不许在前端按 `role_codes` 硬认超管**。
+4. **两份「角色」来源不是同一个集合**：`GET /bindable-roles` 只列 `bindable=true` 的角色
+   （判据 `role_is_bindable(code) = code != "school_super_admin"`，`backend/app/rbac/admin.py:257`）；
+   `GET /users/{id}/roles` 的 `roles[]` **不过滤**，但每行带 `bindable`（`BoundRoleResponse:230`）。
+   今天两个集合在「非超管账号」上恰好重合，**重合是巧合不是契约**（TD-245 明说将来自定义角色可能加
+   「可绑定」标记）→ 见 **C3**。
+5. **`PUT /users/{id}/roles` 是全量替换 + 乐观锁**：body `role_ids`（必填，空数组＝收回全部）+
+   `version`（必填，取 `roles_version`）+ `reason`（可空，≤500）。
+   **绑定理由没有 ≥10 字判据**（`binding.py:462` 只做 `strip()` 后空 → `None`），
+   与停用 / MFA 重置的 ≥10 字**不是同一道门** → 绑定区不能写「理由至少 10 字」。
+   （这正是 187g-B 审查 m2 记进 TD-252/TD-253 的那类坑：把别处的判据手抄过来。）
+6. **三类写操作各有自锁禁令，且都在服务端**：改自己的绑定 → 403 `BINDING_SELF_FORBIDDEN`
+   （`binding.py:472`，**在读目标之前**就判，也先于「目标不存在」）；停用自己 → 409
+   `ACCOUNT_SELF_DEACTIVATE`；重置自己 MFA → 409 `MFA_SELF_RESET`；**启用没有自锁判据**
+   （`school_rbac.py:948-953` 连 body 都没有）。`AuthUser.userId` 已下发（`auth.ts:23`）
+   → 前端能认出「这行是我」，按 187g-B 决策 B4 的口径**不给必然失败的按钮，给一句为什么**。
+7. **停用 / 启用 / MFA 重置都返回 204 No Content**（`school_rbac.py:891/917/948`）。服务层算出的
+   `sessions_revoked` 条数**被路由丢弃**，只落在审计（`school.user.deactivated` / `school.user.mfa_reset`）
+   → 界面**不能说**「已踢掉 N 台设备」，只能说「会话已失效，需重新登录」；要显示条数得先改后端契约
+   （TD-235 同族，本期不做）。
+8. **超管账号在三个方向上分别被挡**：改绑 403 `BINDING_SUPER_ADMIN_FORBIDDEN`、启停 403
+   `ACCOUNT_SUPER_ADMIN_FORBIDDEN`、MFA 重置 403 `MFA_SUPER_ADMIN_FORBIDDEN`（三条码不同，文案各写一句）。
+   另有一条容易踩的顺序：**已 `deleted` 的账号先判 404**，再判超管（`docs/review-log.md` 187e 审查已记）
+   → 列表里看不到 `deleted`，前端不需要处理这一档。
+9. **409 版本冲突只有绑定回带 `latest`**：`_binding_error` 的 409 载荷含 `latest`（最新快照），
+   `_account_error` / `_mfa_error` **不带** → 绑定冲突能自动采用最新；启停 / MFA 冲突只能重读列表那一页。
+   分页语义与 `GET /school/teachers` 同形：`next_cursor` **只在这一页填满 `limit` 时才非空**
+   （`binding.py:431-435`）→ 「还有没有下一页」只能跟 `next_cursor` 走，不能按 `items.length < limit` 猜。
+
+**验收（对应 §18.1 A5）**：
+
+- **CA1** 有 `/settings/accounts` 路由 + 菜单项，门禁 `school.permission_account.manage`；
+  直连 URL 权限不足由现有守卫挡到 403 页（`router/index.ts:135-137`）。
+- **CA2** 列表显示「姓名 / 类型（教师·校方管理员）/ 状态（启用·锁定·停用）/ 角色码 / MFA」，
+  游标分页能往后翻也能回翻（沿用 `PeopleView.vue:60-74` 的游标栈做法）。
+- **CA3** 打开某账号 → 绑定区以 `GET /users/{id}/roles` 为基底，能勾能撤，保存发 `PUT` 且带 `version`；
+  409 采用 `latest` 重载并提示，**不静默覆盖别人的修改**；当前持有但不在可授目录里的角色
+  **不会被静默收回**（C3）。
+- **CA4** 能停用（理由 ≥10 字前端先拦、不足不发请求）、能启用（无 body）；结果靠**重读那一页**反映，
+  不靠前端手改本地状态。
+- **CA5** 能重置 MFA，入口直接吃 `user_id`（不再要求先按登录名查一遍）。
+- **CA6** 「这行是我」与「这行是超管」两种情况**不给必然失败的按钮**，各给一句只读说明；
+  后端 403/409 仍是真边界。
+- **CA7** 纯逻辑抽 `account-logic.ts` 走单测；页面配 mock E2E（`admin-permission-accounts.spec.ts`）。
+
+**不做（本期）**：账号硬删、按人员数据范围裁剪列表（TD-237 已定：权限账号管理是租户级操作）、
+给列表加服务端搜索（属后端 PR，破 §18.3 决策 3）、显示被撤销的会话条数（TD-235 同族）、
+批量改绑 / 批量启停、把 MFA 卡片从角色页搬走（§18.6 已定本期不搬）。
+
+### 20.2 候选方案
+
+#### 决策 C1：运营怎么在列表里找到一个账号
+
+事实前提：后端没有搜索参数、行里没有 `login_id`（事实 1）；唯一能按登录名精确定位的
+`GET /users/lookup?login_id=` 挂的是**另一个码** `school.personnel.mfa.reset`，且它的响应
+**不含 `roles_version`**（要绑定还得再发一次 `GET /users/{id}/roles`）。
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 |
+|---|---|---|---|---|
+| **A（推荐）** 两段式：① 当前页本地按「姓名 / 角色码」过滤（纯前端、即时）；② 另给一个「按登录名精确定位」框，**只在持 `school.personnel.mfa.reset` 时显示**，命中后拿 `id` 直接开抽屉 | 保持纯前端 PR；`rbacApi.lookupUser()` 已存在且在用（`RoleSettingsView.vue:343`）→ 零新契约；只知道工号的人也能定位 | ① 只覆盖**已加载的那一页**，翻页后要重跑过滤；② 搜索框可见性挂在 MFA 码上，语义别扭，界面要写清「按工号精确定位需要 MFA 重置权限」 | 低：最坏是「找不到」，不会做错操作 |
+| B 只做当前页本地过滤 + 翻页 | 最省，判据最干净 | 全校几百上千教师时要点很多页；「我知道工号」这条最自然的诉求满足不了 | 低（功能缺口，不是错判） |
+| C 给后端 `GET /permission-accounts` 加 `q=` / `status=` | 搜索覆盖全校，语义最正 | **破 §18.3 决策 3 的纯前端约束** → 本点变前后端混合 PR、多一轮契约审查；且 `q` 若匹配 `login_id` 就把敏感标识符变成可枚举面（TD-237 那条最小权限考虑） | 中（工期 + 契约） |
+| D 只用 `lookup` 当搜索 | 零新代码 | 只持 `permission_account.manage` 的人**一查就 403**——入口显示、点击必失败，正是 187g-B 决策 B4 拒绝的死路 | 高 |
+
+#### 决策 C2：账号详情的形态
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 |
+|---|---|---|---|---|
+| **A（推荐）** 点行 → `el-drawer`：打开时发 `GET /users/{id}/roles` 拿**新鲜**快照（`roles_version` + 生效权限并集），抽屉内放绑定区 + 启停 + MFA 重置 | 与角色页「列表 + 面板」同一心智；每次打开都重读 → 版本不陈旧；这一个 `GET` 正好给齐绑定所需的全部字段 | 抽屉要处理加载 / 失败 / 409 三种态 | 低 |
+| B 表格行内展开（`el-table` expand） | 少一层弹层 | 展开仍要发 GET（否则 `version` 陈旧），等于把三个操作区塞进一行高度 | 中：可用性格局风险 |
+| C 子路由 `/settings/accounts/:userId` | URL 可分享、刷新不丢 | 要新增路由 + 守卫 + 深链加载态；本点没有「把账号链接发给同事」的诉求 | 低，但成本不值 |
+
+#### 决策 C3：绑定区的数据源（**本节唯一有静默数据丢失风险的点**）
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 |
+|---|---|---|---|---|
+| **A（推荐）** 以 `GET /users/{id}/roles` 的 `roles[]` 为基底渲染**已持有**角色（各自按 `bindable` 决定能否撤），`bindable-roles` 只补「还没持有、可新增」的候选；提交集合 = 已持有 ∪ 新勾选，**不含**界面上根本没渲染的行 | 结构上杜绝「保存时把一个界面上看不见的角色静默收回」；将来 `bindable` 判据收窄（TD-245 明说会改）时不用回来改这里 | 已持有但 `bindable=false` 的行要只读展示 + 一句说明（今天只有超管命中，而超管整行已只读） | 无 |
+| B 只用 `bindable-roles` 渲染全部 checkbox，勾上的提交 | 代码最短（一份目录 + 一个 Set） | 依赖「两集合今天重合」这个巧合（事实 4）；判据一变，持有人会被静默移出 | **中高**：187g-B 范围选择器 Blocker 的反向版本（那边是「多撤」，这边是「偷偷撤」） |
+| C 本期不做绑定，只做启停 | 最省 | §18.1 A5 明写要能改绑定；后端 TD-187d 整条能力继续没人用 | 功能缺口 |
+
+#### 决策 C4：超管账号 / 「这行是我」怎么挡（**沿用已拍板，不重开**）
+
+§18.6 TD-242 定了超管口径，187g-B 决策 B4 定了「入口与执行分离、不给必然失败的按钮」，
+事实 6 给了自锁禁令。本点落地口径：
+
+- `is_super_admin=true` → 绑定 / 停用 / 启用 / MFA 重置**四个写控件都不给**，
+  只读说明「该账号是校方超管，角色绑定与启停由平台开通流程管理，租户内不可修改」；
+- `row.id === auth.user.userId` → 绑定 / 停用 / MFA 重置不给（三条自锁禁令），
+  **启用**没有自锁判据 → 正常给；文案写「不能修改自己的账号（改绑/停用/重置 MFA 需由其他管理员操作）」；
+- 缺 `school.personnel.mfa.reset` 码 → MFA 重置区不渲染（不是置灰后再 403）。
+
+| 方案 | 做法 | 优点 | 缺点 | 风险 |
+|---|---|---|---|---|
+| **A（推荐，即上述口径）** 不给写控件 + 一句为什么 | 界面与后端权限一致，运营不会以为按钮坏了 | 多三条只读分支 | 无 |
+| B 一律给按钮，失败再弹后端 403/409 | 代码最短 | 明知必然失败的按钮；审计里出现一批注定失败的拒绝记录 | 中（与已拍板的 B4 口径冲突） |
+
+#### 决策 C5：MFA 重置入口放哪
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 |
+|---|---|---|---|---|
+| **A（推荐）** 账号页给一个「重置 MFA」区（直接吃 `user_id`），角色页那张「安全工具」卡片**原样留着** | 从列表就能重置，不用再想登录名；不动 M2-UI2 已交付页面与它的 E2E（A5 明确允许不搬） | 两个入口 → 理由校验必须同源（同一个纯函数），登记 TD | 低 |
+| B 搬走（删角色页卡片） | 只有一个入口 | 要动 M2-UI2 已交付页面 + 改它的 E2E；本点 diff 变大，且删掉有人用惯的旧入口 | 中 |
+| C 账号页不做 MFA，仍靠角色页那张卡 | 最省 | 从账号列表想重置 MFA 得先知道登录名再切页面——而列表**故意不显示登录名**（事实 1），这条路对本页用户几乎走不通 | 功能缺口 |
+
+#### 决策 C6：停用 / MFA 重置的确认强度
+
+| 方案 | 做法 | 优点 | 缺点 / 成本 | 风险 |
+|---|---|---|---|---|
+| **A（推荐）** 理由 ≥10 字前端先拦（不足不发请求）+ 对话框里一次「确认」；**不要求逐字输入账号名** | 与后端判据一致；停用**可逆**（启用即回），仪式强度低于删除角色（逐字 code）一档，与操作的不可逆程度相称 | 手滑停用一名教师的代价 = 对方当前会话失效、需重新登录 | 低 |
+| B 加「逐字输入姓名」二次确认 | 更防手滑 | 为可逆操作加不可逆级别的仪式，运营会嫌麻烦；且 `display_name` 可为 `null` → 「逐字输入 null」无法定义 | 低，但成本不值 |
+| C 一键直发（只有按钮，没有理由栏） | 最快 | 理由不足会真的发出去并拿 422，把服务端校验当前端 UX；停用是「立刻把人踢下线」的动作，不该单点 | 中 |
+
+### 20.3 选择结论（**待用户拍板后回填；未回填不开工**）
+
+推荐：C1 = A、C2 = A、C3 = A、C4 = A（既定口径）、C5 = A、C6 = A。
+用户拍板后，本节按 §19.3 的格式逐条写理由与 TD 处置，并回填 §20.4 的口径修正。
+
+### 20.4 实现顺序（TDD 红 → 绿，拍板后执行）
+
+**第 0 步（契约对齐）**：`frontend/packages/api-client/src/rbac.ts`（同域、同一工厂，不新开模块）
+
+1. 类型：`PermissionAccountView`（8 字段，逐一对齐 `PermissionAccountResponse:298`）、
+   `BindableRoleView`（4 字段，**不含 `permission_codes`**）、`BoundRoleView`（含 `bindable`）、
+   `UserBindingsView`（`roles[]` + `permission_codes[]` + `roles_version`）、
+   `BindingUpdateInput`（`role_ids`/`version`/`reason?`）、`BindingUpdateResult`
+   （快照 + 4 个差异数组）。分页信封复用 `org.ts:9` 的 `Page<T>`（`{items, next_cursor}` 同形）。
+2. 方法：`listPermissionAccounts(query)`、`listBindableRoles()`、`getUserBindings(userId)`、
+   `replaceUserBindings(userId, input)`、`deactivateUser(userId, input)`、`activateUser(userId)`；
+   后三条中 `deactivateUser` / `activateUser` 与已有的 `resetUserMfa` 都返回 `Promise<void>`
+   （204 已由 `request<T>` 在 `auth.ts:404` 统一处理）。**`activateUser` 不发 body**（事实 8）。
+3. `rbac.test.ts` 补形状用例：路径 / 方法 / 请求体（尤其 `replaceUserBindings` 必带 `version`、
+   `deactivateUser` 必带 `reason`、**`activateUser` 不带 body、不发 `Content-Type`**）。
+
+**第 1 步（纯逻辑）**：新建 `frontend/apps/admin/src/account-logic.ts` + `account-logic.test.ts`
+
+- `ACCOUNT_STATUS_LABELS`（三档，未知档回落显示原码并给一句「未知状态」——不静默当启用）
+  与 `USER_TYPE_LABELS`（两档）。
+- `deactivateReasonError(reason)`：**去空白后 ≥10 字**，停用与 MFA 重置**共用这一个函数**
+  （两条判据相同；绑定理由**不走**它——事实 5）。
+- `bindingDiff(current, next)` → `{ added, removed, emptiesAll }`，用于「收回全部权限」提示
+  （后端没有绑定预览端点，差异只能在界面算）。
+- `accountRowGate(row, selfUserId, permissions)` → `{ canBind, canDeactivate, canActivate, canResetMfa, reason }`；
+  把「超管 / 是我 / 缺码」三挡集中在一个纯函数里，页面只消费 `reason` 文案（C4）。
+- `filterAccountsLocally(items, keyword)`（C1 ①：姓名 / 角色码，大小写不敏感，只作用当前页）。
+
+**第 2 步（页面）**：新建 `frontend/apps/admin/src/views/PermissionAccountsView.vue`
+
+1. 列表 + 游标栈翻页（照 `PeopleView.vue:60-74`、`:101-107`），`limit=50`；
+   「下一页」是否可点**只看 `next_cursor`**（事实 9）。
+2. 顶部过滤区：本地过滤框 + （持 MFA 码时）按登录名精确定位框；定位命中 → 用 `id` 直接开抽屉。
+3. 抽屉：`GET /users/{id}/roles` → 以已持有角色为基底渲染（C3-A）→ 变更差异提示 → `PUT`
+   （带 `version` + 可选 reason）→ 成功后用响应的 `roles_version`（已 +1）与 4 个差异数组
+   提示「已授予 X / 已收回 Y」；409 → 采用 `latest` 重载 + 一句「该账号的绑定刚被他人改过，已刷新，请重新确认」。
+4. 启停：停用对话框（理由 ≥10 先拦）/ 启用直发；成功后**重读当前页**，不手改本地 `status`。
+5. MFA 重置区（C5-A）：理由 ≥10 → `POST .../mfa/reset`；成功提示「该账号的登录会话已失效，需重新登录」，
+   **不带条数**（事实 7）。
+6. `router/index.ts` 加 `settings/accounts`（`meta.permission = "school.permission_account.manage"`）；
+   `AdminLayout.vue:19-26` 的 MENU 加一项「权限账号」。
+
+**第 3 步（mock + E2E）**：`frontend/e2e/helpers/rbac-mock.ts` 扩 6 条路由，**有状态**
+（`PUT` 改内部绑定并 `version+1`、停用改 `status=disabled`、启用回 `active`、MFA 重置清 `mfa_enabled`、
+列表按 mock 状态现算 `role_codes`/`is_super_admin`）；门禁顺序与判据**逐条注释指向后端行号**
+（`binding.py:472`、`:501`、`:515`、`:541`、`school_rbac.py:917` 等）——TD-253 的口径。
+新建 `frontend/e2e/admin-permission-accounts.spec.ts`。
+
+**第 4 步（收尾）**：前端门禁（`pnpm lint` / `pnpm format:check` / `pnpm typecheck` /
+`pnpm test:unit` / **`pnpm test:e2e`**，不手动 `npx playwright test`——TD-254）→ 独立审查 →
+commit → push → PR → 远端 CI 全绿 → 用户确认后 rebase 合并 → main CI 全绿 → 删分支 → 文档回填 PR →
+§9 八段汇报。
+
+### 20.5 测试策略与门禁
+
+- **单元（`account-logic.test.ts`）**：`deactivateReasonError` 的每个拒绝分支（空串 / 全空白 / 9 字 /
+  10 字 / 含中文空白）；`bindingDiff` 的 `emptiesAll`；`accountRowGate` 的超管 / 是自己 / 缺 MFA 码 /
+  正常四种组合；`filterAccountsLocally` 的大小写与角色码命中；未知状态档回落。
+- **单元（`packages/api-client/src/rbac.test.ts`）**：6 个新方法的路径 / 方法 / 请求体形状；
+  204 端点返回 `undefined` 而不是解析空体。
+- **mock E2E（`admin-permission-accounts.spec.ts`）**：列表渲染（三档状态、超管标签）/
+  翻页（断言第二页带的 `cursor` 来自第一页 `next_cursor`）/ 本地过滤命中与不命中 /
+  精确定位框在无 `school.personnel.mfa.reset` 时**不出现** / 打开抽屉发 `GET` /
+  改绑定（断言捕获的 `PUT` 体带 `role_ids` + `version`）/ 撤空时给「收回全部权限」提示 /
+  409 后采用 `latest` 不静默覆盖 / **已持有但不可授的角色不被提交集合漏掉**（C3-A 的回归钉子）/
+  停用理由 9 字**不发请求**、≥10 字才发 / 停用成功后列表显示「停用」/ 启用**不发 body** /
+  超管与自己两行**没有任何写按钮** + 一句说明 / MFA 重置成功提示不含设备条数。
+- **门禁**：前端 `lint` / `format` / `typecheck` / 单测 / mock E2E；**后端零改动**，
+  本点不跑 `ruff`/`mypy`/`bandit`/`alembic check`（`app/**` 与 `alembic/**` 都不碰）。
+- **无全栈 E2E**：本批不做（TD-183/192 仍在 backlog；本地 8000 端口被占）。
+
+### 20.6 预判技术债
+
+- **TD-255（新增）**：账号搜索能力缺口——本地过滤只覆盖当前页，「精确定位」框的可见性挂在
+  `school.personnel.mfa.reset` 上（语义别扭，因为它本质是 MFA 权限而不是查询权限）。
+  收口 = 后端给 `GET /permission-accounts` 加 `q=`/`status=`，届时撤掉该框；与 TD-237（列表不按人员范围裁剪）同批评估。
+- **TD-256（新增）**：停用 / 启用 / MFA 重置都回 204，`sessions_revoked` 只在审计里
+  → 界面无法回答「踢了几台设备」，运营只能报「让他重新登录」。与 TD-235 同族。
+- **TD-257（新增）**：MFA 重置入口两处并存（角色页「安全工具」卡片 + 账号页重置区），
+  判据文案靠同一个 `deactivateReasonError` 纯函数保持同源；是否搬并等账号页稳定后再判
+  （§18.6 已定本期不搬）。
+- **TD-249 / TD-250（既有，本点续账）**：本点新增复刻的门禁码
+  （`school.permission_account.manage`、`school.personnel.mfa.reset`）与状态 / 类型标签映射
+  （`active`/`locked`/`disabled`、`teacher`/`school_admin`）归到这两条的收口里，后端下发目录时同批改。
+- **TD-253（既有）**：本点新加的 6 条 mock 路由同样是手抄后端判据，后端改动不会让 mock 变红；
+  收口仍靠 TD-183/192 全栈 E2E。
+- **TD-242 / TD-245（既有）**：C3-A 的意义就是不在 `bindable` 判据收窄时静默撤权；
+  本点交付后 TD-242 可标 `已完成`。
+- **实现时的自检信号**：如果发现自己在写「把 `listBindableRoles()` 直接 map 成 checkbox 列表」，
+  那就是滑回了 C3 的 B 方案——停手，改成以 `getUserBindings()` 的 `roles[]` 为基底。
+
+### 20.7 高风险确认
+
+本点动的是**权限面 + 他人账号可用性**（改绑他人角色、把他人账号下线、重置他人 MFA），
+按 AGENTS.md §11.7 属「认证 / 权限 / 状态机」类，**简报经用户拍板后才编码**。
+需要用户拍板的是 **C1（怎么找账号）、C2（详情形态）、C5（MFA 入口放哪）、C6（确认强度）** 四张卡。
+C3（绑定数据源以当前绑定为基底）由事实 4 的静默撤权风险唯一确定，C4（超管 / 自锁门禁）
+由 §18.6 TD-242 与 187g-B 决策 B4 已拍板口径唯一确定——两条**按 A 落地，不再单独问**。
