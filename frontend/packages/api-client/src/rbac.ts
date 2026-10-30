@@ -4,7 +4,7 @@
  * 422 校验、404 跨租）由调用方从异常 message 里取 `{code, message}` 展示。
  */
 
-import type { AuthSessionRequest } from "./org";
+import { buildQuery, type AuthSessionRequest, type Page } from "./org";
 
 export interface RoleView {
   id: string;
@@ -133,6 +133,74 @@ export interface MfaResetInput {
   reason: string;
 }
 
+/**
+ * 权限账号列表的一行（TD-187g 决策 1，对齐 `PermissionAccountResponse`）：
+ * **没有 `login_id`**——学号/工号属敏感标识符，后端故意不回显。
+ */
+export interface PermissionAccountView {
+  id: string;
+  display_name: string | null;
+  user_type: string;
+  /** `active` / `locked` / `disabled`（`deleted` 不列，DB CHECK 里没有 `pending`）。 */
+  status: string;
+  role_codes: string[];
+  roles_version: number;
+  mfa_enabled: boolean;
+  /** 是否持有校方超管角色（服务端派生）：账号页据此关掉全部写控件，不按 `role_codes` 自己认。 */
+  is_super_admin: boolean;
+}
+
+/** 可经绑定接口授出的角色（决策 2）：**只有身份，没有权限码清单**——矩阵属 `school.role.manage`。 */
+export interface BindableRoleView {
+  id: string;
+  code: string;
+  name: string;
+  is_system: boolean;
+}
+
+/** 账号当前绑定的一个角色。`bindable=false` 的行只读展示，**不能从提交集合里静默删掉**（§20.3 C3）。 */
+export interface BoundRoleView {
+  id: string;
+  code: string;
+  name: string;
+  is_system: boolean;
+  bindable: boolean;
+}
+
+/** 一个账号的绑定快照 + 生效权限并集（`roles_version` 就是 `PUT` 要回传的 `version`）。 */
+export interface UserBindingsView {
+  user_id: string;
+  display_name: string | null;
+  user_type: string;
+  status: string;
+  roles_version: number;
+  roles: BoundRoleView[];
+  permission_codes: string[];
+}
+
+/**
+ * 全量替换绑定：`role_ids` 是**替换后**的完整集合，空数组＝收回全部权限。
+ * 绑定理由**没有 ≥10 字判据**（服务层只做去空白转 `None`），与停用 / MFA 重置不同一门。
+ */
+export interface BindingUpdateInput {
+  role_ids: string[];
+  version: number;
+  reason?: string | null;
+}
+
+/** 替换结果：最新快照（`roles_version` 已 +1）+ 本次差异。 */
+export interface BindingUpdateResult extends UserBindingsView {
+  added_role_codes: string[];
+  removed_role_codes: string[];
+  added_permission_codes: string[];
+  removed_permission_codes: string[];
+}
+
+/** 停用账号的请求体（服务层要求去空白后 ≥10 字；启用没有请求体）。 */
+export interface DeactivateInput {
+  reason: string;
+}
+
 function jsonInit(method: string, body: unknown): RequestInit {
   return {
     method,
@@ -160,6 +228,19 @@ export interface RbacApi {
   /** 范围替换的影响面预览（只读，不写库、不推高版本）。 */
   previewRoleScopes(roleId: string, scopeTypes: string[]): Promise<ScopeChangePreview>;
   replaceRoleScopes(roleId: string, input: RoleScopeInput): Promise<RoleView>;
+  /** 本校权限账号列表（教师 + 校方管理员；**没有搜索参数**，只有游标分页）。 */
+  listPermissionAccounts(query?: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<Page<PermissionAccountView>>;
+  /** 可授角色目录（只持 `school.permission_account.manage` 也能独立绑定，不外泄权限矩阵）。 */
+  listBindableRoles(): Promise<BindableRoleView[]>;
+  getUserBindings(userId: string): Promise<UserBindingsView>;
+  replaceUserBindings(userId: string, input: BindingUpdateInput): Promise<BindingUpdateResult>;
+  /** 停用并撤销其会话：后端回 204，被撤销的会话条数只在审计里（拿不到）。 */
+  deactivateUser(userId: string, input: DeactivateInput): Promise<void>;
+  /** 启用：后端不接请求体，也不要求理由；回 204。 */
+  activateUser(userId: string): Promise<void>;
 }
 
 export function createRbacApi(session: { request: AuthSessionRequest }): RbacApi {
@@ -218,6 +299,28 @@ export function createRbacApi(session: { request: AuthSessionRequest }): RbacApi
     },
     async replaceRoleScopes(roleId, input) {
       return request<RoleView>(`/api/v1/school/roles/${roleId}/scopes`, jsonInit("PUT", input));
+    },
+    async listPermissionAccounts(query = {}) {
+      const qs = buildQuery({ limit: query.limit, cursor: query.cursor });
+      return request<Page<PermissionAccountView>>(`/api/v1/school/permission-accounts${qs}`);
+    },
+    async listBindableRoles() {
+      return request<BindableRoleView[]>("/api/v1/school/bindable-roles");
+    },
+    async getUserBindings(userId) {
+      return request<UserBindingsView>(`/api/v1/school/users/${userId}/roles`);
+    },
+    async replaceUserBindings(userId, input) {
+      return request<BindingUpdateResult>(
+        `/api/v1/school/users/${userId}/roles`,
+        jsonInit("PUT", input),
+      );
+    },
+    async deactivateUser(userId, input) {
+      await request<void>(`/api/v1/school/users/${userId}/deactivate`, jsonInit("POST", input));
+    },
+    async activateUser(userId) {
+      await request<void>(`/api/v1/school/users/${userId}/activate`, { method: "POST" });
     },
   };
 }

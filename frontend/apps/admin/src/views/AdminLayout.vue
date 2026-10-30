@@ -23,6 +23,11 @@ const MENU: MenuItem[] = [
   { index: "/imports", title: "批量导入", permission: "school.personnel.import" },
   { index: "/rollover", title: "学年流转", permission: "school.org.manage" },
   { index: "/settings/roles", title: "角色权限", permission: "school.role.manage" },
+  {
+    index: "/settings/accounts",
+    title: "权限账号",
+    permission: "school.permission_account.manage",
+  },
 ];
 
 const auth = useAuthStore();

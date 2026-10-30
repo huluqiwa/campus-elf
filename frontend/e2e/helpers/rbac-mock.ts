@@ -1,10 +1,13 @@
 import type { Page } from "@playwright/test";
 
 /**
- * 角色权限 / MFA 重置 / 自定义角色 / 数据范围接口 mock（M2-UI2 + M2-UI3 TD-187g-B）：
+ * 角色权限 / MFA 重置 / 自定义角色 / 数据范围 / 权限账号接口 mock（M2-UI2 + M2-UI3 TD-187g-B/C）：
  * 与 org-mock 同风格的路径路由 + 请求体捕获。
  * 保存与重置是**有状态**的（与真实后端一致）：PUT 应用权限码并 version+1，
  * 重置恢复出厂清单，页面刷新前就能反映新状态，避免"只断言请求发出、不断言界面跟随"。
+ *
+ * **TD-253 口径**：本文件的判据是手抄后端（每条都注释了行号）。后端改了判据、这里不会变红，
+ * 收口靠 TD-183/192 的全栈 E2E；新增判据时必须去读一遍对应的服务层函数。
  */
 
 export interface RoleFixture {
@@ -46,6 +49,24 @@ export interface ScopeRowFixture {
   scope_type: string;
   scope_id: string | null;
   editable: boolean;
+}
+
+/**
+ * 权限账号页的一行（TD-187g-C）。**有状态**：改绑 / 停用 / 启用 / 重置 MFA 都会真的改这里，
+ * 列表与绑定快照按当前状态现算，这样"界面跟着写动作变"才是真断言。
+ * `login_id` 只在 `/users/lookup` 用——列表端点故意不回显登录名（`binding.py:298` 的响应模型里没有它）。
+ */
+export interface AccountFixture {
+  id: string;
+  login_id: string;
+  display_name: string | null;
+  /** `teacher` / `school_admin`（列表只列这两档，见 `BINDABLE_USER_TYPES`）。 */
+  user_type: string;
+  /** `active` / `locked` / `disabled`；`deleted` 的账号不进列表（`binding.py:402`）。 */
+  status: string;
+  mfa_enabled: boolean;
+  role_ids: string[];
+  roles_version: number;
 }
 
 /** 敏感范围类型（后端 `app/rbac/self_grant.py` 的 `SENSITIVE_SCOPE_TYPES`）：只有 `school` 敏感。 */
@@ -214,6 +235,80 @@ export const FIXTURE_MFA_USERS: Record<string, MfaUserFixture> = {
   },
 };
 
+/** `mockAuth` 默认的操作者 id（`auth-mock.ts:59`）——自锁判据要跟它对齐才测得出"是我"这一挡。 */
+export const DEFAULT_ACTOR_USER_ID = "22222222-2222-2222-2222-222222222222";
+
+/**
+ * 账号页默认夹具：三档状态各一行 + 一行超管（持有不可授出的角色）+ 一行学生（只经精确定位可达）
+ * + 一行"操作者自己"。王老师与 `FIXTURE_MFA_USERS` 用同一个 id，MFA 重置的两条入口路径共用一份状态。
+ */
+export const FIXTURE_ACCOUNTS: AccountFixture[] = [
+  {
+    id: "50000000-0000-0000-0000-000000000001",
+    login_id: "E-9001",
+    display_name: "王老师",
+    user_type: "teacher",
+    status: "active",
+    mfa_enabled: true,
+    role_ids: ["40000000-0000-0000-0000-000000000003"],
+    roles_version: 4,
+  },
+  {
+    id: "50000000-0000-0000-0000-000000000002",
+    login_id: "E-9002",
+    display_name: "李管理员",
+    user_type: "school_admin",
+    status: "disabled",
+    mfa_enabled: false,
+    role_ids: ["40000000-0000-0000-0000-000000000002"],
+    roles_version: 1,
+  },
+  {
+    id: "50000000-0000-0000-0000-000000000003",
+    login_id: "E-9003",
+    display_name: "赵老师",
+    user_type: "teacher",
+    status: "locked",
+    mfa_enabled: false,
+    role_ids: [],
+    roles_version: 0,
+  },
+  {
+    id: "50000000-0000-0000-0000-000000000004",
+    login_id: "E-9004",
+    display_name: "孙超管",
+    user_type: "school_admin",
+    status: "active",
+    mfa_enabled: true,
+    // 持有 `bindable=false` 的超管角色：抽屉里这一行走只读分支。该账号的保存被整体禁，
+    // 所以「不可授角色留在提交集合里」那条钉子改用例手填的普通账号夹具来跑
+    role_ids: [SUPER_ADMIN.id, SCHOOL_ADMIN.id],
+    roles_version: 2,
+  },
+  {
+    // C 端学生账号：**列表端点不列它**（`BINDABLE_USER_TYPES`），但 `/users/lookup` 按登录名能查到
+    // （该端点不过滤类型，`school_rbac.py:809`）——这一行就是"定位框把非管理账号捞进来"的那条路径
+    id: "50000000-0000-0000-0000-000000000005",
+    login_id: "E-9005",
+    display_name: "陈同学",
+    user_type: "student",
+    status: "active",
+    mfa_enabled: true,
+    role_ids: [STUDENT.id],
+    roles_version: 1,
+  },
+  {
+    id: DEFAULT_ACTOR_USER_ID,
+    login_id: "E-9000",
+    display_name: "我自己",
+    user_type: "school_admin",
+    status: "active",
+    mfa_enabled: true,
+    role_ids: ["40000000-0000-0000-0000-000000000002"],
+    roles_version: 5,
+  },
+];
+
 /** 出厂默认清单（重置据此重种，与后端 seeds 同口径）。 */
 const FACTORY_DEFAULTS: Record<string, string[]> = {
   school_admin: SCHOOL_ADMIN_DEFAULTS,
@@ -242,6 +337,14 @@ export interface RbacMockCaptures {
   scopeList: string[];
   scopePreview: Record<string, unknown>[];
   scopeSave: Record<string, unknown>[];
+  /** 账号列表的入参 URL（含 `cursor`），用于断言「第二页带的是第一页回游标」。 */
+  accountsList: string[];
+  bindableRoles: string[];
+  bindingsList: string[];
+  bindingSave: Record<string, unknown>[];
+  deactivate: Record<string, unknown>[];
+  /** 启用只带 user id：后端连请求体都不接（`school_rbac.py:948`），`body` 用来断言真的没发体。 */
+  activate: { user_id: string; body: string | null }[];
 }
 
 export interface RbacMockOptions {
@@ -290,6 +393,22 @@ export interface RbacMockOptions {
    * 测不出"重取预览"这一步有没有发生。
    */
   deleteVersionConflictOnce?: boolean;
+
+  /** 权限账号页的账号夹具（不给用 `FIXTURE_ACCOUNTS`）。 */
+  accounts?: AccountFixture[];
+  /**
+   * 操作者的 user id（改绑 / 停用 / 重置 MFA 的"不能对自己"判据用）。
+   * **必须与 `mockAuth` 的 `user.userId` 写同一份**（默认值两边一致），
+   * 否则测出的是"界面以为是别人、服务端认定是你自己"这种假象。
+   */
+  actorUserId?: string;
+  /** 只让第一次改绑失败（403 / 422 拒绝路径）。 */
+  bindingRejectOnce?: { status: number; body: unknown };
+  /**
+   * 第一次改绑撞版本冲突：mock **真的**把该账号的 `roles_version` 推高一格并回带 `latest`，
+   * 否则"采用最新快照后重试"会二次撞同一个冲突，测不出界面有没有把人带回正路。
+   */
+  bindingVersionConflictOnce?: boolean;
 }
 
 export interface RbacMock {
@@ -307,12 +426,23 @@ function fingerprintOf(role: RoleFixture): string {
   return `fp-${role.id}-${role.user_count}`;
 }
 
+function userIdFrom(url: string): string {
+  return new URL(url).pathname.split("/").at(-3) ?? "";
+}
+
 export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Promise<RbacMock> {
   const roles: RoleFixture[] = (
     options.roles ?? [SUPER_ADMIN, SCHOOL_ADMIN, TEACHER_B_END, STUDENT]
   ).map((role) => ({ ...role, permission_codes: [...role.permission_codes] }));
   const permissions = options.permissions ?? FIXTURE_PERMISSIONS;
-  const mfaUsers = options.mfaUsers ?? FIXTURE_MFA_USERS;
+  // 逐条浅拷贝：MFA 重置会就地翻 `mfa_enabled`，直接吃常量会让同一 worker 里的后一个用例
+  // 开局就是"已重置"状态（admin-roles 的 MFA 用例与账号页共用 E-9001 这一个人）。
+  const mfaUsers: Record<string, MfaUserFixture> = Object.fromEntries(
+    Object.entries(options.mfaUsers ?? FIXTURE_MFA_USERS).map(([loginId, user]) => [
+      loginId,
+      { ...user, roles: [...user.roles] },
+    ]),
+  );
   const captures: RbacMockCaptures = {
     savePermissions: [],
     resetPreview: [],
@@ -325,6 +455,12 @@ export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Pr
     scopeList: [],
     scopePreview: [],
     scopeSave: [],
+    accountsList: [],
+    bindableRoles: [],
+    bindingsList: [],
+    bindingSave: [],
+    deactivate: [],
+    activate: [],
   };
   // 角色当前数据范围（mock 内部状态，不在 API 响应里）：初始=出厂，重置后回到出厂。
   const scopesByRole = new Map<string, ScopeRowFixture[]>(
@@ -341,6 +477,82 @@ export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Pr
     ]),
   );
   let createdCount = 0;
+  // 账号状态（mock 内部，写动作会真的改它）：与后端一致，列表/快照都按当前状态现算。
+  const accounts: AccountFixture[] = (options.accounts ?? FIXTURE_ACCOUNTS).map((account) => ({
+    ...account,
+    role_ids: [...account.role_ids],
+  }));
+  const actorUserId = options.actorUserId ?? DEFAULT_ACTOR_USER_ID;
+
+  const roleById = (roleId: string): RoleFixture | undefined =>
+    roles.find((role) => role.id === roleId);
+
+  /** 一行的角色码（后端按码排序下发，mock 同样排序，避免断言随夹具顺序漂）。 */
+  const roleCodesOf = (account: AccountFixture): string[] =>
+    account.role_ids
+      .map((roleId) => roleById(roleId)?.code)
+      .filter((code): code is string => code !== undefined)
+      .sort();
+
+  /**
+   * `is_super_admin` 由**服务端**按角色码派生（`binding.py:427`），不是入参：
+   * 前端因此不能自己按角色码猜，只能吃这个字段。
+   */
+  const isSuperAdminAccount = (account: AccountFixture): boolean =>
+    roleCodesOf(account).includes(SUPER_ADMIN.code);
+
+  /**
+   * 能否经绑定接口**授出**这个角色——判据是**码**，不是 `bindable` 字段
+   * （`binding.py:539` 用 `role.code == SUPER_ADMIN_ROLE_CODE`，`admin.py:257 role_is_bindable` 同理）。
+   *
+   * 不能顺手写成 `role.bindable === false`：夹具里的 `bindable` 由用例作者手填（用来造
+   * TD-245 假设的「已持有但不可授」形态），照它判会让 mock **比后端更严**，于是那条用例变成
+   * mock 自己造出来又自己拒掉的空转，真后端根本不走这个分支。
+   */
+  const roleIsBindedByCode = (roleId: string): boolean =>
+    roleById(roleId)?.code !== SUPER_ADMIN.code;
+
+  /** 列表的一行（`PermissionAccountResponse`，`binding.py:298`）：没有 `login_id`。 */
+  const accountRowOf = (account: AccountFixture) => ({
+    id: account.id,
+    display_name: account.display_name,
+    user_type: account.user_type,
+    status: account.status,
+    role_codes: roleCodesOf(account),
+    roles_version: account.roles_version,
+    mfa_enabled: account.mfa_enabled,
+    is_super_admin: isSuperAdminAccount(account),
+  });
+
+  /** 绑定快照（`UserBindingsResponse`，`school_rbac.py:240`）：`roles[].bindable` 由服务端下发。 */
+  const bindingsOf = (account: AccountFixture) => {
+    const bound = account.role_ids
+      .map((roleId) => roleById(roleId))
+      .filter((role): role is RoleFixture => role !== undefined)
+      .sort((a, b) => a.code.localeCompare(b.code));
+    const codes = new Set<string>();
+    for (const role of bound) for (const code of role.permission_codes) codes.add(code);
+    return {
+      user_id: account.id,
+      display_name: account.display_name,
+      user_type: account.user_type,
+      status: account.status,
+      roles_version: account.roles_version,
+      roles: bound.map((role) => ({
+        id: role.id,
+        code: role.code,
+        name: role.name,
+        is_system: role.is_system,
+        bindable: role.bindable,
+      })),
+      permission_codes: [...codes].sort(),
+    };
+  };
+
+  const notFound = () =>
+    // 后端三处（`binding.py:336`、`account_admin.py:266`、`mfa_admin.py:253`）都是这一句：
+    // 跨租与不存在同形，不泄露"这个 id 在别家租户存在"
+    json(404, { detail: { code: "USER_NOT_FOUND", message: "用户不存在" } });
 
   const json = (status: number, body: unknown) => ({
     status,
@@ -744,38 +956,352 @@ export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Pr
     route.fulfill(json(200, permissions)),
   );
 
+  // ---- 权限账号页（TD-187g-C）：列表 / 可授目录 / 绑定读写 / 启停 ----
+
+  /**
+   * 游标分页（`binding.py:400-435`）：mock 的游标就是偏移量本身，形状与后端一致即可。
+   * 关键复刻两条：**只列 teacher/school_admin 且排除 deleted**；
+   * **只有填满一页时才回 `next_cursor`**——前端"下一页"按它禁用，按条数猜就会判错。
+   */
+  await page.route("**/api/v1/school/permission-accounts**", (route) => {
+    const url = new URL(route.request().url());
+    captures.accountsList.push(route.request().url());
+    const limit = Number(url.searchParams.get("limit") ?? 50);
+    const cursor = url.searchParams.get("cursor");
+    let offset = 0;
+    if (cursor) {
+      // 后端对无效游标回 400 纯字符串（`school_rbac.py:790`），不是业务码对象
+      if (!/^o-\d+$/.test(cursor)) {
+        return route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "分页游标无效" }),
+        });
+      }
+      offset = Number(cursor.slice(2));
+    }
+    const listable = accounts.filter(
+      // `BINDABLE_USER_TYPES`（`binding.py`）+ `status != 'deleted'`
+      (account) =>
+        ["teacher", "school_admin"].includes(account.user_type) && account.status !== "deleted",
+    );
+    const slice = listable.slice(offset, offset + limit);
+    const filled = slice.length === limit;
+    return route.fulfill(
+      json(200, {
+        items: slice.map(accountRowOf),
+        next_cursor: filled ? `o-${offset + limit}` : null,
+      }),
+    );
+  });
+
+  // 可授角色目录（`school_rbac.py:488`）：只有身份四字段，**没有权限矩阵**（那属 role.manage）
+  await page.route("**/api/v1/school/bindable-roles**", (route) => {
+    captures.bindableRoles.push(route.request().url());
+    return route.fulfill(
+      json(
+        200,
+        roles
+          .filter((role) => role.bindable)
+          .sort((a, b) => a.code.localeCompare(b.code))
+          .map((role) => ({
+            id: role.id,
+            code: role.code,
+            name: role.name,
+            is_system: role.is_system,
+          })),
+      ),
+    );
+  });
+
+  await page.route("**/api/v1/school/users/*/roles", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const userId = path.split("/").at(-2) ?? "";
+    const account = accounts.find((item) => item.id === userId);
+    if (route.request().method() === "GET") {
+      captures.bindingsList.push(route.request().url());
+      if (!account || account.status === "deleted") return route.fulfill(notFound());
+      return route.fulfill(json(200, bindingsOf(account)));
+    }
+
+    const payload = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
+    captures.bindingSave.push(payload);
+    if (options.bindingRejectOnce && captures.bindingSave.length === 1) {
+      return route.fulfill(json(options.bindingRejectOnce.status, options.bindingRejectOnce.body));
+    }
+    // 判据顺序逐条照抄 `replace_user_bindings`（`binding.py:467 → :548`）：
+    // 自绑 → 目标存在 → 目标超管 → 目标类型 → 提交角色存在 → 角色可绑 → 版本 CAS。
+    // 顺序错一位，"自锁"就会变成"目标不存在"，界面分支就测反了。
+    if (actorUserId === userId) {
+      return route.fulfill(
+        json(403, {
+          detail: {
+            code: "BINDING_SELF_FORBIDDEN",
+            message: "不能修改自己的角色绑定；请由其他管理员操作",
+          },
+        }),
+      );
+    }
+    if (!account || account.status === "deleted") return route.fulfill(notFound());
+    if (isSuperAdminAccount(account)) {
+      return route.fulfill(
+        json(403, {
+          detail: {
+            code: "BINDING_SUPER_ADMIN_FORBIDDEN",
+            message: "校方超管的角色绑定由平台开通流程管理，租户内不可修改",
+          },
+        }),
+      );
+    }
+    if (!["teacher", "school_admin"].includes(account.user_type)) {
+      return route.fulfill(
+        json(422, {
+          detail: {
+            code: "BINDING_TARGET_NOT_ALLOWED",
+            message: "只能为教师或校方管理员账号绑定角色",
+          },
+        }),
+      );
+    }
+    const submittedIds = [...new Set((payload.role_ids ?? []) as string[])];
+    if (submittedIds.some((roleId) => !roleById(roleId))) {
+      return route.fulfill(
+        json(404, { detail: { code: "ROLE_NOT_FOUND", message: "角色不存在" } }),
+      );
+    }
+    // 超管角色不能经绑定接口授予（`binding.py:539`）：与"目标是不是超管"是两条独立判据
+    if (submittedIds.some((roleId) => !roleIsBindedByCode(roleId))) {
+      return route.fulfill(
+        json(422, {
+          detail: { code: "ROLE_NOT_BINDABLE", message: "校方超管角色不能经绑定接口授予" },
+        }),
+      );
+    }
+    if (options.bindingVersionConflictOnce && captures.bindingSave.length === 1) {
+      // 真的把版本推高一格：否则"采用 latest 后重试"带的还是同一个版本，测不出冲突有没有被消化
+      account.roles_version += 1;
+      return route.fulfill(
+        json(409, {
+          detail: {
+            code: "BINDING_VERSION_CONFLICT",
+            message: "该账号的角色绑定已被他人修改，请刷新后重试",
+            latest: bindingsOf(account),
+          },
+        }),
+      );
+    }
+    if (Number(payload.version) !== account.roles_version) {
+      return route.fulfill(
+        json(409, {
+          detail: {
+            code: "BINDING_VERSION_CONFLICT",
+            message: "该账号的角色绑定已被他人修改，请刷新后重试",
+            latest: bindingsOf(account),
+          },
+        }),
+      );
+    }
+
+    const beforeCodes = new Set(roleCodesOf(account));
+    const beforePermissions = new Set(bindingsOf(account).permission_codes);
+    account.role_ids = submittedIds;
+    account.roles_version += 1;
+    const after = bindingsOf(account);
+    const afterCodes = new Set(roleCodesOf(account));
+    const afterPermissions = new Set(after.permission_codes);
+    return route.fulfill(
+      json(200, {
+        ...after,
+        added_role_codes: [...afterCodes].filter((code) => !beforeCodes.has(code)).sort(),
+        removed_role_codes: [...beforeCodes].filter((code) => !afterCodes.has(code)).sort(),
+        added_permission_codes: [...afterPermissions]
+          .filter((code) => !beforePermissions.has(code))
+          .sort(),
+        removed_permission_codes: [...beforePermissions]
+          .filter((code) => !afterPermissions.has(code))
+          .sort(),
+      }),
+    );
+  });
+
+  /**
+   * 停用 / 启用（`account_admin._change_status`）：判据顺序照抄 `:232 → :328`
+   * 理由 → 自锁（只停用侧）→ 目标存在 → 已删除按不存在 → 超管 403 → 类型 422 → 状态机 409。
+   * 三个动作都回 204：`sessions_revoked` 只进审计（事实 7），界面拿不到条数。
+   */
+  await page.route("**/api/v1/school/users/*/deactivate", (route) => {
+    const userId = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
+    const payload = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
+    captures.deactivate.push(payload);
+    const account = accounts.find((item) => item.id === userId);
+    const reason = String(payload.reason ?? "");
+    if (reason.trim().length < 10) {
+      return route.fulfill(
+        json(422, {
+          detail: { code: "DEACTIVATE_REASON_REQUIRED", message: "停用理由至少 10 个字符" },
+        }),
+      );
+    }
+    if (actorUserId === userId) {
+      return route.fulfill(
+        json(409, {
+          detail: { code: "ACCOUNT_SELF_DEACTIVATE", message: "不能停用自己的账号" },
+        }),
+      );
+    }
+    if (!account || account.status === "deleted") return route.fulfill(notFound());
+    if (isSuperAdminAccount(account)) {
+      return route.fulfill(
+        json(403, {
+          detail: {
+            code: "ACCOUNT_SUPER_ADMIN_FORBIDDEN",
+            message: "校方超管账号不能由租户管理员停用或启用",
+          },
+        }),
+      );
+    }
+    if (!["teacher", "school_admin"].includes(account.user_type)) {
+      return route.fulfill(
+        json(422, {
+          detail: { code: "ACCOUNT_TARGET_NOT_ALLOWED", message: "权限账号只能是教师或校方管理员" },
+        }),
+      );
+    }
+    if (account.status === "disabled") {
+      return route.fulfill(
+        json(409, {
+          detail: { code: "ACCOUNT_ALREADY_DISABLED", message: "该账号已停用" },
+        }),
+      );
+    }
+    account.status = "disabled";
+    return route.fulfill({ status: 204 });
+  });
+
+  // 启用：连请求体都不接（`school_rbac.py:948`），所以这里只做「原样转发」的捕获
+  await page.route("**/api/v1/school/users/*/activate", (route) => {
+    const userId = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
+    captures.activate.push({ user_id: userId, body: route.request().postData() });
+    const account = accounts.find((item) => item.id === userId);
+    if (!account || account.status === "deleted") return route.fulfill(notFound());
+    if (isSuperAdminAccount(account)) {
+      return route.fulfill(
+        json(403, {
+          detail: {
+            code: "ACCOUNT_SUPER_ADMIN_FORBIDDEN",
+            message: "校方超管账号不能由租户管理员停用或启用",
+          },
+        }),
+      );
+    }
+    if (!["teacher", "school_admin"].includes(account.user_type)) {
+      return route.fulfill(
+        json(422, {
+          detail: { code: "ACCOUNT_TARGET_NOT_ALLOWED", message: "权限账号只能是教师或校方管理员" },
+        }),
+      );
+    }
+    // 状态机（`account_admin.py:87-106`）：active → 已启用；其余非 disabled → 只有已停用可启用
+    if (account.status === "active") {
+      return route.fulfill(
+        json(409, {
+          detail: { code: "ACCOUNT_ALREADY_ACTIVE", message: "该账号已启用，无需重复启用" },
+        }),
+      );
+    }
+    if (account.status !== "disabled") {
+      return route.fulfill(
+        json(409, {
+          detail: { code: "ACCOUNT_NOT_DISABLED", message: "只有已停用的账号可以启用" },
+        }),
+      );
+    }
+    account.status = "active";
+    return route.fulfill({ status: 204 });
+  });
+
   await page.route("**/api/v1/school/users/lookup**", (route) => {
     const loginId = new URL(route.request().url()).searchParams.get("login_id") ?? "";
     captures.lookup.push(loginId);
     const user = mfaUsers[loginId];
-    if (!user) {
+    if (user) return route.fulfill(json(200, user));
+    // 账号页的「按登录名精确定位」也走这个端点（`school_rbac.py:809`）：
+    // 响应**没有 `roles_version`、也没有 `is_super_admin`**（`UserLookupResponse:274`）——
+    // 抽屉据此只能退回"持有不可授角色"这个服务端信号，缺口登记在简报 §20.6。
+    const account = accounts.find((item) => item.login_id === loginId);
+    if (!account) {
       return route.fulfill(
         json(404, {
-          detail: { code: "USER_NOT_FOUND", message: "未找到该登录名对应的用户" },
+          detail: { code: "USER_NOT_FOUND", message: "用户不存在" },
         }),
       );
     }
-    return route.fulfill(json(200, user));
+    return route.fulfill(
+      json(200, {
+        id: account.id,
+        display_name: account.display_name,
+        user_type: account.user_type,
+        status: account.status,
+        mfa_enabled: account.mfa_enabled,
+        roles: roleCodesOf(account),
+      }),
+    );
   });
 
   await page.route("**/api/v1/school/users/*/mfa/reset", (route) => {
     captures.mfaReset.push(route.request().postDataJSON() as Record<string, unknown>);
-    const userId = new URL(route.request().url()).pathname.split("/").at(-3);
+    const userId = userIdFrom(route.request().url());
+    // 判据顺序照抄 `mfa_admin.reset_user_mfa`：理由 <10 → 422（`:218`）；是自己 → 409（`:221`）；
+    // 不存在 → 404（`:253`）；目标超管 → 403（`:276`）；未开 MFA → 409（`:297`）。
+    const reason = String((captures.mfaReset.at(-1) as { reason?: string }).reason ?? "");
+    if (reason.trim().length < 10) {
+      return route.fulfill(
+        json(422, { detail: { code: "RESET_REASON_REQUIRED", message: "重置理由至少 10 个字符" } }),
+      );
+    }
+    if (actorUserId === userId) {
+      return route.fulfill(
+        json(409, {
+          detail: {
+            code: "MFA_SELF_RESET",
+            message: "不能重置自己的 MFA；请使用恢复码或自助关闭",
+          },
+        }),
+      );
+    }
+    // 状态源优先账号夹具：两条入口（角色页的 MFA 卡片、账号页的重置区）打的是同一个后端，
+    // mock 里也必须是一份状态，否则一边改完另一边还显示"已开启"。
+    const account = accounts.find((item) => item.id === userId);
+    if (account) {
+      if (isSuperAdminAccount(account)) {
+        return route.fulfill(
+          json(403, {
+            detail: {
+              code: "MFA_SUPER_ADMIN_FORBIDDEN",
+              message: "校方超管的 MFA 重置需由平台运维执行（CLI 兜底）",
+            },
+          }),
+        );
+      }
+      if (!account.mfa_enabled) {
+        return route.fulfill(
+          json(409, { detail: { code: "MFA_NOT_ENABLED", message: "该用户未启用 MFA" } }),
+        );
+      }
+      account.mfa_enabled = false;
+      const mirror = Object.values(mfaUsers).find((item) => item.id === userId);
+      if (mirror) mirror.mfa_enabled = false;
+      return route.fulfill({ status: 204 });
+    }
     const user = Object.values(mfaUsers).find((item) => item.id === userId);
     if (!user) {
       return route.fulfill(
-        json(404, { detail: { code: "USER_NOT_FOUND", message: "用户不存在或不属于本校" } }),
+        json(404, { detail: { code: "USER_NOT_FOUND", message: "用户不存在" } }),
       );
     }
     if (!user.mfa_enabled) {
       return route.fulfill(
-        json(409, { detail: { code: "MFA_NOT_ENABLED", message: "该用户未绑定 MFA" } }),
-      );
-    }
-    const reason = String((captures.mfaReset.at(-1) as { reason?: string }).reason ?? "");
-    if (reason.trim().length < 10) {
-      return route.fulfill(
-        json(422, { detail: { code: "RESET_REASON_REQUIRED", message: "重置理由至少 10 个字" } }),
+        json(409, { detail: { code: "MFA_NOT_ENABLED", message: "该用户未启用 MFA" } }),
       );
     }
     user.mfa_enabled = false;

@@ -99,7 +99,13 @@ export {
 
 export {
   createRbacApi,
+  type BindableRoleView,
+  type BindingUpdateInput,
+  type BindingUpdateResult,
+  type BoundRoleView,
+  type DeactivateInput,
   type MfaResetInput,
+  type PermissionAccountView,
   type PermissionView,
   type RbacApi,
   type ResetPreview,
@@ -112,5 +118,6 @@ export {
   type RoleScopeRow,
   type RoleView,
   type ScopeChangePreview,
+  type UserBindingsView,
   type UserLookupView,
 } from "./rbac";
