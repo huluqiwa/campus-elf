@@ -1439,10 +1439,10 @@ commit → push → PR → 远端 CI 全绿 → rebase 合并 → main CI 全绿
 `added`/`removed`/`emptiesAll`，还要把「不可授但已持有」的角色 id 直接算进 `submitted`，所以它是**提交计划**而不只是差异）；
 `accountRowGate` → **`accountGates`**（返回四个 `{allowed, hint}`，`hint` 即 `reason` 文案）。
 
-**实现期审查补正（独立审查 1 Blocker + 1 Major + 3 Minor，均已修，不改 §20.3 拍板口径）**：
+**实现期审查补正**（独立审查**共三轮**，不改 §20.3 拍板口径）：第 1 轮 **0 Blocker / 4 Major / 7 Minor**，结论「不建议直接提交」；按第 1 轮修完再发第 2 轮（这回把后端契约事实逐条附进提示词，并专门问「那条旗舰用例在修正后的 mock 下还能不能通过」），第 2 轮报 **1 Blocker / 1 Major / 3 Minor**——Blocker 与 Major 就是第 1 轮 Major 2（mock 判据）与 Major 1（类型门禁）**那两处还没修对**，审查者这次把 mock 抄错升级为 Blocker（理由：它让用例标题声称的东西没有被端到端证明）；第 3 轮复审逐条判定第 2 轮的 5 项修复**均已到位**，另新出 2 条 Minor，结论「**可以提交**」（原话：两条 Minor 登记 TD 即可，不强制本轮改码）。下面 1–2 是两轮都点到的两条，3–4 是第 2 轮三条 Minor 里改动清单前两处；**第 2 轮第三条 Minor**（定位入口把 `/users/lookup` 的任何失败——500 / 网络 / 400——都说成「未找到该登录名对应的账号」，等于把服务故障伪装成「这人没账号」）同样已修：`PermissionAccountsView.vue` 的 `lookupAndOpen` 只在 **404** 时说「未找到」，其余状态码透出后端原因文案。5–6 是修复过程中自查出来的两处。第 1 轮残留、本轮**有意不改**的三条已落台账：**TD-259**（理由长度按 UTF-16 码元数，emoji 会前端放行、后端 422）、**TD-260**（列表加载失败仍显示上一次成功的数据）、**TD-261**（`accountGates` 的「超管 / 是我」两挡顺序与后端相反，只影响提示语句）；第 1 轮 Major 4（台账缺 TD-255/256/257）与第 3 轮两条 Minor 由**合并后的文档回填 PR** 收口，即本文件所在的那批改动。
 
 1. **mock 的 `ROLE_NOT_BINDABLE` 判据抄错**（Blocker）：原写 `role.bindable === false`，后端真判据是
-   **码**等于超管码（`binding.py:539`）。抄错的后果是让 mock **比后端更严**——C3-A 那条钉子用例会在
+   **码**等于超管码（`binding.py:536`）。抄错的后果是让 mock **比后端更严**——C3-A 那条钉子用例会在
    mock 里被 422 拒掉，于是"保存后角色仍在持有"永远断不出来，用例退化成只断请求体。
    改法：`rbac-mock.ts` 新增 `roleIsBindedByCode()`（比 `SUPER_ADMIN.code`），PUT 路由用它；
    `bindingsOf` 与 `bindable-roles` 目录**继续吃夹具手填的 `bindable`**（那是 TD-245 假设形态的入口），
@@ -1455,14 +1455,14 @@ commit → push → PR → 远端 CI 全绿 → rebase 合并 → main CI 全绿
    学生的 MFA 后端允许重置）。`USER_TYPE_LABELS` 因此从两档补成三档（学生从定位入口可达）。
 3. **门禁提示不再印内部权限码**（Minor）：原 `缺少权限：school.personnel.mfa.reset` 改成
    「缺少「MFA 重置」权限，这一项用不了」——码是给后端判的，运营读不出它对应哪个入口。
-4. **mock 错误文案逐字对齐后端**（Minor）：`USER_NOT_FOUND`＝「用户不存在」（后端三处同句，
+4. **mock 错误文案逐字对齐后端**（Minor）：`USER_NOT_FOUND`＝「用户不存在」（后端 `binding.py` 2 处 + `account_admin.py` 4 处，再加 `mfa_admin.py` 3 处、共 9 处同句，
    跨租与不存在同形，不泄露"这个 id 在别家租户"）、`RESET_REASON_REQUIRED`＝「重置理由至少 10 个**字符**」、
    `MFA_NOT_ENABLED`＝「该用户**未启用** MFA」、`MFA_SUPER_ADMIN_FORBIDDEN`＝「校方超管的 MFA 重置需由
    平台运维执行（CLI 兜底）」。连带把 `admin-roles.spec.ts` 里那条"查无此人"的断言文案跟着改真。
 5. **一次 403 弹两条相同提示**（本轮新发现，登记 TD-258）：`api-client/src/auth.ts:396` 的全局
    `onForbidden` 对每个 403 已经提示一次，调用点自己的 `ElMessage.error` 会叠出第二行。
    改法：新增 `apps/admin/src/error-toast.ts` 的 `reportError(error, fallback)`，403 交给全局回调、
-   其余状态码本地兜底；抽屉与列表页的 5 个错误分支改用它。既有页面（角色页等）的同形双弹**不在本点动**，
+   其余状态码本地兜底；列表页 3 处 + 抽屉 5 处、共 8 个错误分支改用它。既有页面（角色页等）的同形双弹**不在本点动**，
    归 TD-258 收口。
 6. **mock 夹具的状态污染**（本轮新发现）：`mockRbacApi` 以前直接吃模块级 `FIXTURE_MFA_USERS`，
    MFA 重置就地翻 `mfa_enabled` 会污染同一 worker 里后一个用例（实测把 `admin-roles` 的 MFA 用例跑红）。
@@ -1524,9 +1524,11 @@ commit → push → PR → 远端 CI 全绿 → 用户确认后 rebase 合并 �
   收口 = 后端给 `GET /permission-accounts` 加 `q=`/`status=`，届时撤掉该框；与 TD-237（列表不按人员范围裁剪）同批评估。
 - **TD-256（新增）**：停用 / 启用 / MFA 重置都回 204，`sessions_revoked` 只在审计里
   → 界面无法回答「踢了几台设备」，运营只能报「让他重新登录」。与 TD-235 同族。
-- **TD-257（新增）**：MFA 重置入口两处并存（角色页「安全工具」卡片 + 账号页重置区），
-  判据文案靠同一个 `deactivateReasonError` 纯函数保持同源；是否搬并等账号页稳定后再判
-  （§18.6 已定本期不搬）。
+- **TD-257（新增）**：MFA 重置入口两处并存（角色页「安全工具」卡片 + 账号页重置区）。
+  是否搬并等账号页稳定后再判（§18.6 已定本期不搬）。**实施后更正本条措辞**：两处的**可见性判据同源**
+  （都看 `school.personnel.mfa.reset`），但**「理由 ≥10 字」并不同源**——角色页是 `RoleSettingsView.vue:354`
+  的内联 `trim().length < 10`，账号页走 `accountReasonError()` 纯函数；今天行为等价（都先 trim、都按字符数判），
+  **改一处另一处不会跟着变**，这才是 TD-257 真正要收的东西（详见台账）。
 - **TD-249 / TD-250（既有，本点续账）**：本点新增复刻的门禁码
   （`school.permission_account.manage`、`school.personnel.mfa.reset`）与状态 / 类型标签映射
   （`active`/`locked`/`disabled`、`teacher`/`school_admin`）归到这两条的收口里，后端下发目录时同批改。
@@ -1538,9 +1540,14 @@ commit → push → PR → 远端 CI 全绿 → 用户确认后 rebase 合并 �
   `bindable ⇔ 码不是超管码`，回退成立；**TD-245 落地（给自定义角色加"可绑定"标记）时这个回退会把普通
   账号误判成超管、连后端允许的 MFA 重置一起关掉**，届时必须同步收窄成按超管码判。
 - **TD-258（新增）**：一次 403 会叠出两条相同提示——`api-client/src/auth.ts:396` 的全局 `onForbidden`
-  对每个 403 都提示一次，调用点自己的 `ElMessage.error` 是第二条。本点只把自己的 5 个错误分支收敛到
+  对每个 403 都提示一次，调用点自己的 `ElMessage.error` 是第二条。本点只把自己的 8 个错误分支（列表页 3 + 抽屉 5）收敛到
   `apps/admin/src/error-toast.ts` 的 `reportError`（403 交给全局），**既有页面（角色页、人员页等）的
   同形双弹没动**。收口 = 全应用统一走 `reportError`，或让全局回调只在无人处理的调用栈上触发。
+- **TD-259 / TD-260 / TD-261（新增，均为审查残留、本点有意不改）**：理由长度按 UTF-16 码元数（emoji 会
+  前端放行、后端 422，mock 抄了同一个错法所以测不出）；列表加载失败仍显示上一次成功的那页数据；
+  `accountGates` 的「超管 / 是我」两挡顺序与后端相反（只影响提示语句，两句都拒绝）。三条都已 `已采纳`，
+  合到「下一个动 `account-logic.ts` 的前端 PR」一起做——第 3 轮复审的原话是「两条 Minor 登记 TD 即可，
+  不强制本轮改码」，而文档回填 PR 掺代码要重跑整套前端门禁 + 重新审查，不值。
 - **实现时的自检信号**：如果发现自己在写「把 `listBindableRoles()` 直接 map 成 checkbox 列表」，
   那就是滑回了 C3 的 B 方案——停手，改成以 `getUserBindings()` 的 `roles[]` 为基底。
 
