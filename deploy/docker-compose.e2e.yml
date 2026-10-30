@@ -1,6 +1,6 @@
 name: campus-elf-e2e
 
-# M1 验收（TD-110）专用全栈 E2E 编排：只编排「真实后端容器」。
+# M1 验收（TD-110）专用全栈 E2E 编排：真实后端容器 + arq worker + 一次性 object-init（共享对象卷）。
 # - 依赖（postgres/redis/mailhog/qdrant）复用 campus-elf-test 依赖栈
 #   （deploy/docker-compose.test.yml，scripts/test-stack.sh 管理）；
 # - 通过 external 网络加入 campus-elf-test-net，服务名（postgres/redis/mailhog）可解析；
@@ -8,11 +8,32 @@ name: campus-elf-e2e
 # - 本文件不含任何真实凭据。编排入口：scripts/e2e-stack.sh {up|down|status}。
 
 services:
+  # 每次 up 都清空对象卷（数据库已 drop schema 重建，对象存储也必须归零，否则垃圾跨运行累积），
+  # 再改属主：具名卷首次挂载归 root，而应用进程是 appuser，否则上传写对象存储会 PermissionError
+  # （见 backend/app/storage/objects.py 的本地实现）。
+  object-init:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/backend/Dockerfile
+    image: campus-elf-e2e-backend
+    user: root
+    command:
+      - sh
+      - -c
+      - find /tmp/e2e-objects -mindepth 1 -delete && chown -R appuser:appuser /tmp/e2e-objects
+    volumes:
+      - e2e_objects:/tmp/e2e-objects
+    restart: "no"
+
   backend:
     build:
       context: ../backend
       dockerfile: ../deploy/backend/Dockerfile
-    environment:
+    image: campus-elf-e2e-backend
+    depends_on:
+      object-init:
+        condition: service_completed_successfully
+    environment: &backend-env
       DATABASE_URL: postgresql+asyncpg://campus_elf_test_tenant:${TEST_APP_PASSWORD:?TEST_APP_PASSWORD is required}@postgres:5432/${TEST_POSTGRES_DB:-campus_elf_test}
       PLATFORM_DATABASE_URL: postgresql+asyncpg://campus_elf_test_platform:${TEST_PLATFORM_PASSWORD:?TEST_PLATFORM_PASSWORD is required}@postgres:5432/${TEST_POSTGRES_DB:-campus_elf_test}
       REDIS_URL: redis://:${TEST_REDIS_PASSWORD:?TEST_REDIS_PASSWORD is required}@redis:6379/0
@@ -27,9 +48,11 @@ services:
       # 重置邮件里的前端地址指向 admin 端 preview（Playwright 从邮件提取 token 后跳 4173）
       PASSWORD_RESET_URL_BASE: http://127.0.0.1:4173/reset-password
     ports:
-      - "127.0.0.1:8000:8000"
-    tmpfs:
-      - /tmp/e2e-objects
+      # 宿主机端口可配（默认 18000）：8000 常被本机其他项目占用，换端口只改 E2E_BACKEND_PORT。
+      - "127.0.0.1:${E2E_BACKEND_PORT:-18000}:8000"
+    # 与 worker 共用一个卷而不是 tmpfs：导入是「API 写入对象 → worker 读取」，两个容器必须看见同一份文件。
+    volumes:
+      - e2e_objects:/tmp/e2e-objects
     mem_limit: 512m
     pids_limit: 256
     healthcheck:
@@ -39,6 +62,26 @@ services:
       timeout: 5s
       retries: 30
       start_period: 10s
+
+  # 导入任务由 arq worker 执行（app/workers/settings.py）；没有它，上传后 job 永远停在 pending。
+  worker:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/backend/Dockerfile
+    image: campus-elf-e2e-backend
+    depends_on:
+      object-init:
+        condition: service_completed_successfully
+    command: ["arq", "app.workers.settings.WorkerSettings"]
+    environment: *backend-env
+    volumes:
+      - e2e_objects:/tmp/e2e-objects
+    mem_limit: 512m
+    pids_limit: 256
+    restart: unless-stopped
+
+volumes:
+  e2e_objects:
 
 networks:
   default:

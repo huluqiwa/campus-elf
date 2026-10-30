@@ -1,6 +1,11 @@
 {
   "extends": "./packages/config/tsconfig.base.json",
-  "include": ["playwright.config.ts", "e2e/**/*.ts"],
+  "include": [
+    "playwright.config.ts",
+    "playwright.fullstack.config.ts",
+    "e2e/**/*.ts",
+    "e2e-fullstack/**/*.ts"
+  ],
   "compilerOptions": {
     "types": ["node"]
   }
