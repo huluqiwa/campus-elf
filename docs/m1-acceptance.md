@@ -84,6 +84,8 @@ TD-110（M1-C-UI 时登记）处置承诺：「M1 验收阶段用专用 compose 
 
 ## 6. 复现命令
 
+> 以下用例数（全栈 18 / mock 96 / 后端 572）是 **M1 验收时点**的读数；当前全栈 22 例、mock 120 例（KB-01C 后，2026-11-01），命令本身不变，当前读数见 `docs/design-briefs/M3-KB-01C.md` §9。
+
 ```bash
 # 全栈 E2E（TD-110 起，M2 收尾① 扩到 18 例）
 bash scripts/e2e-stack.sh up                     # 重置库→迁移→backend+worker 容器→seed
