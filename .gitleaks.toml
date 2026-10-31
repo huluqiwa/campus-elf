@@ -68,4 +68,8 @@ regexes = [
   "Campus-Elf-RoleA-2026x",
   "Campus-Elf-RoleB-2026x",
   "Campus-Elf-MfaC-2026x",
+  # M3 KB-01B 幂等键单测夹具（kb-logic.test.ts 的假键生成器；非真实凭证）。
+  # 首个提交 d6b2efe 已含该字符串，历史不重写，按精确字符串放行。
+  "key-1-abcdefgh",
+  "key-2-abcdefgh",
 ]
