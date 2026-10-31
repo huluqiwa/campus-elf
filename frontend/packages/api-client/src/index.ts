@@ -98,6 +98,17 @@ export {
 } from "./imports";
 
 export {
+  createKbApi,
+  type KbApi,
+  type KbDocumentView,
+  type KbFileMetadataInput,
+  type KbScanStateView,
+  type KbUploadInput,
+  type KbUploadResult,
+  type KbVersionView,
+} from "./kb";
+
+export {
   createRbacApi,
   type BindableRoleView,
   type BindingUpdateInput,

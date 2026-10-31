@@ -480,6 +480,17 @@ audit_logs: 仅追加，prev_hash/hash 链
 - 扫描：arq `scan_kb_version`（短事务：读版本 → 结束事务 → 事务外读对象并扫描 → 条件更新）；通过 → `PENDING_APPROVAL`，感染/完整性失败 → `SCAN_FAILED`（先隔离留证再删原件），瞬时故障**保持 `UPLOADED`** 并累计 `scan_attempts`/`scan_error_code`，看门狗 `retry_pending_kb_scans` 每 5 分钟按租户补投（`scan:<version_id>:<attempt>` 作 job_id）；响应中的 `scan.state` 是**派生字段**（pending/error/passed/infected/skipped），不新增 `SCANNING` 状态。
 - 审计：`school.kb.documents.uploaded`、`school.kb.scan.passed`/`infected`/`failed`（系统执行者）、`school.kb.upload.denied`（校验失败/幂等冲突，独立事务）。本点不提供审批/构建接口，`assert_submittable` 只接受 `PENDING_APPROVAL`；开发旁路（`DEV_SKIP_FILE_SCAN` / `CLAMAV_FAIL_CLOSED=false`）只在 development/test 可用，staging/production 启动即拒绝。
 
+**M3 KB-01B 已实现（前端交互口径，2026-10-31）**：
+
+- 路由与菜单：`/kb/documents`（`meta.permission=school.kb.view`）与 `/kb/upload`（`school.kb.upload`）各一项菜单，位于「部门树」之后、「批量导入」之前；前端只做体验层，逐请求 403 仍由后端裁决。教师（只有 upload）不出现「知识库」入口、直连列表进 403；校方管理员（只有 view）不出现「上传文档」。
+- 上传页：批量选择 → 本地预检（1–15 个、单文件 ≤50MB、合计 ≤300MB、0 字节、扩展名白名单；与 `backend/app/kb/validation.py` 同界，魔数/ZIP 炸弹/文本编码仍由后端判）→ 可选元数据（标题默认文件名去扩展名、标签逗号分隔、描述 ≤1000 字；**开关关闭＝整段不发送、已填值保留**；任一行有编辑时发送与文件等长的数组，未编辑行发 `{}`）→ 上传。
+- 幂等键：签名 = 有序文件 `name|size|lastModified` + 元数据 JSON；签名不变的重试复用同一键（`crypto.randomUUID()`），文件或元数据变化换新键；409 `IDEMPOTENCY_KEY_REUSED` 强制下次换新键；422/413/网络错误保留键原样重试；201 `replayed=true` 明确提示「未创建新文档」。
+- 错误分层：本地预检行内红字且不发请求；后端 422 顶部「整批未保存」+ 逐文件错误表（后端 0 基 `index` 显示为 `index+1`）；413 显示后端字符串文案；403 交全局只提示一次；网络错误保留选择与键可重试。
+- 结果页轮询（仅 `school.kb.view`）：对本批次仍 `pending` 的文档每 5 秒串行请求一次详情——上一轮完成才排下一轮（同一时刻最多一轮、≤15 个请求）；页面隐藏暂停、5 分钟截止、403 停止、全部落定即停；404 的文档本轮内不再重试；组件卸载即停。无 view 的教师看到静态说明「扫描在后台进行」。扫描/引擎文案：`dev-skip`/`dev-degraded` 一律警告色，未知档位显示原码，绝不默认成「已通过」。
+- 文档列表：cursor 栈翻页（`limit=20`，下一页只认 `next_cursor`），加载中禁用上一页/下一页/刷新；加载失败保留旧行并显示「数据可能不是最新（上次成功 HH:MM:SS）」横幅 + 重试（TD-260 的口径，不做静默保留）；扫描列同时显示 `error_code`/`signature`。
+- 详情抽屉：打开即请求详情 + 第一页版本（`limit=20`，重新拉取，不用列表快照），版本「加载更多」按 `next_cursor` 追加；文档 404 提示「文档已不可见」一次、关闭抽屉并刷新当前页；切换文档后旧响应/旧 404 不写入新抽屉。
+- 全栈 E2E 不在本点：按简报 D9 单列 **KB-01C**（真实后端 + 真实库，扫描方案在 KB-01C 简报确认）。
+
 ### 5.6 构建进度 SSE
 
 事件：

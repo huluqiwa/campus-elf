@@ -9,6 +9,8 @@ import ForbiddenView from "../views/ForbiddenView.vue";
 import ForgotPasswordView from "../views/ForgotPasswordView.vue";
 import HomeView from "../views/HomeView.vue";
 import ImportsView from "../views/ImportsView.vue";
+import KbDocumentsView from "../views/KbDocumentsView.vue";
+import KbUploadView from "../views/KbUploadView.vue";
 import LoginView from "../views/LoginView.vue";
 import MfaEnrollView from "../views/MfaEnrollView.vue";
 import PeopleView from "../views/PeopleView.vue";
@@ -63,6 +65,19 @@ export const router = createRouter({
           name: "departments",
           component: DepartmentsView,
           meta: { requiresAuth: true, permission: "school.personnel.view" },
+        },
+        {
+          // M3 KB-01B：知识库列表与上传是两个权限码，各自一条路由
+          path: "kb/documents",
+          name: "kb-documents",
+          component: KbDocumentsView,
+          meta: { requiresAuth: true, permission: "school.kb.view" },
+        },
+        {
+          path: "kb/upload",
+          name: "kb-upload",
+          component: KbUploadView,
+          meta: { requiresAuth: true, permission: "school.kb.upload" },
         },
         {
           path: "imports",
