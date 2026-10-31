@@ -5,17 +5,29 @@ from arq.worker import create_worker
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.kb.scan_task import scan_kb_version
 from app.org.import_task import run_import_job
 from app.workers.settings import WorkerSettings, build_redis_settings, queue_name
 from app.workers.tasks import echo
 
 
 def test_worker_settings_registers_tasks() -> None:
-    """Worker 入口挂载 echo 与导入任务（M2-ORG02）。"""
+    """Worker 入口挂载 echo、导入任务（M2-ORG02）与知识库扫描（M3 KB-01）。"""
 
-    assert len(WorkerSettings.functions) == 2
+    assert len(WorkerSettings.functions) == 3
     assert run_import_job in WorkerSettings.functions
+    assert scan_kb_version in WorkerSettings.functions
     assert echo in WorkerSettings.functions
+
+
+def test_worker_settings_registers_kb_scan_watchdog_cron() -> None:
+    """知识库扫描看门狗每 5 分钟补投滞留版本（12 条）。"""
+
+    cron = [
+        job for job in (WorkerSettings.cron_jobs or []) if job.name == "retry_pending_kb_scans"
+    ]
+    assert len(cron) == 12
+    assert {job.minute for job in cron} == set(range(0, 60, 5))
 
 
 def test_worker_settings_registers_import_watchdog_cron() -> None:

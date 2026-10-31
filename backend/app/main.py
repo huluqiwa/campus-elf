@@ -14,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.auth import router as auth_router
-from app.api.body_limit import BodySizeLimitMiddleware
+from app.api.body_limit import BodyLimit, BodySizeLimitMiddleware
 from app.api.campus_chat import router as campus_chat_router
 from app.api.health import router as health_router
 from app.api.metrics import router as metrics_router
@@ -22,6 +22,7 @@ from app.api.platform_audit import router as platform_audit_router
 from app.api.platform_rbac import router as platform_rbac_router
 from app.api.platform_tenants import router as platform_tenants_router
 from app.api.school_imports import router as school_imports_router
+from app.api.school_kb import router as school_kb_router
 from app.api.school_org import router as school_org_router
 from app.api.school_personnel import router as school_personnel_router
 from app.api.school_rbac import router as school_rbac_router
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
 MAX_REGISTER_BODY_BYTES = 11 * 1024 * 1024
 # 导入文件 ≤10MB（解析器 MAX_FILE_SIZE 同口径）+ multipart 表单余量（M2-ORG02）
 MAX_IMPORT_BODY_BYTES = 11 * 1024 * 1024
+# 知识库整批 ≤300MB 文件 + 8MB multipart/元数据余量（M3 KB-01；流式计数，不占内存）
+MAX_KB_UPLOAD_BODY_BYTES = 308 * 1024 * 1024
 
 
 @asynccontextmanager
@@ -98,9 +101,19 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
     application.add_middleware(
         BodySizeLimitMiddleware,
         limits={
-            f"{settings.api_prefix}/platform/tenants/register": MAX_REGISTER_BODY_BYTES,
+            f"{settings.api_prefix}/platform/tenants/register": BodyLimit(
+                MAX_REGISTER_BODY_BYTES, "请求体过大（资质凭证不超过 10MB）"
+            ),
             # M2-ORG02：导入文件体积限制（10MB 文件 + 表单余量）
-            f"{settings.api_prefix}/school/imports": MAX_IMPORT_BODY_BYTES,
+            f"{settings.api_prefix}/school/imports": BodyLimit(
+                MAX_IMPORT_BODY_BYTES, "请求体过大（导入文件不超过 10MB）"
+            ),
+            # M3 KB-01：整批 300MB；流式计数避免 300MB 进内存
+            f"{settings.api_prefix}/school/kb/documents": BodyLimit(
+                MAX_KB_UPLOAD_BODY_BYTES,
+                "请求体过大（单批文件合计不超过 300MB）",
+                buffer=False,
+            ),
         },
     )
     application.add_middleware(RequestContextMiddleware)
@@ -119,6 +132,7 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
     application.include_router(school_personnel_router, prefix=settings.api_prefix)
     application.include_router(school_org_router, prefix=settings.api_prefix)
     application.include_router(school_imports_router, prefix=settings.api_prefix)
+    application.include_router(school_kb_router, prefix=settings.api_prefix)
     application.include_router(school_rbac_router, prefix=settings.api_prefix)
     application.include_router(platform_rbac_router, prefix=settings.api_prefix)
     return application

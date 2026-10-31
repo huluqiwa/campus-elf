@@ -26,7 +26,10 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 # 允许清理的租户级表（顺序：先子表后主表）
 TENANT_TABLES = (
-    # 子表在前：import_row_errors → import_jobs → teacher_class_courses → ...
+    # 子表在前：kb_document_versions → kb_documents → kb_upload_batches → import_row_errors → ...
+    "kb_document_versions",
+    "kb_documents",
+    "kb_upload_batches",
     "import_row_errors",
     "import_jobs",
     "departments",  # teachers.department_id 引用，先清部门再清教师

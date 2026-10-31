@@ -50,7 +50,8 @@ ACTIVE → DISABLED
 
 ```text
 DRAFT → UPLOADED → SCAN_FAILED
-                └→ PENDING_APPROVAL
+           │    └→ PENDING_APPROVAL
+           └─（扫描瞬时故障：保持 UPLOADED，看门狗补投）
 PENDING_APPROVAL → REJECTED
                  └→ APPROVED
 APPROVED → BUILDING → READY / FAILED
@@ -63,8 +64,10 @@ PUBLISHED → NEW_VERSION → PENDING_APPROVAL
 
 | 当前 | 事件 | 目标 | 守卫/副作用 |
 |---|---|---|---|
-| UPLOADED | ClamAV 通过 | PENDING_APPROVAL | 可提交审批 |
-| UPLOADED | ClamAV 失败 | SCAN_FAILED | 隔离；不得提交审批 |
+| UPLOADED | ClamAV 通过 | PENDING_APPROVAL | 落 `scan_engine`/`scanned_at`；可提交审批 |
+| UPLOADED | ClamAV 检出感染 | SCAN_FAILED | 先复制到同版本目录 `quarantine/` 留证、再删除原件；`scan_signature` 落库；不得提交审批 |
+| UPLOADED | 对象 SHA-256 与登记值不符 | SCAN_FAILED | 不扫描、不放行；`scan_error_code=HASH_MISMATCH` |
+| UPLOADED | 扫描瞬时故障（ClamAV 不可用/超时/协议异常、对象不可读、隔离复制失败） | UPLOADED | fail-closed：不迁移，累计 `scan_attempts` + `scan_error_code`；看门狗每 5 分钟按尝试序号补投 |
 | PENDING_APPROVAL | 审批通过 | APPROVED | 审批记录；可构建 |
 | PENDING_APPROVAL | 审批拒绝 | REJECTED | 理由必填；不可构建 |
 | APPROVED | 创建构建 | BUILDING | 仅一个活跃任务；未审批 409 |
@@ -91,6 +94,9 @@ PUBLISHED → NEW_VERSION → PENDING_APPROVAL
 - 原文/结构修改必须新版本；块级文本校正必须走派生版本（不可原地改已发布版本的块）。
 - 块编辑不得增删块、改变父子结构与父块归属；`base_hash` 冲突即 409。
 - 版本必须有已确认的 ACL 才能构建/发布（K4 fail-closed）。
+- **不新增 `SCANNING` 状态**：`UPLOADED` 同时表示「等待扫描 / 扫描重试」，对外由派生字段 `scan.state`（pending/error/passed/infected/skipped）表达。
+- 只有 `PENDING_APPROVAL` 可提交审批（`assert_submittable`）；`UPLOADED`（扫描中或重试）与 `SCAN_FAILED` 一律不可。
+- 开发旁路只在 `development`/`test` 可用：`DEV_SKIP_FILE_SCAN=true` 上传即 `PENDING_APPROVAL` 并标 `scan_engine=dev-skip`；`CLAMAV_FAIL_CLOSED=false` 时扫描故障降级放行并标 `dev-degraded`；staging/production 启动即拒绝这两种配置。
 
 ### 3.1 块编辑与派生版本（K5）
 

@@ -15,6 +15,7 @@ from arq.typing import StartupShutdown, WorkerCoroutine
 from arq.worker import Function
 
 from app.config import Settings, get_settings
+from app.kb.scan_task import retry_pending_kb_scans, scan_kb_version
 from app.org.import_task import fail_stale_import_jobs, run_import_job
 from app.workers.tasks import cleanup_refresh_tokens, echo
 
@@ -79,6 +80,7 @@ class WorkerSettings:
     functions: Sequence[WorkerCoroutine | Function] = [
         cast(WorkerCoroutine, echo),
         run_import_job,
+        scan_kb_version,
     ]
     # 每天 03:30（UTC）清理过期/已撤销刷新令牌（TD-067）
     cron_jobs: Sequence[CronJob] | None = [
@@ -103,6 +105,28 @@ class WorkerSettings:
                 max_tries=None,
             )
             for minute in (0, 15, 30, 45)
+        ],
+        # 知识库扫描看门狗每 5 分钟补投滞留 UPLOADED 版本（KB-01）
+        *[
+            CronJob(
+                "retry_pending_kb_scans",
+                cast(WorkerCoroutine, retry_pending_kb_scans),
+                month=None,
+                day=None,
+                weekday=None,
+                hour=None,
+                minute=minute,
+                second=0,
+                microsecond=0,
+                run_at_startup=False,
+                unique=True,
+                job_id=None,
+                timeout_s=None,
+                keep_result_s=None,
+                keep_result_forever=None,
+                max_tries=None,
+            )
+            for minute in range(0, 60, 5)
         ],
         CronJob(
             "cleanup_refresh_tokens",

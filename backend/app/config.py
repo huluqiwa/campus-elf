@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     s3_secret_key: SecretStr | None = None
     s3_bucket: str = "campus-elf"
 
+    # ---------- ClamAV（M3-KB-01 上传扫描） ----------
+    # 扫描异步执行；不可用/超时时版本保持 UPLOADED 等重试（fail-closed，绝不放行未扫描文件）。
+    clamav_host: str = "127.0.0.1"
+    clamav_port: int = Field(default=3310, ge=1, le=65535)
+    clamav_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+    clamav_fail_closed: bool = True
+    # 开发/测试专用：跳过扫描直接把版本置为 PENDING_APPROVAL；非开发环境必须 false。
+    dev_skip_file_scan: bool = False
+
     def _validate_encryption_kek(self) -> None:
         """校验字段加密密钥：必须是 base64 编码的 32 字节。"""
 
@@ -223,6 +232,14 @@ class Settings(BaseSettings):
         if self.dev_skip_school_review:
             raise ValueError(
                 f"{self.app_env} 环境禁止开启 DEV_SKIP_SCHOOL_REVIEW（学校资质必须审核）"
+            )
+        if self.dev_skip_file_scan:
+            raise ValueError(
+                f"{self.app_env} 环境禁止开启 DEV_SKIP_FILE_SCAN（上传文件必须扫描）"
+            )
+        if not self.clamav_fail_closed:
+            raise ValueError(
+                f"{self.app_env} 环境必须开启 CLAMAV_FAIL_CLOSED（扫描不可用时禁止放行）"
             )
 
         if self.app_env == "production":

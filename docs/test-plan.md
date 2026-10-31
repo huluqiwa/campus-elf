@@ -63,7 +63,7 @@
 | BS-06 ★ | 审批职责分离 | RBAC-03/APV-01 | 自批拒绝；超管例外默认关；理由+审计 |
 | BS-07 | 人员手动/批量导入 | ORG-01/02 | 账号、角色、错误行、重复策略、失败重试 |
 | BS-08 ★ | 身份证加密/掩码/审计 | ORG-04 | 密文存储、前 3 后 4、完整查看需权限+理由+审计 |
-| BS-09 | 上传/ClamAV/审批前不解析 | KB-01 | 状态 UPLOADED→PENDING；无 build job；扫描失败隔离 |
+| BS-09 | 上传/ClamAV/审批前不解析 | KB-01 | 状态 UPLOADED→PENDING；无 build job；扫描失败隔离。**证据（2026-10-31，KB-01A 后端）**：`tests/business/test_bs_m3_01_kb_upload.py` 4 例 + `tests/integration/test_kb_upload.py` / `tests/integration/test_kb_scan_worker.py` 覆盖整批原子与幂等重放/冲突、感染隔离留证、瞬时故障保持 UPLOADED + 看门狗多租补投、`DEV_SKIP_FILE_SCAN` 直通与审计 |
 | BS-10 ★ | 单文档版本审批门禁 | KB-02 | 未审批构建 409；拒绝不能构建；原文/结构变更重审；块级校正走派生+确认；标签免审 |
 | BS-11 | 构建进度 SSE/轮询/重试 | KB-03 | 阶段/进度/tier/日志；断线续传；失败重试；心跳 |
 | BS-12 | 构建→分块预览 | KB-06 | 父子块、元数据、表格/代码不拆、统计正确 |

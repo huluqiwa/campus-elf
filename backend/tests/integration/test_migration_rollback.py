@@ -30,6 +30,8 @@ D1_REVISION = "b2d4f6a8c0e1"
 M1F_PREVIOUS_REVISION = "f7a9b1c3d5e8"
 M2_PREVIOUS_REVISION = "a8c3e9f1b5d7"
 M2_ORG_TABLES = ("classes", "courses", "teachers", "students", "teacher_class_courses")
+M3_KB_PREVIOUS_REVISION = "a1c3e5f7b9d2"
+M3_KB_TABLES = ("kb_document_versions", "kb_documents", "kb_upload_batches")
 M1F_TEST_KEY = "m1f-rollback-audit-key-0123456789abcdef"
 
 
@@ -787,6 +789,79 @@ async def _m2_index_exists(dsn: str, index_name: str) -> bool:
         return value is not None
     finally:
         await connection.close()
+
+
+def test_m3_kb_downgrade_drops_tables_then_upgrade_restores() -> None:
+    """M3-KB-01A：downgrade 先解循环外键再删三表，重 upgrade 后可重建并再写入。"""
+
+    admin_url = os.environ.get("TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("TEST_DATABASE_URL 未设置；先运行 scripts/test-stack.sh up 并导出 TEST_*")
+    assert_test_database_dsn(admin_url)
+
+    dsn, database = _admin_dsn(admin_url)
+    temp_database = f"{database}_m3kbrollback"
+    temp_dsn = dsn.rsplit("/", 1)[0] + f"/{temp_database}"
+    temp_url = admin_url.rsplit("/", 1)[0] + f"/{temp_database}"
+
+    async def table_exists(table: str) -> bool:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            value = await connection.fetchval(
+                "select 1 from information_schema.tables "
+                "where table_schema = 'public' and table_name = $1",
+                table,
+            )
+            return value is not None
+        finally:
+            await connection.close()
+
+    async def seed_principal() -> tuple[UUID, UUID]:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            tenant_id = await connection.fetchval(
+                "insert into tenants (name, status) values ('M3 回滚中学', 'active') returning id"
+            )
+            user_id = await connection.fetchval(
+                "insert into users (tenant_id, user_type, login_id, password_hash, status, "
+                "must_change_password, mfa_enabled) values "
+                "($1, 'school_admin', 'kb-rollback', 'x', 'active', false, false) returning id",
+                tenant_id,
+            )
+            return cast(UUID, tenant_id), cast(UUID, user_id)
+        finally:
+            await connection.close()
+
+    async def seed_batch(tenant_id: UUID, user_id: UUID) -> None:
+        connection = await asyncpg.connect(temp_dsn)
+        try:
+            await connection.execute(
+                "insert into kb_upload_batches "
+                "(tenant_id, created_by, idempotency_key, request_hash, file_count, total_bytes) "
+                "values ($1, $2, 'rollback-key', repeat('0', 64), 1, 10)",
+                tenant_id,
+                user_id,
+            )
+        finally:
+            await connection.close()
+
+    asyncio.run(_create_database(dsn, temp_database))
+    try:
+        config = _alembic_config(temp_url)
+        command.upgrade(config, "head")
+        tenant_id, user_id = asyncio.run(seed_principal())
+        asyncio.run(seed_batch(tenant_id, user_id))
+
+        command.downgrade(config, M3_KB_PREVIOUS_REVISION)
+        for table in M3_KB_TABLES:
+            assert not asyncio.run(table_exists(table)), f"{table} 应随 downgrade 移除"
+
+        command.upgrade(config, "head")
+        for table in M3_KB_TABLES:
+            assert asyncio.run(table_exists(table)), f"{table} 应随 upgrade 重建"
+        asyncio.run(seed_batch(tenant_id, user_id))
+    finally:
+        asyncio.run(_drop_database(dsn, temp_database))
 
 
 def test_m1c2_downgrade_with_session_reasons_then_upgrade() -> None:

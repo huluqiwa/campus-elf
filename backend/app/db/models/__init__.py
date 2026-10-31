@@ -9,6 +9,7 @@ from app.db.models.identity import (
     User,
 )
 from app.db.models.imports import ImportJob, ImportRowError
+from app.db.models.kb import KbDocument, KbDocumentVersion, KbUploadBatch
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
 from app.db.models.org import (
     Course,
@@ -43,6 +44,9 @@ __all__ = [
     "Department",
     "ImportJob",
     "ImportRowError",
+    "KbDocument",
+    "KbDocumentVersion",
+    "KbUploadBatch",
     "MfaRecoveryCode",
     "OrgClass",
     "Permission",
