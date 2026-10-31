@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-**当前阶段：M2 组织与人员已完成，边界评审结论已出（2026-10-31，本 PR；合并后 M2 关闭）**（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台、M2-UI3 十批均已交付并过 CI，最后一批是前端权限账号页 TD-187g-C（2026-10-30，PR #22 → `fb6513d`）；`app/auth` 分支覆盖率 417/506 = 82.41%，门槛由 PR #26 抬到 82；TD-183/192 全栈 E2E 18 例全绿（2026-10-31）；M2 边界评审把台账逐条处置，并落地 TD-254 E2E `dist` 前检、TD-262 文档只抄脚本读数、TD-263 统一 LF、TD-264 CI 打印解释器版本；简报见 `docs/design-briefs/`，处置见 `docs/tech-debt.md`）。**下一步：M3 知识库闭环。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
+**当前阶段：M2 组织与人员已完成并关闭（2026-10-31，边界评审 PR #29 → 合并提交 `1312523`）**（ORG-01/03、ORG-02 导入、ORG-05 部门树、ORG-04 身份证加密、ORG-06 学年流转、M2-UI1 B 端页面、M2-UI2 角色权限后台、M2-UI3 十批均已交付并过 CI，最后一批是前端权限账号页 TD-187g-C（2026-10-30，PR #22 → `fb6513d`）；`app/auth` 分支覆盖率 417/506 = 82.41%，门槛由 PR #26 抬到 82；TD-183/192 全栈 E2E 18 例全绿（2026-10-31）；M2 边界评审把台账逐条处置，并落地 TD-254 E2E `dist` 前检、TD-262 文档只抄脚本读数、TD-263 统一 LF、TD-264 CI 打印解释器版本；简报见 `docs/design-briefs/`，处置见 `docs/tech-debt.md`）。**下一步：M3 知识库闭环。** 交接入口：**`docs/handoff.md`（接手手册：状态表/环境/门禁/文档地图）**，规则源头：`AGENTS.md`。
 
 已完成：
 
@@ -32,18 +32,17 @@
 
 - **质量与安全运维 P0（2026-10-28）**：关键包（rbac/auth/tenant/audit）**分支覆盖率门槛**——CI 实测四包 73.87 / 80.95 / 81.25 / 66.67%（auth 读数在 407–408/504 间漂移：同一 commit `8a5a2d3` 两次 run 为 408 与 407，校准提交 PR run 408、push 与 main run 407；阈值按最低观测取整为 73/80/81/66，TD-221），阈值写在 `backend/scripts/check_coverage.py`，`backend.yml` 与 `scripts/ci.sh` 产出 `coverage.json` 后逐包比较（`--cov-fail-under` 只看 TOTAL，不用；失败时打印逐文件缺口并上传产物）；`security` 工作流覆盖面向 main 的 PR 与 main 推送；Dependabot 包生态只开安全更新、Actions 周更分组 minor/patch（**仓库级 alerts/security updates 已于 2026-10-28 开启**）；`GET /metrics`（`METRICS_ENABLED` 默认 false，私有注册表只输出 `campus_*` 计数器，标签有界低敏）+ 4 类 5 条 Prometheus 告警规则（`deploy/observability/prometheus/alerts.yml`，接入随 TD-214）。两轮独立审查 1B/7M/5m + 0B/0M/8m 与覆盖率校准两轮 1M/5m + 1M/5m 全部处置；本地全量后端 **755 passed/1573s**，PR #1 远端 CI **761 passed/745.95s**。TD-216（标签值收敛）已登记 M3；提交 `d29e243` + `ba35fb5` + `ae8fa9c`。
 
-当前门禁（最近一个功能点＝M2 收尾③ `app/auth` 分支覆盖率抬到 82% + 门槛 80→82；2026-10-30 回填，这里只留一组当前读数，历史批次读数在 `docs/review-log.md`）：
+当前门禁（最近一个功能点＝M2 边界评审；2026-10-31 合并后回填。当前功能点保留 PR 与合并后 main 两组读数，另附一条历史门槛验收；历史批次读数在 `docs/review-log.md`）：
 
-- **PR #25 远端 CI**（M2 收尾③，后端点）：backend run `41078941427` **833 passed / 830.96s（13:50）**，`app/auth` 分支覆盖率 **417/506 = 82.41%**（82% 需 415 条、余量 2 条；当时门槛仍是 80），`app/rbac` 79.92%（211/264）、`app/tenant` 81.25%（13/16）、`app/audit` 66.67%（4/6）全过；security 绿
-- **合并后 `main`（tip `77ac33c`）推送 CI**：backend run `41082150650` **833 passed / 822.47s（13:42）**（四包分支覆盖率与 PR run 逐包一致，auth 417/506 = 82.41%）；security run `41082150684` success
-- **点级本地门禁（M2 收尾③，2026-10-30 实测）**：全量 **833 passed**（30:42，win32 / CPython 3.13.13，改门槛与新增边界用例前）；**改门槛后复跑** `scripts/check_coverage.py` 在 `THRESHOLDS["app/auth"]=82` 下四包全 PASS（auth 417/506 = 82.41%）、门槛脚本单测 **5 passed**；`ruff check app tests scripts alembic`（All checks passed!）/ `mypy scripts`（3 文件 0 错误）/ bandit 两条（无告警）
-- **PR #26 远端 CI**（同点门槛 PR）：backend run `41086807009` **834 passed / 704.24s（11:44）**，`app/auth` **417/506 = 82.41%** PASS 门槛 82；security run `41086806889` success
+- **PR #29 远端 CI**（M2 边界评审）：backend run `41139124064` **834 passed / 827.59s（13:47）**，四包分支覆盖率 `app/rbac` 79.92%（211/264）、`app/auth` **82.41%（417/506，门槛 82）**、`app/tenant` 81.25%（13/16）、`app/audit` 66.67%（4/6）全过；frontend/e2e run `41139124170`（单测 67+96、Playwright **96 passed / 2.1m**）；security run `41139124119` success
+- **合并后 `main`（tip `1312523`）推送 CI**：backend run `41144815937` **834 passed / 755.81s（12:35）**（四包分支覆盖率与 PR run 逐包一致）；frontend run `41144815871`（单测 67+96、Playwright **96 passed / 2.1m**）；security run `41144815896` success
+- **M2 收尾③门槛验收（历史，2026-10-30）**：PR #26 backend run `41086807009` **834 passed / 704.24s（11:44）**，`app/auth` **417/506 = 82.41%** PASS 门槛 82；security run `41086806889` success；点级本地门禁全量 **833 passed**（改门槛与新增边界用例前，win32 / CPython 3.13.13）、`ruff` / `mypy scripts` / bandit 两条全绿，改门槛后复跑 `scripts/check_coverage.py` 四包全 PASS
 - **前端规模（2026-10-31）**：单测 **163**（api-client 67 + admin 96）、mock E2E **96** 条（`frontend/e2e/`，全部走 `page.route()` 有状态 mock，见 TD-253「mock 判据是手抄的，抄错不会红」）、全栈 E2E **18 条**（`frontend/e2e-fullstack/`，真实后端 + 真实库；2026-10-31 实测 **18 passed（首次全绿 50.8s；四轮审查整改后复跑 40.2s〔Playwright 计时，整轮 60s〕）**，默认端口 18000）
 - 覆盖率门槛脚本 `backend/scripts/check_coverage.py`（`--cov-fail-under` 只看 TOTAL，不用）；取用例数要加 `-o addopts=""`；每个功能点一个 PR，受影响侧的全量套件由该 PR 的远端 CI 跑，合并条件＝CI 全绿 + 独立审查无 Blocker/Major
 
 进行中/待做：
 
-- **M2 已完成（边界评审结论 2026-10-31，本 PR；合并后关闭）**：M2-UI3 十批与收尾①②均已交付；边界评审把 M2 期间登记的 **78 条台账条目**逐条处置（去向见 `docs/milestone.md` §5.6 与 `docs/tech-debt.md`；TD-233 → M3 首个后端点、TD-259/260/261 → M3 首个前端点、TD-123 → M4，其余按台账落位 M3/M5/M6），并落地 TD-254 前端 E2E `dist` 前检、TD-262 文档只抄脚本读数、TD-263 `.gitattributes` 统一 LF、TD-264 CI 打印解释器版本。**下一步：M3 知识库闭环**（未开始；先写第一个功能点的设计简报）；**M4**（AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。
+- **M2 已完成并关闭（2026-10-31，边界评审 PR #29 → 合并提交 `1312523`）**：M2-UI3 十批与 M2 收尾三项（全栈 E2E、`app/auth` 覆盖率抬到 82%、边界评审）均已交付；边界评审把 M2 期间登记的 **78 条台账条目**逐条处置（去向见 `docs/milestone.md` §5.6 与 `docs/tech-debt.md`；TD-233 → M3 首个后端点、TD-259/260/261 → M3 首个前端点、TD-123 → M4，其余按台账落位 M3/M5/M6），并落地 TD-254 前端 E2E `dist` 前检、TD-262 文档只抄脚本读数、TD-263 `.gitattributes` 统一 LF、TD-264 CI 打印解释器版本。**下一步：M3 知识库闭环**（未开始；先写第一个功能点的设计简报）；**M4**（AI 与 C 端）未开始；SC-01 变更已把 ORG-05（部门/科室）、KB-09（文档查阅人群 ACL）、KB-10（切块编辑与派生重建）、AI-10（身份→人群过滤）写入计划。
 
 - **M2-UI3 第七批：审计字段 `sessions_revoked` 收口（TD-231，2026-10-29，PR #16 → 合并提交 `0ffdb2d`）**：整数键 `sessions_revoked` **全仓只写整数**，含义统一为「本次真正断开的**活跃**会话家族数」（未撤销且未过期，与设备列表 `list_sessions` 取数一致）——租户 MFA 重置、平台 MFA 重置、密码重置三条链路的取家族 SELECT 都加了 `and expires_at > now()`（**撤销语句保持全量未撤销**：把已过期的死行一并标上撤销不花钱，计数准就行），与停用侧口径对齐；自助链路 4 个动作（`auth.mfa.activated`/`auth.mfa.disabled`/`auth.password.changed`/`auth.password.reset`）的布尔语义改用新键 **`sessions_all_revoked`**，`auth.password.reset` 原先另开的并行整数键 `sessions_revoked_count` 并入同名整数键后消失——改名前布尔与整数混写同一个键，巡检 SQL `sum((metadata_json->>'sessions_revoked')::int)` 在布尔行上直接报错（PG 不能把 `true` cast 成 int）。四条「过期家族不计入」用例补齐（租户 MFA 重置 / 平台 MFA 重置 / 租户密码重置 / **平台密码重置**——最后一条是独立审查的唯一阻塞项：审查实测「只把平台侧 SQL 改回旧写法，全部 57 条相关用例照样全绿」，即平台侧那处收窄改错了也没有用例会红），且用 `type(...) is int` 钉住类型——`True == 1` 在 Python 成立，只断言值会让布尔蒙混过关。口径与键名对照表见 `docs/design.md` §5.12。**遗留**（TD-235，已延后到 M3）：自助链路另外 3 个动作只写布尔不写条数，真要做跨动作设备数对比时才补。
 
