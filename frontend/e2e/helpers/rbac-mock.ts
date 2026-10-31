@@ -397,6 +397,12 @@ export interface RbacMockOptions {
   /** 权限账号页的账号夹具（不给用 `FIXTURE_ACCOUNTS`）。 */
   accounts?: AccountFixture[];
   /**
+   * 第 N 次（1 起）账号列表请求返回 500。
+   * 用于「翻页失败不静默保留旧数据」的用例（TD-260）：失败后旧行必须挂「不是最新」横幅，
+   * 且重试要重发失败的那一页。
+   */
+  accountsListFailOnRequest?: number;
+  /**
    * 操作者的 user id（改绑 / 停用 / 重置 MFA 的"不能对自己"判据用）。
    * **必须与 `mockAuth` 的 `user.userId` 写同一份**（默认值两边一致），
    * 否则测出的是"界面以为是别人、服务端认定是你自己"这种假象。
@@ -428,6 +434,14 @@ function fingerprintOf(role: RoleFixture): string {
 
 function userIdFrom(url: string): string {
   return new URL(url).pathname.split("/").at(-3) ?? "";
+}
+
+/**
+ * 理由长度按 Unicode 码点算（后端 Python `len()` 同口径，TD-259）。
+ * 用 `.length` 会与后端在 emoji/生僻字上分叉，而 mock 与前端一起错时用例不会红。
+ */
+export function reasonLength(value: unknown): number {
+  return Array.from(String(value ?? "").trim()).length;
 }
 
 export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Promise<RbacMock> {
@@ -735,7 +749,7 @@ export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Pr
       // 校验顺序与后端一致（`backend/app/rbac/admin.py` 的 delete_role）：
       // 理由 ≥10 字 → 404 → 409 内置 → 确认码 → 版本 → 指纹。
       // 顺序不同的话，"理由太短"与"确认码打错"会返回相反的码，界面分支就测错了。
-      if (String(payload.reason ?? "").trim().length < 10) {
+      if (reasonLength(payload.reason) < 10) {
         return route.fulfill(
           json(422, {
             detail: { code: "ROLE_DELETE_REASON_REQUIRED", message: "删除理由至少 10 个字符" },
@@ -966,6 +980,9 @@ export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Pr
   await page.route("**/api/v1/school/permission-accounts**", (route) => {
     const url = new URL(route.request().url());
     captures.accountsList.push(route.request().url());
+    if (captures.accountsList.length === options.accountsListFailOnRequest) {
+      return route.fulfill(json(500, { detail: "服务暂时不可用" }));
+    }
     const limit = Number(url.searchParams.get("limit") ?? 50);
     const cursor = url.searchParams.get("cursor");
     let offset = 0;
@@ -1135,7 +1152,7 @@ export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Pr
     captures.deactivate.push(payload);
     const account = accounts.find((item) => item.id === userId);
     const reason = String(payload.reason ?? "");
-    if (reason.trim().length < 10) {
+    if (reasonLength(reason) < 10) {
       return route.fulfill(
         json(422, {
           detail: { code: "DEACTIVATE_REASON_REQUIRED", message: "停用理由至少 10 个字符" },
@@ -1254,7 +1271,7 @@ export async function mockRbacApi(page: Page, options: RbacMockOptions = {}): Pr
     // 判据顺序照抄 `mfa_admin.reset_user_mfa`：理由 <10 → 422（`:218`）；是自己 → 409（`:221`）；
     // 不存在 → 404（`:253`）；目标超管 → 403（`:276`）；未开 MFA → 409（`:297`）。
     const reason = String((captures.mfaReset.at(-1) as { reason?: string }).reason ?? "");
-    if (reason.trim().length < 10) {
+    if (reasonLength(reason) < 10) {
       return route.fulfill(
         json(422, { detail: { code: "RESET_REASON_REQUIRED", message: "重置理由至少 10 个字符" } }),
       );

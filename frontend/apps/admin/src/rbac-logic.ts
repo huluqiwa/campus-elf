@@ -8,6 +8,8 @@ import type {
   RoleView,
 } from "@campus-elf/api-client";
 
+import { codePointLength } from "./logic";
+
 export interface PermissionGroup {
   module: string;
   label: string;
@@ -55,7 +57,9 @@ export function resetConfirmError(
   reason: string,
 ): string | null {
   if (confirmCode.trim() !== roleCode) return "请输入完整角色编码以确认";
-  if (reason.trim().length < 10) return "重置理由至少 10 个字";
+  if (codePointLength(reason.trim()) < REASON_MIN_LENGTH) {
+    return `重置理由至少 ${REASON_MIN_LENGTH} 个字`;
+  }
   return null;
 }
 
@@ -207,7 +211,9 @@ export function deleteConfirmError(
   reason: string,
 ): string | null {
   if (confirmCode.trim() !== roleCode) return "请输入完整角色编码以确认";
-  if (reason.trim().length < REASON_MIN_LENGTH) return `删除理由至少 ${REASON_MIN_LENGTH} 个字`;
+  if (codePointLength(reason.trim()) < REASON_MIN_LENGTH) {
+    return `删除理由至少 ${REASON_MIN_LENGTH} 个字`;
+  }
   return null;
 }
 

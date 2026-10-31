@@ -109,6 +109,11 @@ describe("resetConfirmError（与后端 ROLE_CODE_MISMATCH / RESET_REASON_REQUIR
       resetConfirmError("school_admin", " school_admin ", "误改后恢复出厂默认权限"),
     ).toBeNull();
   });
+
+  it("按 Unicode 码点计数：9 个 emoji 拦下（TD-259）", () => {
+    expect(resetConfirmError("school_admin", "school_admin", "😀".repeat(9))).toContain("10");
+    expect(resetConfirmError("school_admin", "school_admin", "😀".repeat(10))).toBeNull();
+  });
 });
 
 describe("selfGrantGate（超管免打断不免留痕：与后端 _assert_self_grant 同一豁免）", () => {
@@ -306,6 +311,13 @@ describe("deleteConfirmError（删除确认：逐字 code + 理由 ≥10 字）"
     expect(
       deleteConfirmError("campus_operator", " campus_operator ", "岗位撤销，角色不再使用"),
     ).toBeNull();
+  });
+
+  it("按 Unicode 码点计数：9 个 emoji 拦下（TD-259）", () => {
+    expect(deleteConfirmError("campus_operator", "campus_operator", "😀".repeat(9))).toContain(
+      "10",
+    );
+    expect(deleteConfirmError("campus_operator", "campus_operator", "😀".repeat(10))).toBeNull();
   });
 });
 

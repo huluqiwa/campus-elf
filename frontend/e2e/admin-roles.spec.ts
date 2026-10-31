@@ -319,6 +319,14 @@ test("MFA 重置：按登录名定位目标、理由门禁、确认后清除绑�
   await expect(page.getByText("重置理由至少 10 个字")).toBeVisible();
   expect(rbac.captures.mfaReset).toHaveLength(0);
 
+  // 9 个 emoji 按码点是 9 字（按 UTF-16 码元会算成 18）→ 必须本地拦下，不弹确认框、不发请求（TD-259）
+  await expect(page.getByText("重置理由至少 10 个字")).toBeHidden({ timeout: 6000 });
+  await page.getByTestId("mfa-reset-reason").fill("😀".repeat(9));
+  await page.getByTestId("mfa-reset-submit").click();
+  await expect(page.getByText("重置理由至少 10 个字")).toBeVisible();
+  await expect(page.locator(".el-message-box")).toHaveCount(0);
+  expect(rbac.captures.mfaReset).toHaveLength(0);
+
   await page.getByTestId("mfa-reset-reason").fill("教师换新手机，无法接收动态码，需重新绑定");
   await page.getByTestId("mfa-reset-submit").click();
   await confirmMessageBox(page);

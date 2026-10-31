@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { importFileError, reasonValid, rolloverMappingError } from "./logic";
+import { codePointLength, importFileError, reasonValid, rolloverMappingError } from "./logic";
 
 describe("reasonValid（受控查看理由，与后端 ≥10 字同口径）", () => {
   it("短理由不通过（含前后空白被忽略前仍不足）", () => {
@@ -12,6 +12,19 @@ describe("reasonValid（受控查看理由，与后端 ≥10 字同口径）", (
     expect(reasonValid("医保办理需要查看完整号码")).toBe(true);
     expect(reasonValid("          ")).toBe(false);
     expect(reasonValid("  医保办理需要查看完整号码  ")).toBe(true);
+  });
+
+  it("按 Unicode 码点计数：9 个 emoji 不通过、10 个通过（TD-259）", () => {
+    expect(reasonValid("😀".repeat(9))).toBe(false);
+    expect(reasonValid("😀".repeat(10))).toBe(true);
+  });
+});
+
+describe("codePointLength（与后端 len() 同口径）", () => {
+  it("BMP 字符一字符一码点，代理对只算一个", () => {
+    expect(codePointLength("校园精灵")).toBe(4);
+    expect(codePointLength("😀𠮷")).toBe(2);
+    expect("😀".length).toBe(2);
   });
 });
 

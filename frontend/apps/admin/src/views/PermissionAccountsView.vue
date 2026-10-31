@@ -8,7 +8,9 @@
  * - 「还有没有下一页」只看 `next_cursor`：后端只在**填满一页**时才给游标，
  *   按 `items.length < limit` 猜会把「还有下一页」判成没有；
  * - 抽屉打开时重读一次绑定快照（`roles_version` 必须是新鲜的），写控件的门禁见 `accountGates`；
- * - 后端三个写动作都回 204，被撤销的会话条数只在审计里 → 提示只说「需重新登录」，不说条数。
+ * - 后端三个写动作都回 204，被撤销的会话条数只在审计里 → 提示只说「需重新登录」，不说条数；
+ * - 加载失败不清空已显示的行（行与页码仍对得上），但必须挂「数据可能不是最新」横幅 + 重试，
+ *   重试重发**失败的那一页**——静默保留旧数据会让运营以为某个账号还是旧状态（TD-260）。
  */
 import { ApiError, toUserMessage } from "@campus-elf/api-client";
 import type {
@@ -41,6 +43,10 @@ const nextCursor = ref<string | null>(null);
 const cursorStack = ref<(string | null)[]>([null]);
 const page = ref(0);
 const loading = ref(false);
+/** 上次成功加载的时刻（「非最新」横幅用）。 */
+const lastLoadedAt = ref<Date | null>(null);
+/** 最近一次失败的页码：重试要重发这一页，而不是当前显示的那一页。 */
+const failedPage = ref<number | null>(null);
 
 const keyword = ref("");
 const catalog = ref<BindableRoleView[]>([]);
@@ -56,7 +62,24 @@ const selfUserId = computed<string | null>(() => auth.user?.userId ?? null);
 const canLookup = computed(() => permissions.value.includes(MFA_RESET_CODE));
 const visibleRows = computed(() => filterAccountsLocally(accounts.value, keyword.value));
 
+function clockOf(at: Date): string {
+  return [at.getHours(), at.getMinutes(), at.getSeconds()]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
+}
+
+/** 失败后保留的旧行必须自报「不是最新」，否则运营会把翻页失败当成空结果。 */
+const staleHint = computed<string | null>(() => {
+  if (failedPage.value === null) return null;
+  const at = lastLoadedAt.value;
+  return at ? `数据可能不是最新（上次成功 ${clockOf(at)}）` : "数据可能不是最新（尚未成功加载过）";
+});
+
+/** 请求序号：只让最新一次加载写状态，避免先发后到的旧响应覆盖新结果／清掉失败横幅。 */
+let loadSeq = 0;
+
 async function loadPage(index: number): Promise<void> {
+  const seq = ++loadSeq;
   loading.value = true;
   try {
     const cursor = cursorStack.value[index] ?? null;
@@ -64,16 +87,25 @@ async function loadPage(index: number): Promise<void> {
       limit: PAGE_SIZE,
       cursor: cursor ?? undefined,
     });
+    if (seq !== loadSeq) return;
     accounts.value = data.items;
     nextCursor.value = data.next_cursor;
     cursorStack.value = cursorStack.value.slice(0, index + 1);
     if (data.next_cursor) cursorStack.value[index + 1] = data.next_cursor;
     page.value = index;
+    lastLoadedAt.value = new Date();
+    failedPage.value = null;
   } catch (error) {
+    if (seq !== loadSeq) return;
+    failedPage.value = index;
     reportError(error, "权限账号列表加载失败");
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
+}
+
+function retryFailedPage(): void {
+  if (failedPage.value !== null) void loadPage(failedPage.value);
 }
 
 async function ensureCatalog(): Promise<void> {
@@ -175,6 +207,22 @@ onMounted(() => {
         <el-button data-testid="account-reload" @click="loadPage(page)">刷新</el-button>
       </div>
 
+      <el-alert
+        v-if="staleHint"
+        class="stale-alert"
+        type="warning"
+        :closable="false"
+        show-icon
+        data-testid="account-stale-alert"
+      >
+        <div class="stale-body">
+          <span>{{ staleHint }}</span>
+          <el-button size="small" data-testid="account-stale-retry" @click="retryFailedPage">
+            重试
+          </el-button>
+        </div>
+      </el-alert>
+
       <el-table :data="visibleRows" data-testid="account-table" empty-text="没有符合条件的权限账号">
         <el-table-column label="姓名" min-width="140">
           <template #default="{ row }">
@@ -275,6 +323,16 @@ onMounted(() => {
 .lookup {
   display: flex;
   gap: 8px;
+}
+
+.stale-alert {
+  margin-bottom: 12px;
+}
+
+.stale-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .codes {

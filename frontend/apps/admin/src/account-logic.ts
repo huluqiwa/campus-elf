@@ -7,6 +7,7 @@ import type {
   UserBindingsView,
 } from "@campus-elf/api-client";
 
+import { codePointLength } from "./logic";
 import { REASON_MIN_LENGTH, rbacErrorCode } from "./rbac-logic";
 
 /** 本页入口与账号侧三个写动作共用的权限码（后端 `AccountManagerDep` 的判据）。 */
@@ -63,10 +64,12 @@ export function typeLabel(userType: string): string {
  */
 export function accountReasonError(reason: string, actionLabel: string): string | null {
   const value = reason.trim();
-  if (value.length < REASON_MIN_LENGTH) {
-    return `${actionLabel}理由至少 ${REASON_MIN_LENGTH} 个字（当前 ${value.length} 个字）`;
+  // 按码点而不是 UTF-16 码元计数：与后端 len() 同口径，否则 9 个 emoji 的理由前端放行、后端 422（TD-259）
+  const length = codePointLength(value);
+  if (length < REASON_MIN_LENGTH) {
+    return `${actionLabel}理由至少 ${REASON_MIN_LENGTH} 个字（当前 ${length} 个字）`;
   }
-  if (value.length > REASON_MAX_LENGTH) {
+  if (length > REASON_MAX_LENGTH) {
     return `${actionLabel}理由不能超过 ${REASON_MAX_LENGTH} 个字`;
   }
   return null;
@@ -149,8 +152,9 @@ function deny(hint: string): ActionGate {
 /**
  * 一行的四个写控件门禁（§20.3 C4：不给必然 403/409 的按钮，给一句为什么）。
  *
- * 判据优先级：缺权限码 → 超管 → 是自己 → 目标类型 → MFA/状态机。超管排在「是自己」之前，
- * 因为超管四个动作全被后端禁，理由也更值得先看见。
+ * 判据优先级：缺权限码 → 是自己 → 超管 → 目标类型 → MFA/状态机。与后端同序：两条写路径都先判
+ * 自锁再读目标（`binding.py:476`、`account_admin.py:234`、`mfa_admin.py:221`），所以操作者本人
+ * 就是超管时，先听到「不能操作自己」，与后端真正返回的那句一致（TD-261）。
  * 后端 403/409 仍是真边界，这里只是把死路从界面上拿掉。
  */
 export function accountGates(
@@ -172,8 +176,8 @@ export function accountGates(
     },
   ): ActionGate {
     if (!permissions.includes(code)) return deny(missingPermissionHint(code));
-    if (isSuperAdmin) return deny(SUPER_ADMIN_HINT);
     if (options.checkSelf && isSelf) return deny(SELF_HINT);
+    if (isSuperAdmin) return deny(SUPER_ADMIN_HINT);
     // 学生账号进不了列表，但 `/users/lookup` 按学号能捞到（那个端点不过滤类型）。
     // 不给这一挡，界面就会摆出两个点了必然 422 的按钮
     // （`BINDING_TARGET_NOT_ALLOWED` `binding.py:520`、`ACCOUNT_TARGET_NOT_ALLOWED` `account_admin.py:325`）。
