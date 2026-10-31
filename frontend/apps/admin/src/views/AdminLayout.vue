@@ -20,6 +20,8 @@ const MENU: MenuItem[] = [
   { index: "/people", title: "人员管理", permission: "school.personnel.view" },
   { index: "/classes", title: "班级与课程", permission: "school.personnel.view" },
   { index: "/departments", title: "部门树", permission: "school.personnel.view" },
+  { index: "/kb/documents", title: "知识库", permission: "school.kb.view" },
+  { index: "/kb/upload", title: "上传文档", permission: "school.kb.upload" },
   { index: "/imports", title: "批量导入", permission: "school.personnel.import" },
   { index: "/rollover", title: "学年流转", permission: "school.org.manage" },
   { index: "/settings/roles", title: "角色权限", permission: "school.role.manage" },
