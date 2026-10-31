@@ -129,6 +129,10 @@ def test_production_rejects_dev_switches_and_local_storage() -> None:
 
     with pytest.raises(ValidationError, match="DEV_SKIP_SCHOOL_REVIEW"):
         _production_settings(dev_skip_school_review=True)
+    with pytest.raises(ValidationError, match="DEV_SKIP_FILE_SCAN"):
+        _production_settings(dev_skip_file_scan=True)
+    with pytest.raises(ValidationError, match="CLAMAV_FAIL_CLOSED"):
+        _production_settings(clamav_fail_closed=False)
     with pytest.raises(ValidationError, match="JWT_SECRET"):
         _production_settings(jwt_secret="short")
     with pytest.raises(ValidationError, match="s3"):
@@ -238,6 +242,35 @@ def test_development_skips_jwt_strength_check() -> None:
     )
 
     assert settings.app_env == "development"
+
+
+def test_staging_rejects_file_scan_bypass() -> None:
+    """staging 同样禁止跳过文件扫描与放开 fail-closed（否则未扫描文件可进入审批）。"""
+
+    with pytest.raises(ValidationError, match="DEV_SKIP_FILE_SCAN"):
+        _staging_settings(dev_skip_file_scan=True)
+    with pytest.raises(ValidationError, match="CLAMAV_FAIL_CLOSED"):
+        _staging_settings(clamav_fail_closed=False)
+
+
+def test_development_allows_file_scan_bypass() -> None:
+    """开发/测试允许跳过扫描与放开 fail-closed；扫描默认 fail-closed。"""
+
+    settings = Settings(
+        _env_file=None,
+        redis_url="redis://127.0.0.1:6379/15",
+        dev_skip_file_scan=True,
+        clamav_fail_closed=False,
+    )
+
+    assert settings.clamav_host == "127.0.0.1"
+    assert settings.clamav_port == 3310
+    assert settings.clamav_timeout_seconds == 120.0
+    assert settings.dev_skip_file_scan is True
+
+    defaults = Settings(_env_file=None, redis_url="redis://127.0.0.1:6379/15")
+    assert defaults.dev_skip_file_scan is False
+    assert defaults.clamav_fail_closed is True
 
 
 def test_staging_requires_secure_refresh_cookie() -> None:

@@ -216,8 +216,9 @@ LLM-05-CampusCompanionElf/
 
 | 表 | 关键字段 | 说明 |
 |---|---|---|
-| `kb_documents` | id, tenant_id, title, tags, description, status, current_version_id, created_by | 文档 |
-| `kb_document_versions` | id, tenant_id, document_id, version_no, source_object_key, source_hash, mime, size, status, approval_request_id, **parent_version_id, derivation_type(initial/chunk_edit), acl_confirmed_by, acl_confirmed_at**, created_by | 版本；status 同下；派生版本（K5）由 parent_version_id 追溯 |
+| `kb_upload_batches` | id, tenant_id, idempotency_key, request_hash, file_count, total_bytes, created_by | 批量上传（KB-01A）；唯一 `(tenant_id, idempotency_key)`；`request_hash` 是同键同指纹判定依据，同键换文件/换人 409 |
+| `kb_documents` | id, tenant_id, title, tags, description, status, current_version_id, **upload_batch_id, upload_file_index**, created_by | 文档；`upload_file_index` 为批次内序号，唯一 `(tenant_id, upload_batch_id, upload_file_index)`；状态与当前版本一致 |
+| `kb_document_versions` | id, tenant_id, document_id, version_no, source_object_key, source_hash, mime, size, status, approval_request_id, **parent_version_id, derivation_type(initial/chunk_edit), acl_confirmed_by, acl_confirmed_at**, **source_filename, scan_attempts, scan_error_code, scan_signature, scan_engine, scanned_at**, created_by | 版本；status 同下；派生版本（K5）由 parent_version_id 追溯；KB-01A 落扫描结论（`scan_engine` ∈ `clamav`/`dev-skip`/`dev-degraded`） |
 | `kb_build_jobs` | id, tenant_id, document_version_id, status, stage, progress, processed_units, total_units, tier, fallback_reason, retry_count, error_code, message, started_at, updated_at, finished_at | 构建任务；同版本仅一个活跃任务 |
 | `kb_build_events` | id, job_id, seq, event_type, payload_json, created_at | SSE 事件持久化，支持 Last-Event-ID/since |
 | `kb_chunks` | id, tenant_id, document_version_id, parent_id, chunk_type(parent/child), chunk_index, text, text_markdown, section_path, page_start, page_end, token_count, char_count, overlap_prev, overlap_next, chunk_hash, metadata_json, embedding_status, **is_human_edited, edited_by, edited_at** | 分块 |
@@ -230,6 +231,8 @@ LLM-05-CampusCompanionElf/
 | `kb_test_cases` | id, test_set_id, question, expected_answer, expected_points, expected_chunk_ids, category, is_adversarial, row_no | 测试用例 |
 | `kb_test_runs` | id, tenant_id, test_set_id, document_version_id, status, metrics_json, report_object_key, started_at, finished_at | 测试报告 |
 | `kb_retrieval_tests` | id, tenant_id, document_version_id, query, top_k, result_json, created_by | 检索测试 |
+
+**KB-01A 落地口径（2026-10-31）**：一次上传 = 1 条 `kb_upload_batches` + N 条文档 + N 条版本，**整批原子**；对象 key 由服务端生成 `kb/<tenant_id>/<document_id>/<version_id>/source<ext>`（数据库不存租户外路径）；感染文件先复制到同版本目录的 `quarantine/source<ext>` 留证、再删除原件，版本 `source_object_key` 指向隔离副本；本点只做落库/扫描/元数据，**不解析、不创建构建任务**。
 
 ### 4.4 AI、会话、反馈
 
@@ -468,6 +471,14 @@ audit_logs: 仅追加，prev_hash/hash 链
 | POST | `/school/kb/versions/{version_id}/rollback` | 回滚 alias |
 | POST | `/school/kb/versions/{version_id}/offline` | 下线 |
 | DELETE | `/school/kb/versions/{version_id}` | 删除（软删+审计） |
+
+**M3 KB-01A 已实现（后端，2026-10-31）**：
+
+- `POST /school/kb/documents`（`school.kb.upload`）——multipart 1–15 个文件、单文件 ≤50MB、单批合计 ≤300MB（传输层另有 308MB 流式上限，超限 413 且不缓冲整包）；必填 `Idempotency-Key`（8–128 位 `[A-Za-z0-9._:-]`），同键同指纹同创建人重放原批次（`replayed=true`），同键换文件/换人 409 `IDEMPOTENCY_KEY_REUSED`；可选 `metadata` 表单字段（JSON 数组，逐文件 title/tags/description，缺省用文件名作标题）；任一文件不合格**整批 422** `BATCH_VALIDATION_FAILED`（逐文件 `index/filename/code/message`），不落库、不写对象；201 返回 `{batch_id, replayed, documents[]}`。
+- 文件校验（D6）：扩展名白名单 PDF/MD/TXT/DOCX/PPTX/PPT + 魔数/结构校验（OOXML 必须含 `[Content_Types].xml` 与主文档、PPT 需 OLE 头与 `PowerPoint Document` 流名、TXT/MD 按 UTF-8→GB18030 严格解码且含 NUL 视为二进制）；ZIP 条目数/单条目/总量/压缩比上限 + 拒绝加密条目与路径穿越；声明的 MIME 只做快速拒绝，落库用服务端判定的 canonical MIME。
+- `GET /school/kb/documents`、`GET /school/kb/documents/{id}`、`GET /school/kb/documents/{id}/versions`（`school.kb.view`）——按数据范围过滤（`school` 全校 / `self` 只看本人上传；解析不到范围 = 空集），cursor 分页默认 20 / 上限 100；范围外与跨租一律 404。
+- 扫描：arq `scan_kb_version`（短事务：读版本 → 结束事务 → 事务外读对象并扫描 → 条件更新）；通过 → `PENDING_APPROVAL`，感染/完整性失败 → `SCAN_FAILED`（先隔离留证再删原件），瞬时故障**保持 `UPLOADED`** 并累计 `scan_attempts`/`scan_error_code`，看门狗 `retry_pending_kb_scans` 每 5 分钟按租户补投（`scan:<version_id>:<attempt>` 作 job_id）；响应中的 `scan.state` 是**派生字段**（pending/error/passed/infected/skipped），不新增 `SCANNING` 状态。
+- 审计：`school.kb.documents.uploaded`、`school.kb.scan.passed`/`infected`/`failed`（系统执行者）、`school.kb.upload.denied`（校验失败/幂等冲突，独立事务）。本点不提供审批/构建接口，`assert_submittable` 只接受 `PENDING_APPROVAL`；开发旁路（`DEV_SKIP_FILE_SCAN` / `CLAMAV_FAIL_CLOSED=false`）只在 development/test 可用，staging/production 启动即拒绝。
 
 ### 5.6 构建进度 SSE
 

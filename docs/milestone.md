@@ -252,6 +252,7 @@ M2 已于 2026-10-31 随边界评审 PR #29 合并（提交 `1312523`）关闭�
 - MinerU 4.0.12 V1 适配器；DOCX/PPTX→PDF；TXT/MD 直接 Markdown。
 - Qdrant collection/alias；BGE-M3 + jieba/BM25；CPU 重排。
 - 引用元数据（doc/version/page/section/chunk）。
+- **实施进度（2026-10-31）**：KB-01 后端（KB-01A：批量上传/ClamAV/元数据，不含审批与构建）已本地交付，见 `docs/design-briefs/M3-KB-01-upload.md`；KB-01 前端拆为 KB-01B 单独功能点；KB-02 起未开始。
 
 ### 6.3 依赖
 
