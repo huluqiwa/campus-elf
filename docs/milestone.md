@@ -254,7 +254,7 @@ M2 已于 2026-10-31 随边界评审 PR #29 合并（提交 `1312523`）关闭�
 - MinerU 4.0.12 V1 适配器；DOCX/PPTX→PDF；TXT/MD 直接 Markdown。
 - Qdrant collection/alias；BGE-M3 + jieba/BM25；CPU 重排。
 - 引用元数据（doc/version/page/section/chunk）。
-- **实施进度（2026-10-31）**：KB-01 后端（KB-01A：批量上传/ClamAV/元数据，不含审批与构建）已交付并合并（PR #31 → 合并提交 `3e763ca`；两侧 CI 917 passed），见 `docs/design-briefs/M3-KB-01-upload.md`；KB-01 前端（KB-01B：上传页/文档列表/详情抽屉 + mock E2E）已交付并合并（PR #35 → 合并提交 `d6de5a6`；frontend CI 单测 74+124、Playwright 117 passed，security success），见 `docs/design-briefs/M3-KB-01B-frontend.md`；下一步 KB-01C 全栈 E2E，KB-02 起未开始。
+- **实施进度（2026-11-01）**：KB-01 后端（KB-01A：批量上传/ClamAV/元数据，不含审批与构建）已交付并合并（PR #31 → 合并提交 `3e763ca`；两侧 CI 917 passed），见 `docs/design-briefs/M3-KB-01-upload.md`；KB-01 前端（KB-01B：上传页/文档列表/详情抽屉 + mock E2E）已交付并合并（PR #35 → 合并提交 `d6de5a6`；frontend CI 单测 74+124、Playwright 117 passed，security success），见 `docs/design-briefs/M3-KB-01B-frontend.md`；KB-01C 全栈 E2E 已交付并合并（PR #37 → 合并提交 `7d1ce56`；本地全栈 22/22、mock 120/120，PR CI frontend+e2e 120 passed / 2.7m、backend 917 passed / 936.88s、security success），见 `docs/design-briefs/M3-KB-01C.md`；下一步 KB-02 审批与构建门禁，其余 M3 功能点未开始。
 
 ### 6.3 依赖
 

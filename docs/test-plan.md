@@ -63,7 +63,7 @@
 | BS-06 ★ | 审批职责分离 | RBAC-03/APV-01 | 自批拒绝；超管例外默认关；理由+审计 |
 | BS-07 | 人员手动/批量导入 | ORG-01/02 | 账号、角色、错误行、重复策略、失败重试 |
 | BS-08 ★ | 身份证加密/掩码/审计 | ORG-04 | 密文存储、前 3 后 4、完整查看需权限+理由+审计 |
-| BS-09 | 上传/ClamAV/审批前不解析 | KB-01 | 状态 UPLOADED→PENDING；无 build job；扫描失败隔离。**证据（2026-10-31，KB-01A 后端）**：`tests/business/test_bs_m3_01_kb_upload.py` 4 例 + `tests/integration/test_kb_upload.py` / `tests/integration/test_kb_scan_worker.py` 覆盖整批原子与幂等重放/冲突、感染隔离留证、瞬时故障保持 UPLOADED + 看门狗多租补投、`DEV_SKIP_FILE_SCAN` 直通与审计。**前端证据（2026-10-31，KB-01B）**：`frontend/e2e/admin-kb.spec.ts` 18 例（有状态 mock）覆盖本地预检、整批 422/413/409、`replayed` 重放、上传后轮询到「已通过/待审批」、无 view 不轮询、列表与抽屉的状态/扫描文案、游标翻页、刷新失败横幅、抽屉 404 与竞态；全栈 E2E 留给 KB-01C |
+| BS-09 | 上传/ClamAV/审批前不解析 | KB-01 | 状态 UPLOADED→PENDING；无 build job；扫描失败隔离。**证据（2026-10-31，KB-01A 后端）**：`tests/business/test_bs_m3_01_kb_upload.py` 4 例 + `tests/integration/test_kb_upload.py` / `tests/integration/test_kb_scan_worker.py` 覆盖整批原子与幂等重放/冲突、感染隔离留证、瞬时故障保持 UPLOADED + 看门狗多租补投、`DEV_SKIP_FILE_SCAN` 直通与审计。**前端证据（2026-10-31，KB-01B）**：`frontend/e2e/admin-kb.spec.ts` 18 例（有状态 mock）覆盖本地预检、整批 422/413/409、`replayed` 重放、上传后轮询到「已通过/待审批」、无 view 不轮询、列表与抽屉的状态/扫描文案、游标翻页、刷新失败横幅、抽屉 404 与竞态；KB-01C 追加 3 条轮询停止分支（详情 403、页面隐藏、5 分钟截止），共 21 例。**全栈证据（2026-11-01，KB-01C，PR #37 → `7d1ce56`）**：`frontend/e2e-fullstack/admin-fullstack-kb.spec.ts` 4 例（真实后端 + 真实库 + dev-skip）覆盖 UI 上传→`PENDING_APPROVAL`/`skipped`/`dev-skip`、元数据与版本、幂等重放/409 不落库、整批 422 原子、上传-only 403/菜单守卫/零详情请求；真实 ClamAV 覆盖延后 TD-284 |
 | BS-10 ★ | 单文档版本审批门禁 | KB-02 | 未审批构建 409；拒绝不能构建；原文/结构变更重审；块级校正走派生+确认；标签免审 |
 | BS-11 | 构建进度 SSE/轮询/重试 | KB-03 | 阶段/进度/tier/日志；断线续传；失败重试；心跳 |
 | BS-12 | 构建→分块预览 | KB-06 | 父子块、元数据、表格/代码不拆、统计正确 |
@@ -217,7 +217,7 @@
 - 详情 404：提示「文档已不可见」、关闭抽屉并刷新列表。
 - 抽屉竞态：A 的迟到 404 不会关掉已打开的 B，也不弹第二条提示。
 
-全栈 E2E 不在 KB-01B：按简报 D9 单列 **KB-01C**（真实后端 + 真实库，扫描方案在 KB-01C 简报确认）。
+全栈 E2E 已按简报 D9 单列 **KB-01C** 交付（2026-11-01，PR #37 → `7d1ce56`）：真实后端 + 真实库 + dev-skip，4 例；真实 ClamAV 引擎覆盖延后 TD-284，全栈入 CI 维持 TD-170/TD-207（M6）。
 
 ---
 

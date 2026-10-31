@@ -3,9 +3,9 @@
 | 项 | 内容 |
 |---|---|
 | 日期 | 2026-11-01 |
-| 状态 | 已确认（2026-11-01，D1–D4 全按推荐项） |
+| 状态 | 已完成（2026-11-01，PR #37 → 合并提交 `7d1ce56`；D1–D4 全按推荐项） |
 | 关联功能点 | M3 第 3 点：KB-01C 全栈 E2E（KB-01A 后端已合并 `3e763ca`；KB-01B 前端已合并 `d6de5a6`） |
-| 验收引用 | `docs/spec.md` §3.6 KB-01（:236-245）、`docs/test-plan.md` BS-09（:66、:220）、`docs/milestone.md` §6.2（:244）/§6.4（:257）、`docs/design-briefs/M3-KB-01B-frontend.md` D9（:127-133） |
+| 验收引用 | `docs/spec.md` §3.6 KB-01（:236-245）、`docs/test-plan.md` BS-09（:66、:220）、`docs/milestone.md` §6.2（:244、:257）、`docs/design-briefs/M3-KB-01B-frontend.md` D9（:127-133） |
 | 不做的事 | 审批（KB-02）、构建/构建进度 SSE（KB-03）、检索/分块预览（KB-06/07）；不改后端业务代码、不改生产配置、不改 CI workflow |
 
 ## 0. 现状核对（读代码与实跑栈得到的事实）
@@ -149,14 +149,14 @@
 
 红→绿清单：
 
-- [ ] 全栈 1：真实上传 → `PENDING_APPROVAL`/`skipped`/`dev-skip` + 元数据 + 列表/抽屉
-- [ ] 全栈 2：幂等重放（同 id）/同键换文件 409/新键同文件新 id
-- [ ] 全栈 3：整批 422 逐文件错误 + 好文件未落库
-- [ ] 全栈 4：上传-only 403、菜单/守卫、静态说明、零详情请求、admin 可见
-- [ ] mock 1：详情 403 → 首轮后停止 + 文案 + 请求数不增长
-- [ ] mock 2：隐藏 → 零请求 + 文案不变；恢复 visible → 继续并结束
-- [ ] mock 3：`Date.now` 偏移过 5 分钟 → 停止 + 超时文案 + 零请求
-- [ ] 既有 18 全栈 + 18 mock KB 用例不回归
+- [x] 全栈 1：真实上传 → `PENDING_APPROVAL`/`skipped`/`dev-skip` + 元数据 + 列表/抽屉
+- [x] 全栈 2：幂等重放（同 id）/同键换文件 409/新键同文件新 id
+- [x] 全栈 3：整批 422 逐文件错误 + 好文件未落库
+- [x] 全栈 4：上传-only 403、菜单/守卫、静态说明、零详情请求、admin 可见
+- [x] mock 1：详情 403 → 首轮后停止 + 文案 + 请求数不增长
+- [x] mock 2：隐藏 → 零请求 + 文案不变；恢复 visible → 继续并结束
+- [x] mock 3：`Date.now` 偏移过 5 分钟 → 停止 + 超时文案 + 零请求
+- [x] 既有全栈与 mock KB 用例不回归（全栈 22/22、mock 120/120）
 
 ## 5. 测试策略
 
@@ -192,3 +192,12 @@
 
 - 审查时重点验证：`DEV_SKIP_FILE_SCAN` 只出现在 E2E compose 且有注释、生产校验未被改动；两个种子账号权限最小（uploader 无 view）、口令不打印不提交；全栈用例断言业务状态（`PENDING_APPROVAL`/`skipped`/`dev-skip`/元数据/整批未落库）而非只看状态码；上传-only 的 403/菜单/守卫/零详情请求四条都成立；用例数据唯一、互不依赖、可重复跑；mock 三条分支断言请求次数与准确文案；没有为测试修改 `frontend/apps/**` 或 `backend/app/**`；未触碰 `components.d.ts`。
 - 允许的偏差：全栈仅本地执行（TD-170）；真实 ClamAV/感染/看门狗不在本点（TD-284）；全栈不覆盖 >20 页分页与大文件 413（mock 已覆盖 413 文案，分页由 mock 覆盖）；隐藏分支不要求消除空转 timer（TD-285）。
+
+## 9. 交付事实（2026-11-01）
+
+- **PR #37**（`feature/m3-kb01c-fullstack-e2e`，head `38d8365`）→ rebase 合并 **`7d1ce56`**（UTC 2026-10-31T20:24:33Z），分支已删除。
+- **PR CI**：backend run `41236413002` **917 passed / 936.88s（15:36）**（TOTAL 90%，四包分支覆盖率 79.92 / 82.41 / 81.25 / 66.67% 全过）；frontend/e2e run `41236413016`（单测 **74 + 124 passed**、Playwright **120 passed / 2.7m**）；security run `41236412962` success。
+- **合并后 main（tip `7d1ce56`）推送 CI**：frontend run `41238768664`（单测 74 + 124、Playwright **120 passed / 2.2m**）；security run `41238768599` success；backend run `41238768567` **917 passed / 923.59s（15:23）**（TOTAL 90%，四包分支覆盖率与 PR run 逐包一致）。
+- **本地门禁**：单测 198（74 + 124）；mock E2E 全量 **120 passed（3.5m；KB 页 21 passed / 1.0m）**；全栈全量 **22 passed（59.0s，修复前基线；修复后受影响 KB 4 例复跑 28.2s）**；后端 `ruff` / `mypy`（app+tests 226 文件、scripts 3 文件）/ `bandit`×2 / `alembic check` 全绿。
+- **审查**：三轮 **0B/1M/4m → 0B/1M/1m → 0B/0M/0m**（两条 Major 均为断言假绿，已补服务端回读）。
+- **TD**：TD-282 已完成；TD-284（真实 ClamAV 未进全栈）与 TD-285（隐藏页空转 timer / `pollInFlight` 跨批次）已延后 M6。
