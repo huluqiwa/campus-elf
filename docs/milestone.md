@@ -212,14 +212,22 @@ M1 的身份/RBAC；租户上下文。
 
 四项口径整改的落点：TD-254（Playwright 配置加载时校 `dist` 新鲜度，两个配置共用 `e2e/helpers/dist-freshness.ts`）、
 TD-262（文档只抄脚本输出的 `percent` / `covered/total` / 门槛，不再手算目标缺口）、
-TD-263（`.gitattributes` 加 `* text=auto eol=lf`）、TD-264（backend CI 固定打印 `python -VV` 与 coverage 版本；首次打印由本 PR 的 backend run 验证）。
+TD-263（`.gitattributes` 加 `* text=auto eol=lf`）、TD-264（backend CI 固定打印 `python -VV` 与 coverage 版本；首次打印已由 PR #29 backend run `41139124064` 验证：`Python 3.13.18`、`Coverage.py 7.17.0`）。
 
 验收证据核对：M2-UI3 T1–T5 的改前红/改后绿证据在 `docs/review-log.md` 187f-A 段（T2 为新增即绿，已在简报写明），T6 在 187f-B 段；
-`app/auth` 82.41% 只取 CI 产物（PR #25 run `41078941427`、PR #26 run `41086807009`）；
+`app/auth` 82.41% 取自 CI 产物（门槛验收两次读数：PR #25 run `41078941427`、PR #26 run `41086807009`；PR #29 与合并后 main 亦为 417/506，见下）；
 TD-183/192 全栈 E2E 18 例全绿（2026-10-31，PR #27 → 合并提交 `a928645`）；
 TD-254 前检正反两向实测（缺 `dist` / 源码较新 / 删除源码 → 中止；重建、只改单测文件或只改生成的 d.ts → 放行）、mock E2E **96 passed（2.3m）**。
 
-M2 关闭以本边界评审 PR 合并为准；合并后不得再把**未处置**的 M2 条目带入 M3——已处置条目按上表去向落位，不静默遗留。
+交付事实（合并后回填，2026-10-31）：PR #29 触发的三套 CI 全绿（`evals` 按路径过滤未触发）——backend run `41139124064` **834 passed / 827.59s**
+（版本 `Python 3.13.18`、`Coverage.py 7.17.0`；`app/auth` 82.41%＝417/506、门槛 82 PASS）、
+frontend/e2e run `41139124170`（单测 67+96、Playwright **96 passed / 2.1m**）、security run `41139124119` success；
+PR 经 **rebase 合并**为 `1312523`（2026-10-30T23:29:56Z，UTC；北京时间 2026-10-31 07:29:56），分支已删除。合并后 main 推送 CI 同批全绿（同样只有 backend/frontend/security 触发）：
+backend run `41144815937` **834 passed / 755.81s（12:35）**（四包读数与 PR run 逐包一致，`app/auth` 82.41%＝417/506 PASS；
+版本打印 `Python 3.13.18 (main, Oct 26 2026, 14:08:20) [Clang 23.1.3]`、`Coverage.py 7.17.0 with C extension`）、
+frontend run `41144815871`（单测 67+96、Playwright **96 passed / 2.1m**）、security run `41144815896` success。
+
+M2 已于 2026-10-31 随边界评审 PR #29 合并（提交 `1312523`）关闭；此后不得再把**未处置**的 M2 条目带入 M3——已处置条目按上表去向落位，不静默遗留。
 
 ---
 

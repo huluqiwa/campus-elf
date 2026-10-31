@@ -2,6 +2,7 @@
 
 > 每个功能点完成后追加一条；没有审查记录的功能点不得标记完成。
 > 详细清单见 `docs/code-review-checklist.md`。
+> 历史段落中的「本 PR」指该段对应的 PR；合并后的提交哈希见同段或后续回填块。
 
 | 功能点 | 日期 | commit/diff | 审查人/agent | Blocker | Major | Minor | 修复/复测 | 结论 |
 |---|---|---|---|---|---|---|---|---|
@@ -872,3 +873,9 @@
     - m2 TD-187 证据仍写「缺创建/删除接口与页面」→ 改为已由 187b/d/e/g-B/g-C 补齐；TD-264 状态改为「本 PR 落地、CI 首次打印待本 PR backend run 验证」；TD-254 证据补 tsconfig、缺输入提示与忽略项副作用。
     - m3 §5.6 明确跨期 5 条不计入 78；末句改为「未处置的 M2 条目不得带入 M3」；T2 标注「新增即绿」；读数统一 2.2m；TD-263 区分索引 463 个文本文件全 `i/lf` 与工作区待重新检出；README 的「其余 M6」改为按台账落位。
   - **第 2 轮后复测（2026-10-31）**：前检输入补 tsconfig 后 `playwright test --list` **exit 0（96 例）**；`pnpm typecheck` / `lint` / `format:check` 全绿；`git diff --staged --check` 干净。
+- **本点交付事实（合并后回填，2026-10-31）**：
+  - PR #29（`docs/m2-boundary-review`）触发的三套 CI 全绿（`evals` 按路径过滤未触发）：backend run `41139124064` **834 passed / 827.59s**（版本 `Python 3.13.18`、`Coverage.py 7.17.0`；四包分支覆盖率全过，`app/auth` **82.41%＝417/506**、门槛 82 PASS）；frontend/e2e run `41139124170`（单测 67+96、Playwright **96 passed / 2.1m**）；security run `41139124119` success。
+  - 该 PR 经 **rebase 合并**为 main 上的 **`1312523`**（2026-10-30T23:29:56Z），功能分支 `docs/m2-boundary-review` 已删除；M2 至此关闭。
+  - 合并后 main（tip `1312523`）推送 CI 全绿（`evals` 未触发）：backend run `41144815937` **834 passed / 755.81s（12:35）**（`Python 3.13.18 (main, Oct 26 2026, 14:08:20) [Clang 23.1.3]`、`Coverage.py 7.17.0 with C extension`；四包与 PR run 逐包一致——`app/rbac` 79.92%、`app/auth` 82.41%＝417/506 门槛 82、`app/tenant` 81.25%、`app/audit` 66.67%，全 PASS）；frontend run `41144815871`（单测 67+96、Playwright **96 passed / 2.1m**）；security run `41144815896` success。
+  - 说明：上文第 1/2 轮审查记录写于合并前（含「本 PR」措辞），最终状态以本块为准。
+- **M2 关闭文档回填（2026-10-31，分支 `docs/m2-boundary-close`）的独立审查**：docs-only（README、`docs/handoff.md`、`docs/milestone.md` §5.6、`docs/tech-debt.md`、`docs/review-log.md`、`docs/design-briefs/M2-boundary-review.md` 共 6 个文件），无代码/配置改动。第 1 轮（独立只读子智能体，审 `git diff --staged`）：**0 Blocker / 1 Major / 8 Minor**——Major 是 README「当前门禁」块仍留合并前读数（PR #25 / main `77ac33c` / 手算「余量 2 条」），与「M2 已关闭」矛盾；Minor 覆盖 TD 证据「本 PR」残留、PR run 版本行截断、合并哈希列口径（状态列 vs 目标列）、milestone「只取 CI 产物」枚举、README「收尾①②」编号、「CI 全绿」未注明 `evals` 未触发。整改：门禁块改为 PR #29 与合并后 main 两组读数 + 历史门槛验收并恢复「833 为改门槛前」限定；四行 TD 的合并事实统一落「状态」列；版本行明确标注为版本号；补历史「本 PR」口径说明与 `evals` 未触发注记。第 2 轮（复审，同一独立只读子智能体）：**0 Blocker / 0 Major / 5 Minor**，结论「可提交」；新 Minor 同批处理（README 表头与历史读数限定、版本号标注、本条审查记录入日志、历史「本 PR」口径说明、时间戳时区说明）并顺手修掉台账 2 行被裸 `|` 断表的单元格（TD-141 / TD-152；TD-199 / TD-241 原已转义）。`git diff --staged --check` 干净、6 文件全 LF、`components.d.ts` 未暂存。

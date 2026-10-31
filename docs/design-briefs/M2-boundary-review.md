@@ -55,7 +55,7 @@
 - TD-254 前检：不 build 直接 `playwright test --list` → exit 1 且提示 `pnpm build`；`pnpm build` 后 → exit 0、96 例可枚举。
   再 `touch` 一个源文件制造「源码较新」→ 再次 exit 1（正反两向）。
 - TD-263：`git ls-files --eol` 无 `i/crlf`；加规则前后 `git status` 不出现批量改写。
-- TD-264：CI 日志出现两行版本输出（本 PR 的 backend CI 自证）。
+- TD-264：CI 日志出现两行版本输出（PR #29 backend run `41139124064` 自证：版本 `Python 3.13.18`、`Coverage.py 7.17.0`）。
 - 前端全量 mock E2E 96 例、`typecheck` / `lint` / `format:check`。
 
 ## 5. 台账处置结论
@@ -76,7 +76,7 @@ M2 期间登记的 78 条（来源列含 M2）逐条处置，状态与证据以 
 跨期条目去向维持：TD-136、TD-144 → M3（已采纳）；TD-123 → M4；TD-129、TD-134、TD-139、TD-142、TD-146、TD-155、
 TD-157、TD-158、TD-160、TD-161、TD-166、TD-168、TD-169 → M6（TD-139 为已采纳，其余已延后）。上述跨期条目不计入 78 条。
 
-TD-264 的实现随本 PR 落地，CI 首次打印由本 PR 的 backend run 验证；合并后回填读数。
+TD-264 的实现随 PR #29 落地（合并提交 `1312523`），CI 首次打印由该 PR 的 backend run `41139124064` 验证。
 
 ## 6. 预判技术债
 
