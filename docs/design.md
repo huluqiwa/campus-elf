@@ -480,7 +480,7 @@ audit_logs: 仅追加，prev_hash/hash 链
 - 扫描：arq `scan_kb_version`（短事务：读版本 → 结束事务 → 事务外读对象并扫描 → 条件更新）；通过 → `PENDING_APPROVAL`，感染/完整性失败 → `SCAN_FAILED`（先隔离留证再删原件），瞬时故障**保持 `UPLOADED`** 并累计 `scan_attempts`/`scan_error_code`，看门狗 `retry_pending_kb_scans` 每 5 分钟按租户补投（`scan:<version_id>:<attempt>` 作 job_id）；响应中的 `scan.state` 是**派生字段**（pending/error/passed/infected/skipped），不新增 `SCANNING` 状态。
 - 审计：`school.kb.documents.uploaded`、`school.kb.scan.passed`/`infected`/`failed`（系统执行者）、`school.kb.upload.denied`（校验失败/幂等冲突，独立事务）。本点不提供审批/构建接口，`assert_submittable` 只接受 `PENDING_APPROVAL`；开发旁路（`DEV_SKIP_FILE_SCAN` / `CLAMAV_FAIL_CLOSED=false`）只在 development/test 可用，staging/production 启动即拒绝。
 
-**M3 KB-01B 已实现（前端交互口径，2026-10-31）**：
+**M3 KB-01B 已实现并合并（前端交互口径，2026-10-31，PR #35 → 合并提交 `d6de5a6`）**：
 
 - 路由与菜单：`/kb/documents`（`meta.permission=school.kb.view`）与 `/kb/upload`（`school.kb.upload`）各一项菜单，位于「部门树」之后、「批量导入」之前；前端只做体验层，逐请求 403 仍由后端裁决。教师（只有 upload）不出现「知识库」入口、直连列表进 403；校方管理员（只有 view）不出现「上传文档」。
 - 上传页：批量选择 → 本地预检（1–15 个、单文件 ≤50MB、合计 ≤300MB、0 字节、扩展名白名单；与 `backend/app/kb/validation.py` 同界，魔数/ZIP 炸弹/文本编码仍由后端判）→ 可选元数据（标题默认文件名去扩展名、标签逗号分隔、描述 ≤1000 字；**开关关闭＝整段不发送、已填值保留**；任一行有编辑时发送与文件等长的数组，未编辑行发 `{}`）→ 上传。
