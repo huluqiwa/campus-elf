@@ -45,6 +45,9 @@ services:
       SMTP_FROM: no-reply@campus-elf.test
       OBJECT_STORE_BACKEND: local
       OBJECT_STORE_DIR: /tmp/e2e-objects
+      # 知识库全栈 E2E 用开发跳过扫描：上传直接 PENDING_APPROVAL + engine=dev-skip。
+      # 只在 dev/test 生效；非 dev/test 会被 Settings 拒绝（backend/app/config.py:236-238）。
+      DEV_SKIP_FILE_SCAN: "true"
       # 重置邮件里的前端地址指向 admin 端 preview（Playwright 从邮件提取 token 后跳 4173）
       PASSWORD_RESET_URL_BASE: http://127.0.0.1:4173/reset-password
     ports:

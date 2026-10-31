@@ -267,6 +267,8 @@ test("无查看权限：上传结果只给静态说明，不轮询详情", async
   await page.getByTestId("kb-submit").click();
 
   await expect(page.getByTestId("kb-upload-result")).toContainText("你没有知识库查看权限");
+  // 等过首个 5 秒轮询窗口：有查看权限时详情请求早已发出，零请求才算证明「无权限不轮询」
+  await page.waitForTimeout(6000);
   expect(captures.detailIds).toHaveLength(0);
 });
 
@@ -438,4 +440,97 @@ test("抽屉竞态：A 的迟到 404 不会关掉已打开的 B", async ({ page 
   await expect(drawer).toContainText("可疑附件");
   await expect(drawer).toBeVisible();
   await expect(page.getByText("文档已不可见，列表已刷新")).toHaveCount(0);
+});
+
+// ---- TD-282：上传结果页轮询的三条停止分支（页面级） ----
+
+test("轮询停止①：详情 403 后停止刷新并提示无查看权限", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: BOTH } });
+  const { captures } = await mockKbApi(page, {
+    autoPassOnDetail: false,
+    detailError: { status: 403, body: { detail: { code: "FORBIDDEN", message: "无权限" } } },
+  });
+
+  await page.goto("/kb/upload");
+  await pickFiles(page, [
+    { name: "权限撤回.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4 e2e") },
+  ]);
+  await page.getByTestId("kb-submit").click();
+  await expect(page.getByTestId("kb-upload-result")).toBeVisible();
+  await expect(page.getByTestId("kb-result-table")).toContainText("扫描中/待扫描");
+
+  await expect.poll(() => captures.detailIds.length, { timeout: 10_000 }).toBe(1);
+  await expect(page.getByText("自动刷新已停止（无查看权限或被服务端拒绝）")).toBeVisible();
+  // 停止后不再发详情请求（等过下一轮 5 秒窗口）
+  await page.waitForTimeout(6000);
+  expect(captures.detailIds).toHaveLength(1);
+});
+
+test("轮询暂停②：页面隐藏不发详情请求，恢复可见后继续并结束", async ({ page }) => {
+  await page.addInitScript(() => {
+    let hidden = false;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => (hidden ? "hidden" : "visible"),
+    });
+    (window as unknown as { __setKbHidden: (value: boolean) => void }).__setKbHidden = (value) => {
+      hidden = value;
+    };
+  });
+  await mockAuth(page, { authenticated: true, user: { permissions: BOTH } });
+  const { captures } = await mockKbApi(page);
+
+  await page.goto("/kb/upload");
+  await pickFiles(page, [
+    { name: "隐藏暂停.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4 e2e") },
+  ]);
+  await page.getByTestId("kb-submit").click();
+  await expect(page.getByTestId("kb-upload-result")).toBeVisible();
+  await page.evaluate(() => {
+    (window as unknown as { __setKbHidden: (value: boolean) => void }).__setKbHidden(true);
+  });
+
+  await page.waitForTimeout(6000);
+  expect(captures.detailIds).toHaveLength(0);
+  await expect(page.getByTestId("kb-result-table")).toContainText("扫描中/待扫描");
+  await expect(page.getByText("自动刷新已停止")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    (window as unknown as { __setKbHidden: (value: boolean) => void }).__setKbHidden(false);
+  });
+  await expect.poll(() => captures.detailIds.length, { timeout: 10_000 }).toBeGreaterThan(0);
+  await expect(page.getByText("扫描已全部结束")).toBeVisible();
+});
+
+test("轮询截止③：超过 5 分钟停止刷新并提示手动查看", async ({ page }) => {
+  await page.addInitScript(() => {
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    Object.defineProperty(Date, "now", {
+      configurable: true,
+      value: () => realNow() + offset,
+    });
+    (window as unknown as { __advanceKbClock: (ms: number) => void }).__advanceKbClock = (ms) => {
+      offset += ms;
+    };
+  });
+  await mockAuth(page, { authenticated: true, user: { permissions: BOTH } });
+  const { captures } = await mockKbApi(page, { autoPassOnDetail: false });
+
+  await page.goto("/kb/upload");
+  await pickFiles(page, [
+    { name: "超时截止.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4 e2e") },
+  ]);
+  await page.getByTestId("kb-submit").click();
+  await expect(page.getByTestId("kb-upload-result")).toBeVisible();
+  await page.evaluate(() => {
+    (window as unknown as { __advanceKbClock: (ms: number) => void }).__advanceKbClock(
+      5 * 60 * 1000 + 1000,
+    );
+  });
+
+  // 下一轮 tick 先判 5 分钟窗口，不发请求直接停
+  await expect(page.getByText("自动刷新已停止（超过 5 分钟）")).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(6000);
+  expect(captures.detailIds).toHaveLength(0);
 });
