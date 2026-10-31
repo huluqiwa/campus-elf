@@ -4,6 +4,7 @@ import { mockAuth } from "./helpers/auth-mock";
 import {
   DEFAULT_ACTOR_USER_ID,
   mockRbacApi,
+  reasonLength,
   type AccountFixture,
   type RoleFixture,
 } from "./helpers/rbac-mock";
@@ -117,6 +118,60 @@ test("翻页：下一页带的是上一页回下来的游标；没填满一页�
 
   await page.getByTestId("account-prev").click();
   await expect(page.getByTestId("account-page-info")).toContainText("第 1 页");
+});
+
+test("翻页失败：旧行保留但明说「不是最新」，重试重发失败的那一页", async ({ page }) => {
+  const many: AccountFixture[] = Array.from({ length: 51 }, (_, index) => ({
+    id: `61000000-0000-0000-0000-0000000000${String(index).padStart(2, "0")}`,
+    login_id: `E-8${String(index).padStart(3, "0")}`,
+    display_name: `教师 ${index}`,
+    user_type: "teacher",
+    status: "active",
+    mfa_enabled: false,
+    role_ids: [],
+    roles_version: 0,
+  }));
+  // 第 1 次（进页）成功、第 2 次（翻下一页）失败 → 表格继续显示第 1 页的行
+  const rbac = await mockRbacApi(page, { accounts: many, accountsListFailOnRequest: 2 });
+  await mockAuth(page, { authenticated: true, user: { permissions: ACCOUNT_ONLY } });
+
+  await page.goto("/settings/accounts");
+  await expect(page.getByTestId("account-page-info")).toContainText("第 1 页");
+  await page.getByTestId("account-next").click();
+
+  // 行与页码仍然一致（都是第 1 页），但界面必须自报这批行是旧的（TD-260）
+  await expect(page.getByTestId("account-page-info")).toContainText("第 1 页");
+  await expect(page.getByTestId("account-manage")).toHaveCount(50);
+  await expect(page.getByTestId("account-stale-alert")).toContainText("数据可能不是最新");
+  await expect(page.getByTestId("account-stale-alert")).toContainText(/上次成功 \d{2}:\d{2}:\d{2}/);
+
+  await page.getByTestId("account-stale-retry").click();
+  await expect(page.getByTestId("account-page-info")).toContainText("第 2 页");
+  await expect(page.getByTestId("account-manage")).toHaveCount(1);
+  await expect(page.getByTestId("account-stale-alert")).toHaveCount(0);
+  // 进页 + 失败的一次 + 重试 = 3 次；第 2 页出现且带 o-50 才算真的重发了失败页
+  expect(rbac.captures.accountsList).toHaveLength(3);
+  expect(new URL(rbac.captures.accountsList.at(-1)!).searchParams.get("cursor")).toBe("o-50");
+});
+
+test("首次加载失败：空表 + 「尚未成功加载过」，重试成功后横幅消失", async ({ page }) => {
+  const rbac = await mockRbacApi(page, { accountsListFailOnRequest: 1 });
+  await mockAuth(page, { authenticated: true, user: { permissions: ACCOUNT_ONLY } });
+
+  await page.goto("/settings/accounts");
+  await expect(page.getByTestId("account-stale-alert")).toContainText("尚未成功加载过");
+  await expect(page.getByTestId("account-manage")).toHaveCount(0);
+
+  await page.getByTestId("account-stale-retry").click();
+  await expect(page.getByTestId("account-manage")).toHaveCount(5);
+  await expect(page.getByTestId("account-stale-alert")).toHaveCount(0);
+  expect(rbac.captures.accountsList).toHaveLength(2);
+});
+
+test("mock 的理由长度按码点算（与后端 len() 同口径，TD-259）", () => {
+  expect(reasonLength("😀".repeat(9))).toBe(9);
+  expect(reasonLength("😀".repeat(10))).toBe(10);
+  expect(reasonLength("  校园精灵  ")).toBe(4);
 });
 
 test("本地过滤：只作用当前页，姓名与角色码都能命中（大小写不敏感）", async ({ page }) => {

@@ -1,8 +1,18 @@
 /** B 端页面的纯逻辑（M2-UI1）：与后端校验同口径的前端预检，便于单元测试。 */
 
+/**
+ * 按 Unicode 码点计数（后端 Python `len()` 同口径）。
+ *
+ * JS 的 `String#length` 数的是 UTF-16 码元：emoji、BMP 外生僻字各算 2，后端算 1。
+ * 用 `.length` 做「至少 10 字」的预检会把 9 个 emoji 的理由放过去、到后端 422（TD-259）。
+ */
+export function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
 /** 受控查看理由：去空白后 ≥10 字（与后端 IdCardReadRequest 同口径）。 */
 export function reasonValid(reason: string): boolean {
-  return reason.trim().length >= 10;
+  return codePointLength(reason.trim()) >= 10;
 }
 
 export interface RolloverMappingInput {

@@ -79,6 +79,14 @@ describe("accountReasonError", () => {
   it("文案带上动作名，停用一个入口不会说成重置", () => {
     expect(accountReasonError("", "重置 MFA")).toContain("重置 MFA");
   });
+
+  it("按 Unicode 码点计数：9 个 emoji 拦下、10 个放行（后端 len() 同口径，TD-259）", () => {
+    // 😀 在 JS 里是 2 个 UTF-16 码元、1 个码点；按 .length 判会把 9 个算成 18 字放行
+    const nine = "😀".repeat(9);
+    const ten = "😀".repeat(10);
+    expect(accountReasonError(nine, "停用")).toContain("当前 9 个字");
+    expect(accountReasonError(ten, "停用")).toBeNull();
+  });
 });
 
 describe("bindingPlan", () => {
@@ -179,9 +187,10 @@ describe("accountGates", () => {
     expect(gates.bind.hint).toContain("自己");
   });
 
-  it("自己的超管行按超管口径解释（超管优先于「是我」）", () => {
+  it("自己又是超管：先按「不能操作自己」解释（后端自锁判据先于读目标，TD-261）", () => {
     const gates = accountGates(account({ id: "me-1", is_super_admin: true }), "me-1", BOTH_CODES);
-    expect(gates.bind.hint).toContain("超管");
+    expect(gates.bind.hint).toContain("自己");
+    expect(gates.bind.hint).not.toContain("超管");
   });
 
   it("只持账号管理码：MFA 重置关，其余照常（不能因缺一个码让整页半死路）", () => {

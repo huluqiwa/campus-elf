@@ -29,6 +29,7 @@ import {
   groupPermissions,
   isSelfLockRemoval,
   permissionDiff,
+  REASON_MIN_LENGTH,
   resetConfirmError,
   resetUnavailableReason,
   ROLE_MANAGE_CODE,
@@ -37,6 +38,7 @@ import {
   selfGrantGate,
   selfGrantRejectionMessage,
 } from "../rbac-logic";
+import { codePointLength } from "../logic";
 import { useAuthStore } from "../stores/auth";
 
 const auth = useAuthStore();
@@ -351,8 +353,9 @@ async function lookupUser(): Promise<void> {
 async function resetMfa(): Promise<void> {
   const user = mfaTarget.value;
   if (!user) return;
-  if (mfaReason.value.trim().length < 10) {
-    ElMessage.warning("重置理由至少 10 个字");
+  // 与后端 len() 同口径按码点计数（TD-259）：用 .length 会把 9 个 emoji 算成 18 字放行
+  if (codePointLength(mfaReason.value.trim()) < REASON_MIN_LENGTH) {
+    ElMessage.warning(`重置理由至少 ${REASON_MIN_LENGTH} 个字`);
     return;
   }
   const confirmed = await ElMessageBox.confirm(
