@@ -79,6 +79,8 @@ export interface KbMockOptions {
   autoPassOnDetail?: boolean;
   /** 这些文档 id 的详情/版本请求返回 404（模拟打开抽屉前被删）。 */
   missingDocumentIds?: string[];
+  /** 详情固定返回的错误（模拟权限被撤/服务端拒绝），优先于 missingDocumentIds。 */
+  detailError?: { status: number; body: unknown };
 }
 
 export interface KbMock {
@@ -420,6 +422,8 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
   async function handleDetail(route: Route, id: string): Promise<void> {
     captures.detailIds.push(id);
     await delay(options.detailDelayMs);
+    if (options.detailError)
+      return json(route, options.detailError.status, options.detailError.body);
     if (options.missingDocumentIds?.includes(id)) return notFound(route);
     const document = documents.find((item) => item.id === id);
     if (!document) return notFound(route);

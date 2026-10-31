@@ -12,6 +12,7 @@
 - M2 收尾（TD-192）专用：角色操作员（role.manage + mfa.reset）、绑定内置 school_admin 的
   权限目标、已绑定 TOTP 的 MFA 目标；TOTP secret 用 E2E_ENCRYPTION_KEK 加密入库，
   明文只写 git 忽略的账号文件；
+- KB-01C 全栈专用：上传+查看（全校）与仅上传（本人）各一个，随机口令只写账号文件；
 - 全部账号做登录烟测，失败即中止（fail fast，避免 E2E 拿着坏数据假失败）。
 
 输出：deploy/.e2e-accounts.json（git 忽略）供 frontend/e2e-fullstack 用例读取。
@@ -20,6 +21,7 @@
 import asyncio
 import json
 import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -82,6 +84,12 @@ ROLE_TARGET_LOGIN_ID = "e2e-role-target"
 ROLE_TARGET_PASSWORD = "Campus-Elf-RoleB-2026x"
 MFA_TARGET_LOGIN_ID = "e2e-mfa-target"
 MFA_TARGET_PASSWORD = "Campus-Elf-MfaC-2026x"
+# KB-01C 全栈专用：与 TD-192 的角色/账号零交叉（那些用例会撤权/改角色）。
+# 口令随机生成、只写账号文件：新增固定串容易触发 gitleaks 的 generic-api-key 误报。
+KB_ADMIN_LOGIN_ID = "e2e-kb-admin"
+KB_ADMIN_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
+KB_UPLOADER_LOGIN_ID = "e2e-kb-uploader"
+KB_UPLOADER_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
 
 PDF_BYTES = b"%PDF-1.4\n% e2e seed qualification\n%%EOF\n"
 
@@ -297,6 +305,26 @@ async def main() -> None:
             permissions=("school.personnel.view",),
             scope_types=("self",),
         )
+        # KB-01C：上传+查看（全校范围），验证上传后轮询与抽屉详情。
+        await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=KB_ADMIN_LOGIN_ID,
+            password=KB_ADMIN_PASSWORD,
+            user_type="school_admin",
+            permissions=("school.kb.upload", "school.kb.view"),
+            scope_types=("school",),
+        )
+        # 默认教师形态：只有上传、没有查看（TD-278），验证真实 403 与「无查看权限」静态说明。
+        await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=KB_UPLOADER_LOGIN_ID,
+            password=KB_UPLOADER_PASSWORD,
+            user_type="teacher",
+            permissions=("school.kb.upload",),
+            scope_types=("self",),
+        )
         await seed_tenant_user(
             engine,
             school_code=school_code,
@@ -370,6 +398,18 @@ async def main() -> None:
                 "school_code": school_code,
                 "login_id": TEACHER_LOGIN_ID,
                 "password": TEACHER_PASSWORD,
+            },
+            {
+                "realm": "tenant",
+                "school_code": school_code,
+                "login_id": KB_ADMIN_LOGIN_ID,
+                "password": KB_ADMIN_PASSWORD,
+            },
+            {
+                "realm": "tenant",
+                "school_code": school_code,
+                "login_id": KB_UPLOADER_LOGIN_ID,
+                "password": KB_UPLOADER_PASSWORD,
             },
             {
                 "realm": "tenant",
@@ -450,6 +490,16 @@ async def main() -> None:
             "school_code": school_code,
             "login_id": DEVICES_LOGIN_ID,
             "password": DEVICES_PASSWORD,
+        },
+        "kb_admin": {
+            "school_code": school_code,
+            "login_id": KB_ADMIN_LOGIN_ID,
+            "password": KB_ADMIN_PASSWORD,
+        },
+        "kb_uploader": {
+            "school_code": school_code,
+            "login_id": KB_UPLOADER_LOGIN_ID,
+            "password": KB_UPLOADER_PASSWORD,
         },
         "role_admin": {
             "school_code": school_code,

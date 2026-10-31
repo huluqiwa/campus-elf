@@ -35,6 +35,8 @@ export interface E2EAccounts {
     password: string;
   };
   devices: { school_code: string; login_id: string; password: string };
+  kb_admin: { school_code: string; login_id: string; password: string };
+  kb_uploader: { school_code: string; login_id: string; password: string };
   role_admin: { school_code: string; login_id: string; password: string };
   role_target: { school_code: string; login_id: string; password: string };
   mfa_target: {
