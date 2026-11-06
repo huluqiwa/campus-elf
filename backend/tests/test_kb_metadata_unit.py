@@ -9,10 +9,13 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models.kb import KbDocumentVersion
 from app.kb.service import (
+    FileMetadata,
     KbError,
+    _integrity_constraint_name,
     _PreparedFile,
     _request_fingerprint,
     derive_scan_state,
@@ -83,12 +86,21 @@ def test_parse_metadata_rejects_invalid_payload(raw: str, reason: str) -> None:
     assert reason in caught.value.message
 
 
+def _meta(**kwargs: Any) -> FileMetadata:
+    return FileMetadata.model_validate(kwargs)
+
+
 def test_request_fingerprint_is_order_sensitive_and_stable() -> None:
     first = _prepared("a.pdf", 10, "0" * 64)
     second = _prepared("b.pdf", 20, "1" * 64)
-    assert _request_fingerprint([first, second]) == _request_fingerprint([first, second])
-    assert _request_fingerprint([first, second]) != _request_fingerprint([second, first])
-    assert len(_request_fingerprint([first])) == 64
+    empty = [FileMetadata(), FileMetadata()]
+    assert _request_fingerprint([first, second], empty) == _request_fingerprint(
+        [first, second], empty
+    )
+    assert _request_fingerprint([first, second], empty) != _request_fingerprint(
+        [second, first], empty
+    )
+    assert len(_request_fingerprint([first], [FileMetadata()])) == 64
 
 
 @pytest.mark.parametrize(
@@ -99,6 +111,8 @@ def test_request_fingerprint_is_order_sensitive_and_stable() -> None:
         (_version(status="PENDING_APPROVAL", scan_engine="clamav"), "passed"),
         (_version(status="PENDING_APPROVAL", scan_engine="dev-skip"), "skipped"),
         (_version(status="PENDING_APPROVAL", scan_engine="dev-degraded"), "skipped"),
+        (_version(status="APPROVED", scan_engine="clamav"), "passed"),
+        (_version(status="REJECTED", scan_engine="clamav"), "passed"),
         (_version(status="SCAN_FAILED", scan_signature="Eicar-Test-Signature"), "infected"),
         (_version(status="SCAN_FAILED"), "error"),
     ],
@@ -108,7 +122,7 @@ def test_derive_scan_state(version: KbDocumentVersion, expected: str) -> None:
 
 
 def test_fingerprint_uses_only_filename_size_and_hash() -> None:
-    """幂等指纹只看 `filename|size|sha256`，不含顺序号/扩展名等可变字段。"""
+    """幂等指纹只看 `filename|size|sha256` 与 metadata，不含顺序号/扩展名等可变字段。"""
 
     first = _prepared("a.pdf", 10, "0" * 64)
     same = _PreparedFile(
@@ -119,4 +133,49 @@ def test_fingerprint_uses_only_filename_size_and_hash() -> None:
         size_bytes=10,
         sha256="0" * 64,
     )
-    assert _request_fingerprint([first]) == _request_fingerprint([same])
+    assert _request_fingerprint([first], [FileMetadata()]) == _request_fingerprint(
+        [same], [FileMetadata()]
+    )
+
+
+def test_fingerprint_changes_when_metadata_changes() -> None:
+    """TD-277：同键同文件但元数据不同 → 指纹不同（不再静默吞改动）。"""
+
+    prepared = _prepared("a.pdf", 10, "0" * 64)
+    baseline = _request_fingerprint([prepared], [_meta(title="原标题", tags=["规章"])])
+    retitled = _request_fingerprint([prepared], [_meta(title="新标题", tags=["规章"])])
+    retagged = _request_fingerprint([prepared], [_meta(title="原标题", tags=["规章", "教学"])])
+    redesc = _request_fingerprint([prepared], [_meta(title="原标题", tags=["规章"], description="x")])
+    assert len({baseline, retitled, retagged, redesc}) == 4
+    assert baseline != _request_fingerprint([prepared], [FileMetadata()])
+
+
+def test_fingerprint_metadata_is_order_insensitive_for_tags_and_whitespace_stable() -> None:
+    """标签是集合语义（排序后入哈希）；标题/描述按 strip 后值比较。"""
+
+    prepared = _prepared("a.pdf", 10, "0" * 64)
+    left = _request_fingerprint([prepared], [_meta(title="标题", tags=["b", "a"])])
+    right = _request_fingerprint([prepared], [_meta(title="标题", tags=["a", "b"])])
+    assert left == right
+    stripped = _request_fingerprint([prepared], [_meta(title=" 标题 ", description=" 内容 ")])
+    plain = _request_fingerprint([prepared], [_meta(title="标题", description="内容")])
+    assert stripped == plain
+
+
+def test_integrity_constraint_name_reads_driver_attribute_chain() -> None:
+    """复审 Minor 1：约束名取自驱动原生异常（orig 或 orig.__cause__），不匹配文本。"""
+
+    class _FakeDriverError(Exception):
+        constraint_name = "uq_kb_build_jobs_tenant_version_active"
+
+    direct = IntegrityError("stmt", {}, _FakeDriverError("dup"))
+    assert _integrity_constraint_name(direct) == "uq_kb_build_jobs_tenant_version_active"
+
+    wrapped = IntegrityError("stmt", {}, Exception("adapter"))
+    adapter = wrapped.orig
+    assert adapter is not None
+    adapter.__cause__ = _FakeDriverError("dup")
+    assert _integrity_constraint_name(wrapped) == "uq_kb_build_jobs_tenant_version_active"
+
+    bare = IntegrityError("stmt", {}, Exception("no constraint info"))
+    assert _integrity_constraint_name(bare) is None

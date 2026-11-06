@@ -218,7 +218,7 @@ LLM-05-CampusCompanionElf/
 |---|---|---|
 | `kb_upload_batches` | id, tenant_id, idempotency_key, request_hash, file_count, total_bytes, created_by | 批量上传（KB-01A）；唯一 `(tenant_id, idempotency_key)`；`request_hash` 是同键同指纹判定依据，同键换文件/换人 409 |
 | `kb_documents` | id, tenant_id, title, tags, description, status, current_version_id, **upload_batch_id, upload_file_index**, created_by | 文档；`upload_file_index` 为批次内序号，唯一 `(tenant_id, upload_batch_id, upload_file_index)`；状态与当前版本一致 |
-| `kb_document_versions` | id, tenant_id, document_id, version_no, source_object_key, source_hash, mime, size, status, approval_request_id, **parent_version_id, derivation_type(initial/chunk_edit), acl_confirmed_by, acl_confirmed_at**, **source_filename, scan_attempts, scan_error_code, scan_signature, scan_engine, scanned_at**, created_by | 版本；status 同下；派生版本（K5）由 parent_version_id 追溯；KB-01A 落扫描结论（`scan_engine` ∈ `clamav`/`dev-skip`/`dev-degraded`） |
+| `kb_document_versions` | id, tenant_id, document_id, version_no, source_object_key, source_hash, mime, size, status, **parent_version_id, derivation_type(initial/chunk_edit), acl_confirmed_by, acl_confirmed_at**, **source_filename, scan_attempts, scan_error_code, scan_signature, scan_engine, scanned_at**, created_by | 版本；status 同下；派生版本（K5）由 parent_version_id 追溯；KB-01A 落扫描结论（`scan_engine` ∈ `clamav`/`dev-skip`/`dev-degraded`）。**KB-02 修订**：不建本表的 `approval_request_id` 反向指针——提交可撤销再提交，同一版本有多行审批历史，改由 `approval_requests.document_version_id` 正向 FK + 索引查询（按 created_at 取最近一单） |
 | `kb_build_jobs` | id, tenant_id, document_version_id, status, stage, progress, processed_units, total_units, tier, fallback_reason, retry_count, error_code, message, started_at, updated_at, finished_at | 构建任务；同版本仅一个活跃任务 |
 | `kb_build_events` | id, job_id, seq, event_type, payload_json, created_at | SSE 事件持久化，支持 Last-Event-ID/since |
 | `kb_chunks` | id, tenant_id, document_version_id, parent_id, chunk_type(parent/child), chunk_index, text, text_markdown, section_path, page_start, page_end, token_count, char_count, overlap_prev, overlap_next, chunk_hash, metadata_json, embedding_status, **is_human_edited, edited_by, edited_at** | 分块 |
@@ -255,7 +255,7 @@ LLM-05-CampusCompanionElf/
 | 表 | 关键字段 | 说明 |
 |---|---|---|
 | `approval_types` | id, code, name, schema_json, enabled | 类型注册 |
-| `approval_requests` | id, tenant_id, type, submitter_id, status, current_step, title, payload_json, result, reject_reason, created_at, completed_at | 审批单 |
+| `approval_requests` | id, tenant_id, type, submitter_id, status, current_step, title, payload_json, result, reject_reason, created_at, completed_at, **document_version_id（KB-02，可空，仅 KB_DOCUMENT 类型；部分唯一索引 `(tenant_id, document_version_id) WHERE status='PENDING'` 兜底「一版本一活跃单」）** | 审批单；版本历史按 `document_version_id` 正向查询，不建版本表反向指针 |
 | `approval_steps` | id, request_id, step_no, approver_role/approver_id, status, acted_at, comment | 步骤 |
 | `approval_actions` | id, request_id, step_id, actor_id, action, reason, created_at | 动作审计 |
 | `approval_attachments` | id, request_id, object_key, filename, mime, size, checksum | 附件 |
@@ -491,6 +491,17 @@ audit_logs: 仅追加，prev_hash/hash 链
 - 详情抽屉：打开即请求详情 + 第一页版本（`limit=20`，重新拉取，不用列表快照），版本「加载更多」按 `next_cursor` 追加；文档 404 提示「文档已不可见」一次、关闭抽屉并刷新当前页；切换文档后旧响应/旧 404 不写入新抽屉。
 - 全栈 E2E 已由 **KB-01C** 交付（真实后端 + 真实库，扫描用 E2E 栈的 dev-skip；PR #37 → 合并提交 `7d1ce56`，4 例）；真实 ClamAV 引擎覆盖延后 TD-284。
 
+**M3 KB-02 已实现（后端，2026-11-07）**：
+
+- `POST /school/kb/document-versions/{version_id}/submit-approval`（`school.kb.upload`，数据范围 fail-closed）——只有 `PENDING_APPROVAL` 可提交（409 `KB_NOT_SUBMITTABLE`，KB-01A 的 `assert_submittable`）；同版本已有 PENDING 单 409 `APPROVAL_ALREADY_PENDING`（显式判据 + 部分唯一索引 `uq_approval_requests_tenant_version_pending` 兜底，按约束名窄化）；开单时把版本快照（version_no/source_hash/filename/mime/size/scan_engine/文档标题标签描述）写进 `approval_requests.payload_json`；审计 `school.kb.approval.submitted`。
+- `POST /school/approvals/{id}/approve|reject`（`school.kb.approval`）——提交人与版本上传者自批恒 403（`sod.py::evaluate_self_approval` 判定内核，例外开关不接入，TD-286）；驳回理由必填（422）、理由落审批单与审计；通过/驳回在**同一事务**内把版本与文档状态迁到 `APPROVED`/`REJECTED`（锁序：审批单 → 版本 → 文档，与 scan_task 的 版本→文档 无环；行锁读带 `populate_existing`，防止身份映射缓存旧 PENDING 造成并发双赢家）。
+- `POST /school/approvals/{id}/cancel`（`school.kb.upload` 自助）——提交人撤销 PENDING 单（引擎强校验 submitter），版本保持 `PENDING_APPROVAL` 可再提交；非提交人 403。
+- `GET /school/approvals/todo|done|{id}`（`school.approval.todo`）——待办 = 全部 PENDING；已办 = 与本人有过动作往来的单；详情含步骤与动作留痕、版本快照。审批是租户级治理动作，按权限码鉴权、不按提交人数据范围裁剪（简报 D5，与 TD-237 同源；登记 TD-289）。
+- `POST /school/kb/document-versions/{version_id}/build`（`school.kb.build`）——构建门禁：只有 `APPROVED` 可创建，未审批 409 `KB_NOT_APPROVED` + 审计 + **零任务行**；APPROVED 创建 → `kb_build_jobs` 一行 `BUILD_QUEUED`；同版本最多一个活跃任务（部分唯一索引 `uq_kb_build_jobs_tenant_version_active` 兜底并发）；本点任务滞留 QUEUED，快照接口与取件执行器是 KB-03 首个交付项（TD-288）。
+- `PUT /school/kb/documents/{document_id}`（`school.kb.upload`，数据范围 fail-closed）——标题/标签/描述编辑，**免审**（版本状态不变）但审计 `school.kb.metadata.updated`（前后值；无变化不审计；描述显式 null = 清空）；strip 口径与上传侧 `FileMetadata` 一致。
+- 审计：`school.kb.approval.submitted/approved/rejected/cancelled/denied`、`school.kb.build.created/denied`、`school.kb.metadata.updated`；403/409 业务拒绝走**独立事务**写 denied 审计（404 探测不审计，不泄露存在性）。
+- 幂等指纹（TD-277 收口）：`_request_fingerprint` 并入 metadata 规范串（标题/描述 strip、标签排序）——同键同文件不同元数据 409 `IDEMPOTENCY_KEY_REUSED`，同元数据重放原批次。
+
 ### 5.6 构建进度 SSE
 
 事件：
@@ -635,6 +646,7 @@ GET  /api/v1/platform/tenants/{id}/review-records
 | GET | `/school/approvals/{id}` | 详情（含附件） |
 | POST | `/school/approvals/{id}/approve` | 通过 |
 | POST | `/school/approvals/{id}/reject` | 驳回（理由必填） |
+| POST | `/school/approvals/{id}/cancel` | 提交人撤销自己的 PENDING 单（KB-02；`school.kb.upload` 自助路径，引擎强校验 submitter） |
 | POST | `/campus/leaves` | 学生提交请假 |
 | GET | `/campus/leaves` | 我的请假 |
 | POST | `/campus/leaves/{id}/withdraw` | 撤回 |

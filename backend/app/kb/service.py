@@ -1,13 +1,19 @@
-"""知识库文档上传与查询服务（M3 KB-01A）。
+"""知识库文档上传与查询服务（M3 KB-01A）+ 审批与构建门禁（M3 KB-02）。
 
-口径（`docs/design-briefs/M3-KB-01-upload.md` D3/D4/D5，已确认）：
+口径（`docs/design-briefs/M3-KB-01-upload.md` D3/D4/D5 与 `docs/design-briefs/M3-KB-02.md`
+D1–D6，均已确认）：
 - **整批原子**：先逐个校验（只保留元数据，峰值内存 ≈ 单文件 50MB），任一失败整批 422；
 - **幂等键必填**：`(tenant_id, idempotency_key)` 唯一；同键同指纹同创建人 → 重放原批次，
-  否则 409 `IDEMPOTENCY_KEY_REUSED`；
+  否则 409 `IDEMPOTENCY_KEY_REUSED`（KB-02/TD-277 起指纹包含 metadata 规范串）；
 - **对象先写、数据库后写**：DB 事务失败时逐个删除已写对象，避免留下无主对象；
 - 上传要求权限即可，不按数据范围收窄；列表/详情/版本列表走 `principal.scope_context`，
   归属列 `created_by`，跨范围/跨租一律 404（fail-closed）；
-- 扫描通过前版本保持 `UPLOADED`，接口派生 `scan.state`（pending/error/passed/infected/skipped）。
+- 扫描通过前版本保持 `UPLOADED`，接口派生 `scan.state`（pending/error/passed/infected/skipped）；
+- **审批门禁（KB-02）**：只有 `PENDING_APPROVAL` 可提交审批；审批人 = 提交人与上传者之外
+  持 `school.kb.approval` 的用户（自批恒 403，不接例外开关）；通过/驳回在**同一事务**内
+  双写版本与文档状态；未审批创建构建 409 + 审计（`kb_build_jobs` 零行）；
+- 提交审批/构建/元数据编辑的 403/409 业务拒绝在**独立事务**写 denied 审计
+  （404 探测不审计，不泄露存在性）。
 """
 
 import contextlib
@@ -26,16 +32,32 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.approval.service import (
+    ApprovalError,
+    ApprovalRequestView,
+    cancel_request,
+    decide_request,
+    submit_request,
+)
 from app.audit.writer import append_audit
 from app.config import Settings, get_settings
 from app.core.metrics import record_audit_write_failure
-from app.db.models.kb import KbDocument, KbDocumentVersion, KbUploadBatch
+from app.db.models.approval import APPROVAL_TYPE_KB_DOCUMENT, ApprovalRequest, ApprovalType
+from app.db.models.kb import KbBuildJob, KbDocument, KbDocumentVersion, KbUploadBatch
 from app.db.repository import CursorError, ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
 from app.kb.status import (
+    KB_STATUS_APPROVED,
     KB_STATUS_PENDING_APPROVAL,
+    KB_STATUS_REJECTED,
     KB_STATUS_SCAN_FAILED,
     KB_STATUS_UPLOADED,
+    InvalidStatusTransition,
+    NotBuildableError,
+    NotSubmittableError,
+    assert_build_allowed,
+    assert_submittable,
+    assert_transition,
 )
 from app.kb.validation import (
     MAX_BATCH_BYTES,
@@ -183,11 +205,14 @@ def derive_scan_state(version: KbDocumentVersion) -> str:
 
     - `UPLOADED` 且无错误码 → pending（排队/扫描中）；有错误码 → error（瞬时故障等待重试）；
     - `PENDING_APPROVAL` + 开发旁路引擎 → skipped；否则 passed；
+    - `APPROVED` / `REJECTED`（KB-02）→ passed（能进入审批必然已通过扫描）；
     - `SCAN_FAILED` + 签名 → infected；否则 error（完整性失败）。
     """
 
     if version.status == KB_STATUS_PENDING_APPROVAL:
         return "skipped" if version.scan_engine in {"dev-skip", "dev-degraded"} else "passed"
+    if version.status in (KB_STATUS_APPROVED, KB_STATUS_REJECTED):
+        return "passed"
     if version.status == KB_STATUS_SCAN_FAILED:
         return "infected" if version.scan_signature else "error"
     return "error" if version.scan_error_code else "pending"
@@ -340,7 +365,7 @@ async def upload_documents(
             file_count=len(files),
         )
 
-    fingerprint = _request_fingerprint(prepared)
+    fingerprint = _request_fingerprint(prepared, metadatas)
     existing = await _find_batch_by_key(tenant_id, idempotency_key)
     if existing is not None:
         return await _replay_or_conflict(
@@ -616,10 +641,27 @@ def _version_view(version: KbDocumentVersion) -> VersionView:
     )
 
 
-def _request_fingerprint(prepared: Sequence[_PreparedFile]) -> str:
-    """按顺序把 `filename|size|sha256` 规范化后取 SHA-256（幂等键复用判据）。"""
+def _request_fingerprint(
+    prepared: Sequence[_PreparedFile], metadatas: Sequence[FileMetadata]
+) -> str:
+    """幂等键复用判据（TD-277）：文件 `filename|size|sha256` + **metadata 规范串**一起入哈希。
 
-    lines = [f"{item.filename}|{item.size_bytes}|{item.sha256}" for item in prepared]
+    metadata 规范化：标题/描述取 strip 后值（缺省空串）、标签排序（集合语义，顺序不敏感）。
+    否则「同键同文件、只改标题/标签」会被静默当成重放，元数据改动被吞。
+    """
+
+    lines = []
+    for item, metadata in zip(prepared, metadatas, strict=True):
+        meta_canonical = json.dumps(
+            [
+                (metadata.title or "").strip(),
+                sorted(metadata.tags),
+                (metadata.description or "").strip(),
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        lines.append(f"{item.filename}|{item.size_bytes}|{item.sha256}|{meta_canonical}")
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
@@ -963,3 +1005,626 @@ async def _deny(
         file_count=file_count,
     )
     raise error
+
+
+# ---------------------------------------------------------------------------
+# KB-02：审批门禁与构建门禁（docs/design-briefs/M3-KB-02.md，已确认 D1–D6）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ApprovalOutcome:
+    """提交/决定审批后的结果（请求视图 + 文档视图）。"""
+
+    request: ApprovalRequestView
+    document: DocumentView
+
+
+@dataclass(frozen=True)
+class BuildView:
+    """构建任务读取视图（本点只到 BUILD_QUEUED；进度字段随 KB-03）。"""
+
+    id: UUID
+    version_id: UUID
+    status: str
+    attempt: int
+    created_at: datetime
+
+
+_APPROVAL_BYPASS = ScopeBypass(
+    reason="审批是租户级治理动作（简报 D5）：按权限码鉴权，不按提交人数据范围裁剪"
+)
+_BUILD_BYPASS = ScopeBypass(
+    reason="构建任务是租户级治理对象：按 school.kb.build 鉴权，不按提交人数据范围裁剪"
+)
+
+
+def _approval_request_repository(
+    session: AsyncSession, tenant_id: UUID
+) -> TenantScopedRepository[ApprovalRequest]:
+    return TenantScopedRepository(
+        session, ApprovalRequest, tenant_id, scope=_APPROVAL_BYPASS
+    )
+
+
+def _build_job_repository(
+    session: AsyncSession, tenant_id: UUID
+) -> TenantScopedRepository[KbBuildJob]:
+    return TenantScopedRepository(session, KbBuildJob, tenant_id, scope=_BUILD_BYPASS)
+
+
+def _as_kb_error(exc: ApprovalError) -> KbError:
+    return KbError(exc.code, exc.message, exc.http_status, extra=exc.extra)
+
+
+def _integrity_constraint_name(exc: IntegrityError) -> str | None:
+    """从 IntegrityError 里取约束名；取不到返回 None（= 按「不是该约束」处理，宁可 500）。
+
+    名字在 `exc.orig.__cause__` 上：SQLAlchemy 的 asyncpg 适配异常只搬运 `sqlstate`/`detail`，
+    `constraint_name` 留在驱动的原生异常里。不做错误文本子串匹配——那会把名字恰好出现在
+    SQL 文本里的其它失败一并误判（先例与理由见 `app/rbac/admin.py::_integrity_constraint_name`）。
+    """
+
+    orig: Any = exc.orig
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        name: Any = getattr(candidate, "constraint_name", None)
+        if name is not None:
+            return str(name)
+    return None
+
+
+def _version_snapshot(document: KbDocument, version: KbDocumentVersion) -> dict[str, Any]:
+    """提交审批时的版本快照（进 `approval_requests.payload_json`，审批记录可追溯）。"""
+
+
+    return {
+        "document_id": str(document.id),
+        "document_title": document.title,
+        "tags": [str(tag) for tag in (document.tags or [])],
+        "description": document.description,
+        "version_id": str(version.id),
+        "version_no": version.version_no,
+        "source_filename": version.source_filename,
+        "source_hash": version.source_hash,
+        "mime": version.mime,
+        "size_bytes": version.size_bytes,
+        "scan_engine": version.scan_engine,
+        "scanned_at": version.scanned_at.isoformat() if version.scanned_at else None,
+        "created_by": str(version.created_by),
+    }
+
+
+async def _action_denied(
+    *,
+    action: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    request_id: str | None,
+    code: str,
+    context: dict[str, Any],
+) -> None:
+    """独立事务写业务拒绝审计（403/409；404 探测不审计，不泄露存在性）。"""
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            await append_audit(
+                session,
+                action=action,
+                resource_type="kb_document_version",
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="denied",
+                metadata={"code": code, **context},
+                request_id=request_id,
+            )
+    except Exception as exc:
+        record_audit_write_failure(action)
+        logger.warning(
+            "知识库拒绝审计写入失败（%s）：%s.%s", action, type(exc).__module__, type(exc).__name__
+        )
+
+
+async def submit_version_approval(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> ApprovalOutcome:
+    """把 `PENDING_APPROVAL` 版本提交审批（开审批单 + submit 留痕 + 审计）。
+
+    异常:
+        KbError: VERSION_NOT_FOUND/DOCUMENT_NOT_FOUND（404，不审计）；
+            KB_NOT_SUBMITTABLE / APPROVAL_ALREADY_PENDING（409，独立事务审计）。
+    """
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            version_repository: TenantScopedRepository[KbDocumentVersion] = (
+                TenantScopedRepository(
+                    session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+                )
+            )
+            version = await version_repository.get(version_id)
+            if version is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            try:
+                assert_submittable(version.status)
+            except NotSubmittableError as exc:
+                raise KbError("KB_NOT_SUBMITTABLE", str(exc), 409) from exc
+            document_repository: TenantScopedRepository[KbDocument] = TenantScopedRepository(
+                session, KbDocument, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            document = await document_repository.get(version.document_id)
+            if document is None:
+                raise KbError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
+
+            request_repository = _approval_request_repository(session, tenant_id)
+            pending = (
+                await session.execute(
+                    request_repository.base_query().where(
+                        ApprovalRequest.document_version_id == version.id,
+                        ApprovalRequest.status == "PENDING",
+                    )
+                )
+            ).scalar_one_or_none()
+            if pending is not None:
+                raise KbError(
+                    "APPROVAL_ALREADY_PENDING", "该版本已有待审批的申请", 409
+                )
+
+            try:
+                request_view = await submit_request(
+                    session,
+                    tenant_id=tenant_id,
+                    # 列宽 200：前缀 8 字 + 文档标题（≤200）会溢出，按 200 截断
+                    # （完整标题在 payload 快照的 document_title 里，不丢信息）。
+                    title=f"知识库文档审批：{document.title}"[:200],
+                    submitter_id=user_id,
+                    payload=_version_snapshot(document, version),
+                    document_version_id=version.id,
+                )
+            except IntegrityError as exc:
+                # 并发同版本二次提交：部分唯一索引兜底。其余完整性错误按库层故障原样上抛，
+                # 不把 FK 违约等伪装成业务冲突（口径同 M2-UI2 的 ROLE_CODE_TAKEN 判据）。
+                if _integrity_constraint_name(
+                    exc
+                ) != "uq_approval_requests_tenant_version_pending":
+                    raise
+                raise KbError(
+                    "APPROVAL_ALREADY_PENDING", "该版本已有待审批的申请", 409
+                ) from exc
+
+            await append_audit(
+                session,
+                action="school.kb.approval.submitted",
+                resource_type="kb_document_version",
+                resource_id=str(version.id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={
+                    "approval_request_id": str(request_view.id),
+                    "version_no": version.version_no,
+                    "document_id": str(document.id),
+                    "source_filename": version.source_filename,
+                },
+                request_id=request_id,
+            )
+            return ApprovalOutcome(
+                request=request_view, document=_document_view(document, version)
+            )
+    except ApprovalError as exc:
+        # 同上：兄弟 handler 不接力，APPROVAL_TYPE_DISABLED（409）的拒绝审计在这里做。
+        error = _as_kb_error(exc)
+        if error.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.approval.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=error.code,
+                context={"version_id": str(version_id)},
+            )
+        raise error from exc
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.approval.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"version_id": str(version_id)},
+            )
+        raise
+
+
+async def decide_version_approval(
+    *,
+    tenant_id: UUID,
+    approval_request_id: UUID,
+    actor_id: UUID,
+    action: str,
+    reason: str | None,
+    request_id: str | None = None,
+) -> ApprovalOutcome:
+    """通过/驳回一个 KB_DOCUMENT 审批单（同一事务内迁移版本与文档状态）。
+
+    自批禁令：审批人 = 提交人或版本上传者 → 403（`sod.py` 判定内核，无例外通道）。
+    """
+
+    target = KB_STATUS_APPROVED if action == "approve" else KB_STATUS_REJECTED
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            request_repository = _approval_request_repository(session, tenant_id)
+            approval = await request_repository.get(approval_request_id)
+            if approval is None:
+                raise KbError("APPROVAL_NOT_FOUND", "审批单不存在", 404)
+
+            type_repository: TenantScopedRepository[ApprovalType] = TenantScopedRepository(
+                session, ApprovalType, tenant_id, scope=_APPROVAL_BYPASS
+            )
+            approval_type = await type_repository.get(approval.type_id)
+            if approval_type is None or approval_type.code != APPROVAL_TYPE_KB_DOCUMENT:
+                raise KbError(
+                    "APPROVAL_TYPE_NOT_SUPPORTED", "该审批单类型不是知识库文档审批", 409
+                )
+
+            version_repository: TenantScopedRepository[KbDocumentVersion] = (
+                TenantScopedRepository(
+                    session,
+                    KbDocumentVersion,
+                    tenant_id,
+                    scope=_APPROVAL_BYPASS,
+                    owner_attr="created_by",
+                )
+            )
+            if approval.document_version_id is None:
+                raise KbError(
+                    "APPROVAL_TYPE_NOT_SUPPORTED", "该审批单未绑定文档版本", 409
+                )
+            version = await version_repository.get(approval.document_version_id)
+            if version is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            # 状态机先行判据：版本必须仍处于 PENDING_APPROVAL 且目标迁移合法。
+            assert_transition(version.status, target)
+
+            request_view = await decide_request(
+                session,
+                tenant_id=tenant_id,
+                request_id=approval_request_id,
+                actor_id=actor_id,
+                action=action,
+                reason=reason,
+                forbidden_actor_ids=(approval.submitter_id, version.created_by),
+            )
+
+            # 锁序：审批单（engine 内）→ 版本 → 文档；与 scan_task 的 版本→文档 无环。
+            # 行锁下重校验：version 在前面已被普通读过（身份映射缓存 PENDING），
+            # 锁读必须 populate_existing 才能拿到锁等待结束后的最新行（见引擎 _locked_request 注释）。
+            locked_stmt = (
+                version_repository.base_query()
+                .where(KbDocumentVersion.id == version.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            locked_version = cast(
+                KbDocumentVersion | None,
+                (await session.execute(locked_stmt)).scalar_one_or_none(),
+            )
+            if locked_version is None or locked_version.status != KB_STATUS_PENDING_APPROVAL:
+                raise KbError("KB_INVALID_TRANSITION", "文档版本状态已变化，审批未生效", 409)
+            locked_version.status = target
+            document_repository: TenantScopedRepository[KbDocument] = TenantScopedRepository(
+                session,
+                KbDocument,
+                tenant_id,
+                scope=ScopeBypass(
+                    reason="审批决定的同事务状态双写：授权已由权限码与自批判据完成"
+                ),
+            )
+            locked_document = await document_repository.get(
+                version.document_id, with_for_update=True
+            )
+            if locked_document is None:
+                raise KbError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
+            locked_document.status = target
+
+            await append_audit(
+                session,
+                action="school.kb.approval.approved"
+                if action == "approve"
+                else "school.kb.approval.rejected",
+                resource_type="kb_document_version",
+                resource_id=str(version.id),
+                actor_realm="tenant",
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={
+                    "approval_request_id": str(approval_request_id),
+                    "version_no": version.version_no,
+                    "from_status": KB_STATUS_PENDING_APPROVAL,
+                    "to_status": target,
+                    "reason": (reason or "").strip() or None,
+                },
+                request_id=request_id,
+            )
+            # flush 会 expire onupdate 列（updated_at）：惰性刷新在 greenlet 外会炸
+            # （MissingGreenlet）。按 KB-01A 的 `_load_documents_by_batch` 范式重查建视图。
+            fresh_document = await document_repository.get(version.document_id)
+            fresh_version = await version_repository.get(version.id)
+            if fresh_document is None or fresh_version is None:
+                raise KbError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
+            return ApprovalOutcome(
+                request=request_view,
+                document=_document_view(fresh_document, fresh_version),
+            )
+    except ApprovalError as exc:
+        # 注意：本分支 re-raise 的 KbError 不会再被下方 except KbError 捕获
+        # （Python 语义：同一 try 内兄弟 handler 不接力），拒绝审计必须在这里做。
+        error = _as_kb_error(exc)
+        if error.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.approval.denied",
+                tenant_id=tenant_id,
+                user_id=actor_id,
+                request_id=request_id,
+                code=error.code,
+                context={"approval_request_id": str(approval_request_id)},
+            )
+        raise error from exc
+    except InvalidStatusTransition as exc:
+        raise KbError("KB_INVALID_TRANSITION", str(exc), 409) from exc
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.approval.denied",
+                tenant_id=tenant_id,
+                user_id=actor_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"approval_request_id": str(approval_request_id)},
+            )
+        raise
+
+
+async def cancel_version_approval(
+    *,
+    tenant_id: UUID,
+    approval_request_id: UUID,
+    actor_id: UUID,
+    request_id: str | None = None,
+) -> ApprovalRequestView:
+    """提交人撤销自己的 PENDING 审批单（版本保持 PENDING_APPROVAL，可再次提交）。"""
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            request_view = await cancel_request(
+                session,
+                tenant_id=tenant_id,
+                request_id=approval_request_id,
+                actor_id=actor_id,
+            )
+            version_id = request_view.document_version_id
+            await append_audit(
+                session,
+                action="school.kb.approval.cancelled",
+                resource_type="kb_document_version",
+                resource_id=str(version_id) if version_id else None,
+                actor_realm="tenant",
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={"approval_request_id": str(approval_request_id)},
+                request_id=request_id,
+            )
+            return request_view
+    except ApprovalError as exc:
+        error = _as_kb_error(exc)
+        if error.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.approval.denied",
+                tenant_id=tenant_id,
+                user_id=actor_id,
+                request_id=request_id,
+                code=error.code,
+                context={"approval_request_id": str(approval_request_id)},
+            )
+        raise error from exc
+
+
+async def create_build(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> BuildView:
+    """创建构建任务（门禁：只有 APPROVED；同版本最多一个活跃任务）。
+
+    本点只落 `BUILD_QUEUED` 行 + 审计；执行器/进度/重试随 KB-03
+    （TD-288：快照接口与取件执行器是 KB-03 首个交付项）。
+    """
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            version_repository: TenantScopedRepository[KbDocumentVersion] = (
+                TenantScopedRepository(
+                    session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+                )
+            )
+            version = await version_repository.get(version_id)
+            if version is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            try:
+                assert_build_allowed(version.status)
+            except NotBuildableError as exc:
+                raise KbError("KB_NOT_APPROVED", str(exc), 409) from exc
+
+            job_repository = _build_job_repository(session, tenant_id)
+            active = (
+                await session.execute(
+                    job_repository.base_query().where(
+                        KbBuildJob.version_id == version.id,
+                        KbBuildJob.status == "BUILD_QUEUED",
+                    )
+                )
+            ).scalar_one_or_none()
+            if active is not None:
+                raise KbError(
+                    "BUILD_ALREADY_ACTIVE",
+                    "该版本已有进行中的构建任务",
+                    409,
+                    extra={"job_id": str(active.id)},
+                )
+            try:
+                job = KbBuildJob(
+                    tenant_id=tenant_id,
+                    version_id=version.id,
+                    status="BUILD_QUEUED",
+                    attempt=1,
+                    created_by=user_id,
+                )
+                await job_repository.add(job)
+                await session.flush()
+            except IntegrityError as exc:
+                # 并发创建：部分唯一索引 (tenant_id, version_id) WHERE active 兜底。
+                # 其余完整性错误（如并发删除版本导致 FK 违约）原样上抛，不伪装成业务冲突。
+                if _integrity_constraint_name(exc) != "uq_kb_build_jobs_tenant_version_active":
+                    raise
+                raise KbError("BUILD_ALREADY_ACTIVE", "该版本已有进行中的构建任务", 409) from exc
+
+            await append_audit(
+                session,
+                action="school.kb.build.created",
+                resource_type="kb_document_version",
+                resource_id=str(version.id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={"job_id": str(job.id), "version_no": version.version_no},
+                request_id=request_id,
+            )
+            return BuildView(
+                id=job.id,
+                version_id=job.version_id,
+                status=job.status,
+                attempt=job.attempt,
+                created_at=job.created_at,
+            )
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.build.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"version_id": str(version_id)},
+            )
+        raise
+
+
+async def update_document_metadata(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    document_id: UUID,
+    user_id: UUID,
+    title: str | None = None,
+    tags: list[str] | None = None,
+    description: str | None = None,
+    description_provided: bool = False,
+    request_id: str | None = None,
+) -> DocumentView:
+    """更新文档标题/标签/描述（免审但审计：KB-02 验收「不重审，审计前后值」）。
+
+    字段缺省 = 不更新；`description_provided=True` 时以 `description` 为准（None = 清空）。
+    版本状态不因元数据变更而重审。
+    """
+
+    _validate_metadata_fields(title=title, tags=tags, description=description)
+
+    async with db_session(tenant_id=tenant_id) as session:
+        document_repository: TenantScopedRepository[KbDocument] = TenantScopedRepository(
+            session, KbDocument, tenant_id, scope=scope, owner_attr="created_by"
+        )
+        document = await document_repository.get(document_id)
+        if document is None:
+            raise KbError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
+
+        before: dict[str, Any] = {}
+        after: dict[str, Any] = {}
+        # 存储/比较一律用 strip 后值（复审 Minor 2）：API 层已 strip，这里对齐
+        # 服务层直调口径——校验用 strip 值、落库也用 strip 值，两条通道同形。
+        cleaned_title = title.strip() if title is not None else None
+        cleaned_tags = [tag.strip() for tag in tags] if tags is not None else None
+        cleaned_description = description.strip() if description is not None else None
+        if cleaned_title is not None and cleaned_title != document.title:
+            before["title"] = document.title
+            after["title"] = cleaned_title
+            document.title = cleaned_title
+        if cleaned_tags is not None and cleaned_tags != [
+            str(tag) for tag in (document.tags or [])
+        ]:
+            before["tags"] = [str(tag) for tag in (document.tags or [])]
+            after["tags"] = cleaned_tags
+            document.tags = cleaned_tags
+        if description_provided and cleaned_description != document.description:
+            before["description"] = document.description
+            after["description"] = cleaned_description
+            document.description = cleaned_description
+
+        if after:
+            await append_audit(
+                session,
+                action="school.kb.metadata.updated",
+                resource_type="kb_document",
+                resource_id=str(document.id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={"document_id": str(document.id), "before": before, "after": after},
+                request_id=request_id,
+            )
+            await session.flush()
+            # flush 会 expire onupdate 列：按 KB-01A 范式重查建视图（避免 greenlet 外刷新）。
+            document = await document_repository.get(document_id)
+            if document is None:
+                raise KbError("DOCUMENT_NOT_FOUND", "文档不存在", 404)
+
+        versions = await _versions_by_id(
+            session, tenant_id, scope, [document.current_version_id]
+        )
+        return _document_view(document, _version_of(versions, document))
+
+
+def _validate_metadata_fields(
+    *,
+    title: str | None,
+    tags: list[str] | None,
+    description: str | None,
+) -> None:
+    """元数据字段校验（与 `FileMetadata` 同界：标题 ≤200、标签 ≤10×32、描述 ≤1000）。"""
+
+    if title is not None:
+        cleaned = title.strip()
+        if not cleaned or len(cleaned) > 200:
+            raise KbError("METADATA_INVALID", "标题长度必须为 1–200 字", 422)
+    if tags is not None:
+        if len(tags) > 10:
+            raise KbError("METADATA_INVALID", "标签最多 10 个", 422)
+        for tag in tags:
+            cleaned = tag.strip()
+            if not cleaned or len(cleaned) > 32:
+                raise KbError("METADATA_INVALID", "每个标签长度必须为 1–32 字", 422)
+    if description is not None and len(description) > 1000:
+        raise KbError("METADATA_INVALID", "描述长度不能超过 1000 字", 422)

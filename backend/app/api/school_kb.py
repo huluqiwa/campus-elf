@@ -1,13 +1,19 @@
-"""校方侧知识库接口（M3 KB-01A，`docs/design-briefs/M3-KB-01-upload.md`）。
+"""校方侧知识库接口（M3 KB-01A 上传/查询 + M3 KB-02 审批/构建/元数据）。
 
 - `POST /school/kb/documents`：multipart 批量上传（≤15 个、单文件 ≤50MB、合计 ≤300MB），
   必填 `Idempotency-Key`；整批原子，任一文件不合格整批 422；201 返回批次与文档（含派生扫描状态）；
 - `GET /school/kb/documents`：按数据范围列出文档（`school` 全校 / `self` 只看自己上传的）；
 - `GET /school/kb/documents/{document_id}`：文档详情；
-- `GET /school/kb/documents/{document_id}/versions`：版本列表（分页）。
+- `GET /school/kb/documents/{document_id}/versions`：版本列表（分页）；
+- `POST /school/kb/document-versions/{version_id}/submit-approval`：提交审批
+  （`PENDING_APPROVAL` 才可提交；409 `KB_NOT_SUBMITTABLE`/`APPROVAL_ALREADY_PENDING`）；
+- `POST /school/kb/document-versions/{version_id}/build`：创建构建任务（只有 `APPROVED`；
+  未审批 409 `KB_NOT_APPROVED` + 审计；本点只落 `BUILD_QUEUED`，进度随 KB-03）；
+- `PUT /school/kb/documents/{document_id}`：标题/标签/描述编辑（免审但审计前后值）。
 
-权限：上传 `school.kb.upload`；查询 `school.kb.view`。上传失败/幂等冲突写
-`school.kb.upload.denied`（服务层独立事务）。本点不提供审批/构建接口。
+权限：上传/提交/元数据 `school.kb.upload`；查询 `school.kb.view`；构建 `school.kb.build`。
+拒绝审计：提交/构建的 403/409 写 `school.kb.approval.denied` / `school.kb.build.denied`
+（服务层独立事务；404 探测不审计）。
 """
 
 from collections.abc import Awaitable, Callable
@@ -16,18 +22,22 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.api.pagination import PageResponse
 from app.auth.principal import Principal, require_permission
 from app.kb.service import (
+    ApprovalOutcome,
     DocumentView,
     IncomingFile,
     KbError,
     VersionView,
+    create_build,
     get_document,
     list_documents,
     list_versions,
+    submit_version_approval,
+    update_document_metadata,
     upload_documents,
 )
 from app.kb.validation import MAX_FILE_BYTES
@@ -36,6 +46,7 @@ router = APIRouter(prefix="/school/kb", tags=["school-kb"])
 
 UploaderDep = require_permission("school.kb.upload", realm="tenant")
 ViewerDep = require_permission("school.kb.view", realm="tenant")
+BuilderDep = require_permission("school.kb.build", realm="tenant")
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -256,3 +267,144 @@ async def list_kb_document_versions(
         items=[_version_response(version) for version in page.items],
         next_cursor=page.next_cursor,
     )
+
+
+# ---------------------------------------------------------------------------
+# KB-02：审批提交 / 构建门禁 / 元数据编辑
+# ---------------------------------------------------------------------------
+
+
+class KbApprovalSubmitResponse(BaseModel):
+    """提交审批结果（审批单关键字段；完整审批记录见 `/school/approvals/{id}`）。
+
+    `document_version_id` 在 KB 提交路径恒非空（引擎层可空列是为非 KB 类型预留的）。
+    """
+
+    request_id: UUID
+    document_version_id: UUID | None
+    title: str
+    status: str
+    submitter_id: UUID
+    created_at: datetime
+
+
+class KbBuildJobResponse(BaseModel):
+    """构建任务创建结果（本点只到 BUILD_QUEUED；进度接口随 KB-03）。"""
+
+    job_id: UUID
+    version_id: UUID
+    status: str
+    attempt: int
+    created_at: datetime
+
+
+_TitleStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+_TagStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32)]
+# strip 与上传侧 `FileMetadata`（str_strip_whitespace=True）同口径：纯空白描述视为空串语义。
+_DescriptionStr = Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)]
+
+
+class KbDocumentMetadataUpdate(BaseModel):
+    """文档元数据编辑（字段缺省 = 不更新；`description` 显式 null = 清空）。"""
+
+    title: _TitleStr | None = None
+    tags: Annotated[list[_TagStr], Field(max_length=10)] | None = None
+    description: _DescriptionStr | None = None
+
+
+def _approval_response(outcome: ApprovalOutcome) -> KbApprovalSubmitResponse:
+    request = outcome.request
+    return KbApprovalSubmitResponse(
+        request_id=request.id,
+        document_version_id=request.document_version_id,
+        title=request.title,
+        status=request.status,
+        submitter_id=request.submitter_id,
+        created_at=request.created_at,
+    )
+
+
+@router.post(
+    "/document-versions/{version_id}/submit-approval",
+    status_code=201,
+    response_model=KbApprovalSubmitResponse,
+)
+async def submit_kb_document_version_approval(
+    version_id: UUID,
+    submitter: Annotated[Principal, UploaderDep],
+    request: Request,
+) -> KbApprovalSubmitResponse:
+    """提交文档版本审批（只有 `PENDING_APPROVAL` 可提交；提交人不能自批由审批侧裁决）。"""
+
+    tenant_id = _tenant_or_403(submitter)
+    try:
+        outcome = await submit_version_approval(
+            tenant_id=tenant_id,
+            scope=submitter.scope_context,
+            version_id=version_id,
+            user_id=submitter.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _approval_response(outcome)
+
+
+@router.post(
+    "/document-versions/{version_id}/build",
+    status_code=201,
+    response_model=KbBuildJobResponse,
+)
+async def create_kb_document_version_build(
+    version_id: UUID,
+    builder: Annotated[Principal, BuilderDep],
+    request: Request,
+) -> KbBuildJobResponse:
+    """创建构建任务（只有 `APPROVED`；未审批 409 并审计，不产生任务行）。"""
+
+    tenant_id = _tenant_or_403(builder)
+    try:
+        job = await create_build(
+            tenant_id=tenant_id,
+            scope=builder.scope_context,
+            version_id=version_id,
+            user_id=builder.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbBuildJobResponse(
+        job_id=job.id,
+        version_id=job.version_id,
+        status=job.status,
+        attempt=job.attempt,
+        created_at=job.created_at,
+    )
+
+
+@router.put("/documents/{document_id}", response_model=KbDocumentResponse)
+async def update_kb_document_metadata(
+    document_id: UUID,
+    payload: KbDocumentMetadataUpdate,
+    editor: Annotated[Principal, UploaderDep],
+    request: Request,
+) -> KbDocumentResponse:
+    """编辑文档标题/标签/描述（免审但审计前后值；版本状态不变）。"""
+
+    tenant_id = _tenant_or_403(editor)
+    provided = payload.model_fields_set
+    try:
+        document = await update_document_metadata(
+            tenant_id=tenant_id,
+            scope=editor.scope_context,
+            document_id=document_id,
+            user_id=editor.user_id,
+            title=payload.title if "title" in provided else None,
+            tags=payload.tags if "tags" in provided else None,
+            description=payload.description if "description" in provided else None,
+            description_provided="description" in provided,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _document_response(document)

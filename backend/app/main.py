@@ -21,6 +21,7 @@ from app.api.metrics import router as metrics_router
 from app.api.platform_audit import router as platform_audit_router
 from app.api.platform_rbac import router as platform_rbac_router
 from app.api.platform_tenants import router as platform_tenants_router
+from app.api.school_approvals import router as school_approvals_router
 from app.api.school_imports import router as school_imports_router
 from app.api.school_kb import router as school_kb_router
 from app.api.school_org import router as school_org_router
@@ -133,6 +134,7 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
     application.include_router(school_org_router, prefix=settings.api_prefix)
     application.include_router(school_imports_router, prefix=settings.api_prefix)
     application.include_router(school_kb_router, prefix=settings.api_prefix)
+    application.include_router(school_approvals_router, prefix=settings.api_prefix)
     application.include_router(school_rbac_router, prefix=settings.api_prefix)
     application.include_router(platform_rbac_router, prefix=settings.api_prefix)
     return application

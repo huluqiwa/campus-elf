@@ -31,8 +31,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
-# 本点允许的状态；后续 KB-02/03 扩展时随迁移同步放宽 CHECK。
-KB_STATUSES = ("UPLOADED", "PENDING_APPROVAL", "SCAN_FAILED")
+# KB-02 起版本/文档状态机扩展到审批结论（APPROVED/REJECTED）；
+# 构建后续状态（BUILDING/READY/…）随 KB-03 迁移放宽。
+KB_STATUSES = ("UPLOADED", "PENDING_APPROVAL", "SCAN_FAILED", "APPROVED", "REJECTED")
 _STATUS_SQL = ", ".join(f"'{status}'" for status in KB_STATUSES)
 
 
@@ -166,4 +167,57 @@ class KbDocumentVersion(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, 
     # `clamav`（真实扫描）/ `dev-skip`（开发跳过）/ `dev-degraded`（开发放行）
     scan_engine: Mapped[str | None] = mapped_column(String(32))
     scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+
+
+BUILD_JOB_STATUSES = ("BUILD_QUEUED",)
+_BUILD_JOB_STATUS_SQL = ", ".join(f"'{status}'" for status in BUILD_JOB_STATUSES)
+
+
+class KbBuildJob(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """构建任务（M3 KB-02 只到创建门禁 + BUILD_QUEUED；进度/执行器/重试随 KB-03）。
+
+    同一版本最多一个活跃任务由部分唯一索引兜底
+    （`(tenant_id, version_id) WHERE status IN ('BUILD_QUEUED','BUILDING')`；
+    `BUILDING` 尚不在 CHECK 内，但索引进来可以避免 KB-03 放宽状态时重建索引）。
+    """
+
+    __tablename__ = "kb_build_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_BUILD_JOB_STATUS_SQL})", name="status_valid"
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_kb_build_jobs_id_tenant_id"),
+        CheckConstraint("attempt >= 1", name="attempt_positive"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_kb_build_jobs_tenant_id_tenants",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["version_id", "tenant_id"],
+            ["kb_document_versions.id", "kb_document_versions.tenant_id"],
+            name="fk_kb_build_jobs_version_id_kb_document_versions",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["created_by", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_kb_build_jobs_created_by_users",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "uq_kb_build_jobs_tenant_version_active",
+            "tenant_id",
+            "version_id",
+            unique=True,
+            postgresql_where=text("status IN ('BUILD_QUEUED', 'BUILDING')"),
+        ),
+        Index("ix_kb_build_jobs_tenant_status_updated", "tenant_id", "status", "updated_at"),
+    )
+
+    version_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, server_default="BUILD_QUEUED")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)

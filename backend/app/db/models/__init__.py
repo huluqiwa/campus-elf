@@ -1,5 +1,11 @@
 """数据模型包：导入所有模型，保证 Alembic autogenerate 能发现全部表。"""
 
+from app.db.models.approval import (
+    ApprovalAction,
+    ApprovalRequest,
+    ApprovalStep,
+    ApprovalType,
+)
 from app.db.models.audit import AuditLog
 from app.db.models.identity import (
     MfaRecoveryCode,
@@ -9,7 +15,7 @@ from app.db.models.identity import (
     User,
 )
 from app.db.models.imports import ImportJob, ImportRowError
-from app.db.models.kb import KbDocument, KbDocumentVersion, KbUploadBatch
+from app.db.models.kb import KbBuildJob, KbDocument, KbDocumentVersion, KbUploadBatch
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
 from app.db.models.org import (
     Course,
@@ -38,12 +44,17 @@ from app.db.models.tenant import PlatformUser, Tenant
 
 __all__ = [
     "PERMISSION_CATALOG",
+    "ApprovalAction",
+    "ApprovalRequest",
+    "ApprovalStep",
+    "ApprovalType",
     "AuditLog",
     "Course",
     "DataScope",
     "Department",
     "ImportJob",
     "ImportRowError",
+    "KbBuildJob",
     "KbDocument",
     "KbDocumentVersion",
     "KbUploadBatch",
