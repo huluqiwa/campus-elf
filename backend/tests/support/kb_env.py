@@ -35,6 +35,10 @@ VIEWER_SCHOOL = "kb-school"
 UPLOAD_ONLY = "kb-upload-only"
 NO_PERM = "kb-no-perm"
 B_UPLOADER = "kb-b-uploader"
+B_BUILDER = "kb-b-builder"
+KB_APPROVER = "kb-approver"
+KB_BUILDER = "kb-builder"
+KB_SELF_APPROVER = "kb-self-approver"
 
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 MD = "# \u6821\u89c4\n\n\u6309\u65f6\u5230\u6821\u3002\n".encode()
@@ -106,6 +110,44 @@ async def _seed_data(engine: AsyncEngine) -> tuple[UUID, UUID]:
         login_id=B_UPLOADER,
         password=PASSWORD,
         permissions=upload,
+        scope_types=("school",),
+    )
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_B,
+        login_id=B_BUILDER,
+        password=PASSWORD,
+        permissions=("school.kb.build", "school.kb.view"),
+        scope_types=("school",),
+    )
+    # KB-02：审批人（待办+决定+可见）、构建人、可自批账号（upload+approval 同持，验证自批禁令）
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_APPROVER,
+        password=PASSWORD,
+        permissions=("school.approval.todo", "school.kb.approval", "school.kb.view"),
+        scope_types=("school",),
+    )
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_BUILDER,
+        password=PASSWORD,
+        permissions=("school.kb.build", "school.kb.view"),
+        scope_types=("school",),
+    )
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_SELF_APPROVER,
+        password=PASSWORD,
+        permissions=(
+            "school.kb.upload",
+            "school.kb.approval",
+            "school.approval.todo",
+            "school.kb.view",
+        ),
         scope_types=("school",),
     )
     return tenant_a, tenant_b

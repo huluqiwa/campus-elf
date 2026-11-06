@@ -589,3 +589,58 @@ async def test_dev_skip_file_scan_marks_pending_approval(
         ]
         assert audits[1]["metadata_json"] == {"engine": "dev-skip"}
         assert object_files(env.object_dir) != []
+
+
+async def test_idempotency_conflict_when_metadata_differs(
+    client: AsyncClient, env: KbEnv
+) -> None:
+    """TD-277：同键同文件但元数据不同 → 409，不再把元数据改动静默吞掉。"""
+
+    headers = await login(client, UPLOADER)
+    key = f"td277-{uuid4().hex}"
+    files = [("a.pdf", PDF, "application/pdf")]
+
+    first = await upload(client, headers, key=key, files=files, metadata='[{"title": "原标题"}]')
+    assert first.status_code == 201, first.text
+
+    retitled = await upload(
+        client, headers, key=key, files=files, metadata='[{"title": "新标题"}]'
+    )
+    assert retitled.status_code == 409, retitled.text
+    assert retitled.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+    # 无 metadata（= 空元数据）与带 metadata 也算不同指纹
+    omitted = await upload(client, headers, key=key, files=files)
+    assert omitted.status_code == 409
+    assert omitted.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+    # 指纹不同 → 走的是「换内容冲突」路径：库里仍只有第一批次，没有新对象
+    assert len(await rows("select * from kb_upload_batches")) == 1
+    assert len(await rows("select * from kb_documents")) == 1
+    assert len(object_files(env.object_dir)) == 1
+
+    denied = await rows(
+        "select * from audit_logs where action = 'school.kb.upload.denied' "
+        "and metadata_json->>'reason' = 'idempotency_conflict'"
+    )
+    assert len(denied) == 2
+
+
+async def test_idempotency_replays_when_metadata_matches(
+    client: AsyncClient, env: KbEnv
+) -> None:
+    """TD-277 反向：同键同文件同元数据 → 仍然重放原批次（指纹加 metadata 不破坏幂等）。"""
+
+    headers = await login(client, UPLOADER)
+    key = f"td277-replay-{uuid4().hex}"
+    files = [("a.pdf", PDF, "application/pdf")]
+    metadata = '[{"title": "同一标题", "tags": ["规章"], "description": "同一段描述"}]'
+
+    first = await upload(client, headers, key=key, files=files, metadata=metadata)
+    assert first.status_code == 201, first.text
+
+    second = await upload(client, headers, key=key, files=files, metadata=metadata)
+    assert second.status_code == 201, second.text
+    assert second.json()["replayed"] is True
+    assert second.json()["batch_id"] == first.json()["batch_id"]
+    assert len(await rows("select * from kb_upload_batches")) == 1
