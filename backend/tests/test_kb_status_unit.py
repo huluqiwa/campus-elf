@@ -4,14 +4,19 @@ import pytest
 
 from app.kb.status import (
     KB_STATUS_APPROVED,
+    KB_STATUS_BUILDING,
+    KB_STATUS_FAILED,
     KB_STATUS_PENDING_APPROVAL,
+    KB_STATUS_READY,
     KB_STATUS_REJECTED,
     KB_STATUS_SCAN_FAILED,
     KB_STATUS_UPLOADED,
     InvalidStatusTransition,
     NotBuildableError,
+    NotRetriableError,
     NotSubmittableError,
     assert_build_allowed,
+    assert_retriable,
     assert_submittable,
     assert_transition,
     can_transition,
@@ -82,3 +87,32 @@ def test_build_only_allowed_from_approved() -> None:
     ):
         with pytest.raises(NotBuildableError, match="不可创建构建任务"):
             assert_build_allowed(status)
+
+
+def test_approved_builds_and_ready_is_terminal() -> None:
+    """KB-03A：APPROVED → BUILDING → READY/FAILED；READY 终态（再上传走 KB-05 新版本）。"""
+
+    assert can_transition(KB_STATUS_APPROVED, KB_STATUS_BUILDING) is True
+    assert can_transition(KB_STATUS_BUILDING, KB_STATUS_READY) is True
+    assert can_transition(KB_STATUS_BUILDING, KB_STATUS_FAILED) is True
+    assert can_transition(KB_STATUS_FAILED, KB_STATUS_BUILDING) is True
+    for target in (KB_STATUS_UPLOADED, KB_STATUS_PENDING_APPROVAL, KB_STATUS_APPROVED, "BUILDING"):
+        assert can_transition(KB_STATUS_READY, target) is False
+
+
+def test_build_gate_only_first_build_from_approved() -> None:
+    """assert_build_allowed 只认 APPROVED（READY/FAILED 重建走 retry 端点）。"""
+
+    assert_build_allowed(KB_STATUS_APPROVED)
+    for status in (KB_STATUS_BUILDING, KB_STATUS_READY, KB_STATUS_FAILED, KB_STATUS_PENDING_APPROVAL, KB_STATUS_REJECTED, "UNKNOWN"):
+        with pytest.raises(NotBuildableError, match="不可创建构建任务"):
+            assert_build_allowed(status)
+
+
+def test_retry_only_from_failed() -> None:
+    """assert_retriable：只有 FAILED 的 job 可重试。"""
+
+    assert_retriable(KB_STATUS_FAILED)
+    for status in ("BUILD_QUEUED", KB_STATUS_BUILDING, KB_STATUS_READY, "UNKNOWN"):
+        with pytest.raises(NotRetriableError, match="不可重试"):
+            assert_retriable(status)
