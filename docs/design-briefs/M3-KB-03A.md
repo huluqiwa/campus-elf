@@ -163,4 +163,5 @@
 - **审查**：两轮独立只读子智能体 **2B/6M/12m → 0B/0M/3m** 全部处置。B1 异常漏斗（Qdrant/对象存储/GBK 文本三类失败逃逸成假 STALE——九类异常全落 FAILED+error_code）；B2 arq 默认 job_timeout=300s 腰斩合法长解析（Function timeout_s=1800 显式覆盖）；M1 收口 attempt 校验（防跨 attempt 混装）；M2 QUEUED 滞留重投；M3 跨节重叠泄漏；M4 BM25 avgdl 归一。复审 3 条 Minor（Qdrant payload parent_id/父块入索引/dim 校验）随 KB-03B/KB-07 处置。
 - **本地门禁**：ruff/mypy（246 文件）/bandit×2/alembic check 全绿 + roundtrip 实测；单测 **32**；集成 **7**（真实 Qdrant）；业务场景 **1 passed（58.28s，真实 MinerU standard + TEI + Qdrant → READY，TD-046 兑现）**；迁移回滚 12 passed。
 - **TD**：TD-288 已完成（快照+取件执行器+QUEUED 重投）；TD-046 已兑现（真实解析证据）；TD-293（LibreOffice）、TD-294（切块实验+jieba 评估）、TD-295（CI GPU）已登记。
+- **合并后 main（tip `87f9b83`）推送 CI**：backend run `42378081081` **979 passed, 1 skipped（1107.77s / 18:27）**（四包覆盖率与 PR run 逐包一致）、security run `42378081083` success。
 - **实现顺序对简报 §4 的偏差**：无。
