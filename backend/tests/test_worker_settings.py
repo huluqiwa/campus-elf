@@ -12,12 +12,26 @@ from app.workers.tasks import echo
 
 
 def test_worker_settings_registers_tasks() -> None:
-    """Worker 入口挂载 echo、导入任务（M2-ORG02）与知识库扫描（M3 KB-01）。"""
+    """Worker 入口挂载 echo、导入任务（M2-ORG02）、知识库扫描（KB-01）与构建（KB-03A）。"""
 
-    assert len(WorkerSettings.functions) == 3
+    from app.kb.build_task import build_kb_version
+
+    assert len(WorkerSettings.functions) == 4
     assert run_import_job in WorkerSettings.functions
     assert scan_kb_version in WorkerSettings.functions
+    assert build_kb_version in WorkerSettings.functions
     assert echo in WorkerSettings.functions
+
+
+def test_worker_settings_build_function_has_explicit_timeout() -> None:
+    """审查 B2：arq 默认 job_timeout=300s 会腰斩合法长解析（MinerU 上限 600s）——
+    构建任务必须显式覆盖（Function 包装 timeout_s=1800）。"""
+
+    from arq.worker import Function
+
+    functions = [item for item in WorkerSettings.functions if isinstance(item, Function)]
+    build = next(item for item in functions if item.name == "build_kb_version")
+    assert build.timeout_s == 1800
 
 
 def test_worker_settings_registers_kb_scan_watchdog_cron() -> None:
