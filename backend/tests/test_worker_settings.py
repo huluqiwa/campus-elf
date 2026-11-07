@@ -14,8 +14,6 @@ from app.workers.tasks import echo
 def test_worker_settings_registers_tasks() -> None:
     """Worker 入口挂载 echo、导入任务（M2-ORG02）、知识库扫描（KB-01）与构建（KB-03A）。"""
 
-    from app.kb.build_task import build_kb_version
-
     assert len(WorkerSettings.functions) == 4
     names = [getattr(item, 'name', None) for item in WorkerSettings.functions]
     assert run_import_job in WorkerSettings.functions
