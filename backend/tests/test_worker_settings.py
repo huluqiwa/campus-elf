@@ -17,10 +17,12 @@ def test_worker_settings_registers_tasks() -> None:
     from app.kb.build_task import build_kb_version
 
     assert len(WorkerSettings.functions) == 4
+    names = [getattr(item, 'name', None) for item in WorkerSettings.functions]
     assert run_import_job in WorkerSettings.functions
     assert scan_kb_version in WorkerSettings.functions
-    assert build_kb_version in WorkerSettings.functions
     assert echo in WorkerSettings.functions
+    # build_kb_version 经 Function 包装（timeout_s=1800），按 name 断言
+    assert 'build_kb_version' in names
 
 
 def test_worker_settings_build_function_has_explicit_timeout() -> None:
