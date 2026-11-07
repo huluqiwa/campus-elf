@@ -71,6 +71,7 @@ PUBLISHED → NEW_VERSION → PENDING_APPROVAL
 | PENDING_APPROVAL | 审批通过 | APPROVED | 审批记录；可构建 |
 | PENDING_APPROVAL | 审批拒绝 | REJECTED | 理由必填；不可构建 |
 | APPROVED | 创建构建 | BUILDING | 仅一个活跃任务；未审批 409 |
+| FAILED | 重试 | BUILDING | attempt+1 不覆盖历史；只有 FAILED 可重试（retry 端点） |
 | BUILDING | 构建成功 | READY | 分块/向量就绪；可测试 |
 | BUILDING | 构建失败 | FAILED | 错误码；可重试 |
 | READY | 运行测试 | TESTING | 草稿配置+标记会话 |
@@ -87,6 +88,7 @@ PUBLISHED → NEW_VERSION → PENDING_APPROVAL
 | PUBLISHED | 仅标签/描述修改 | PUBLISHED | 免审；审计前后值 |
 
 **不变量**
+- 未 APPROVED 不得创建构建任务；READY 的内容变更走 KB-05 再上传新版本（READY 无出边）；FAILED → BUILDING 仅经 retry 端点（KB-03A）；看门狗对心跳超时的 BUILDING 标记 FAILED/STALE（可重试），对滞留 QUEUED 重投（KB-03A）；
 - 未 APPROVED 不得创建构建任务；派生版本（K5）以"超管确认"替代平台审批，但同样不得原地修改源版本。
 - TEST_PASSED 才能发布；派生版本与初始版本走同一发布/回滚路径。
 - 同一文档版本最多一个活跃构建任务。

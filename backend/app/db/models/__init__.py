@@ -15,7 +15,14 @@ from app.db.models.identity import (
     User,
 )
 from app.db.models.imports import ImportJob, ImportRowError
-from app.db.models.kb import KbBuildJob, KbDocument, KbDocumentVersion, KbUploadBatch
+from app.db.models.kb import (
+    KbBuildJob,
+    KbChunk,
+    KbDocument,
+    KbDocumentVersion,
+    KbIndexVersion,
+    KbUploadBatch,
+)
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
 from app.db.models.org import (
     Course,
@@ -55,8 +62,10 @@ __all__ = [
     "ImportJob",
     "ImportRowError",
     "KbBuildJob",
+    "KbChunk",
     "KbDocument",
     "KbDocumentVersion",
+    "KbIndexVersion",
     "KbUploadBatch",
     "MfaRecoveryCode",
     "OrgClass",

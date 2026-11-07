@@ -502,6 +502,19 @@ audit_logs: 仅追加，prev_hash/hash 链
 - 审计：`school.kb.approval.submitted/approved/rejected/cancelled/denied`、`school.kb.build.created/denied`、`school.kb.metadata.updated`；403/409 业务拒绝走**独立事务**写 denied 审计（404 探测不审计，不泄露存在性）。
 - 幂等指纹（TD-277 收口）：`_request_fingerprint` 并入 metadata 规范串（标题/描述 strip、标签排序）——同键同文件不同元数据 409 `IDEMPOTENCY_KEY_REUSED`，同元数据重放原批次。
 
+**M3 KB-03A 已实现（后端，2026-11-07）**：
+
+- 构建执行管线（arq `build_kb_version`，三段式短事务）：取件（BUILD_QUEUED→BUILDING，版本 APPROVED/FAILED→BUILDING）→ 事务外执行（PARSING→NORMALIZING→CHUNKING→EMBEDDING→INDEXING→VALIDATING，逐阶段短事务写 stage/progress/heartbeat）→ 收口（READY/FAILED + chunks 原子落库 + kb_index_versions + 审计 `school.kb.build.completed/failed`）；
+- 解析（`app/kb/parser/`）：`DocumentParserPort` + MinerU V1 `/v1/file_parse` 适配器（tier 在请求体，2026-11-07 契约实测）+ `TieredParser` 降级链（tier 顺序 Settings 可配，失败原因链式落 `fallback_reason`）；TXT/MD 直接规范化；DOCX/PPTX 诚实失败 `PARSER_UNAVAILABLE`（TD-293）；
+- 切块（`app/kb/chunker.py`，纯函数）：父子块、参数 Settings 可配（TD-294 临时默认 500/15%/1000）、表格/代码不拆、超长段句界优先硬切、重叠按码点、跨节不重叠；
+- 嵌入/稀疏（`app/kb/embedding.py`）：TEI `/embed` dense（BGE-M3）+ jieba/BM25 sparse（按版本语料 IDF + 标准长度归一 avgdl + token sha256 uint32 哈希）；dense 输入拼「文档名>章节路径」前缀；
+- Qdrant（`app/kb/indexer.py`）：collection `tenant_{sha256前12位}_kb_v{version_id}`、named vectors dense+sparse、payload 十字段（`tenant_id_hash` 不落明文租户 id，`is_published` 构建期 false）、删旧建新幂等 + upsert/VALIDATING 双对账；
+- 快照（TD-288 兑现）：`GET /school/kb/build-jobs/{job_id}`（`school.kb.view` + 数据范围，全字段）；重试 `POST .../retry`（只有 FAILED，attempt+1/retry_count+1 不覆盖历史，审计 `school.kb.build.retry`）；
+- 看门狗（cron 15 分钟错位）：BUILDING 心跳超时 → FAILED/STALE（可重试）；QUEUED 滞留重投（入队 best-effort 丢失的恢复路径）；
+- arq `Function(build_kb_version, timeout_s=1800)`：显式覆盖 worker 默认 300s job_timeout（MinerU 冷启动 248s 实证、上限 600s，默认值会腰斩合法解析——审查 B2）；
+- 收口 attempt 校验：STALE→重试后旧 worker 的迟到收口被 attempt 等值条件拒绝（不覆盖新 attempt 的 chunks/向量——审查 M1）；
+- 异常漏斗：ParserError/EmbeddingError/IndexError_/ObjectStoreError/UnicodeDecodeError/SQLAlchemyError/httpx/OSError/ValueError 全部落 FAILED + error_code（GBK 文本 → `NORMALIZE_DECODE_FAILED`，Qdrant 抖动 → `INDEX_UNAVAILABLE`——审查 B1）。
+
 ### 5.6 构建进度 SSE
 
 事件：
@@ -913,7 +926,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 ### 7.3 嵌入 / 稀疏
 
 - Dense：BGE-M3，1024 维，TEI CPU。
-- Sparse：jieba 分词 + BM25；按 KB 版本维护 IDF；token hash 映射 uint32；Qdrant sparse vector。
+- Sparse：jieba 分词 + BM25；按 KB 版本维护 IDF（含 avgdl 长度归一——KB-03A 落地，审查 M4）；token hash 映射 uint32（sha256 前 4 字节）；Qdrant sparse vector。
 - 批量嵌入：按批更新进度；失败可重试；嵌入状态写 `kb_chunks.embedding_status`。
 - 若 TEI 不支持 BGE-M3/重排，改用 FlagEmbedding/sentence-transformers CPU 服务，接口不变（需确认）。
 

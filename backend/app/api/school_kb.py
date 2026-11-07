@@ -33,9 +33,11 @@ from app.kb.service import (
     KbError,
     VersionView,
     create_build,
+    get_build_job,
     get_document,
     list_documents,
     list_versions,
+    retry_build,
     submit_version_approval,
     update_document_metadata,
     upload_documents,
@@ -408,3 +410,110 @@ async def update_kb_document_metadata(
     except KbError as exc:
         raise _http_error(exc) from exc
     return _document_response(document)
+
+
+# ---------------------------------------------------------------------------
+# KB-03A：构建任务快照（TD-288）与重试
+# ---------------------------------------------------------------------------
+
+
+class KbBuildJobSnapshotResponse(BaseModel):
+    """构建任务快照（全字段；SSE 事件流与前端进度随 KB-03B）。"""
+
+    job_id: UUID
+    version_id: UUID
+    document_id: UUID
+    status: str
+    stage: str | None
+    progress: float | None
+    processed_units: int | None
+    total_units: int | None
+    tier: str | None
+    fallback_reason: str | None
+    attempt: int
+    retry_count: int
+    error_code: str | None
+    message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    heartbeat_at: datetime | None
+    finished_at: datetime | None
+
+
+@router.get("/build-jobs/{job_id}", response_model=KbBuildJobSnapshotResponse)
+async def get_kb_build_job(
+    job_id: UUID,
+    viewer: Annotated[Principal, ViewerDep],
+) -> KbBuildJobSnapshotResponse:
+    """构建任务快照（数据范围外/跨租 404；轮询兜底 3s 由前端执行）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    try:
+        snapshot = await get_build_job(
+            tenant_id=tenant_id,
+            scope=viewer.scope_context,
+            job_id=job_id,
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbBuildJobSnapshotResponse(
+        job_id=snapshot.id,
+        version_id=snapshot.version_id,
+        document_id=snapshot.document_id,
+        status=snapshot.status,
+        stage=snapshot.stage,
+        progress=snapshot.progress,
+        processed_units=snapshot.processed_units,
+        total_units=snapshot.total_units,
+        tier=snapshot.tier,
+        fallback_reason=snapshot.fallback_reason,
+        attempt=snapshot.attempt,
+        retry_count=snapshot.retry_count,
+        error_code=snapshot.error_code,
+        message=snapshot.message,
+        created_at=snapshot.created_at,
+        started_at=snapshot.started_at,
+        heartbeat_at=snapshot.heartbeat_at,
+        finished_at=snapshot.finished_at,
+    )
+
+
+@router.post("/build-jobs/{job_id}/retry", response_model=KbBuildJobSnapshotResponse)
+async def retry_kb_build_job(
+    job_id: UUID,
+    builder: Annotated[Principal, BuilderDep],
+    request: Request,
+) -> KbBuildJobSnapshotResponse:
+    """重试失败的构建任务（只有 FAILED；attempt+1 不覆盖历史；审计）。"""
+
+    tenant_id = _tenant_or_403(builder)
+    try:
+        snapshot = await retry_build(
+            tenant_id=tenant_id,
+            scope=builder.scope_context,
+            job_id=job_id,
+            user_id=builder.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbBuildJobSnapshotResponse(
+        job_id=snapshot.id,
+        version_id=snapshot.version_id,
+        document_id=snapshot.document_id,
+        status=snapshot.status,
+        stage=snapshot.stage,
+        progress=snapshot.progress,
+        processed_units=snapshot.processed_units,
+        total_units=snapshot.total_units,
+        tier=snapshot.tier,
+        fallback_reason=snapshot.fallback_reason,
+        attempt=snapshot.attempt,
+        retry_count=snapshot.retry_count,
+        error_code=snapshot.error_code,
+        message=snapshot.message,
+        created_at=snapshot.created_at,
+        started_at=snapshot.started_at,
+        heartbeat_at=snapshot.heartbeat_at,
+        finished_at=snapshot.finished_at,
+    )

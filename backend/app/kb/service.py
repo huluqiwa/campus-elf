@@ -48,14 +48,17 @@ from app.db.repository import CursorError, ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
 from app.kb.status import (
     KB_STATUS_APPROVED,
+    KB_STATUS_FAILED,
     KB_STATUS_PENDING_APPROVAL,
     KB_STATUS_REJECTED,
     KB_STATUS_SCAN_FAILED,
     KB_STATUS_UPLOADED,
     InvalidStatusTransition,
     NotBuildableError,
+    NotRetriableError,
     NotSubmittableError,
     assert_build_allowed,
+    assert_retriable,
     assert_submittable,
     assert_transition,
 )
@@ -1438,6 +1441,172 @@ async def cancel_version_approval(
         raise error from exc
 
 
+@dataclass(frozen=True)
+class BuildJobSnapshot:
+    """构建任务快照（TD-288：全字段；进度/阶段/tier/错误供轮询兜底与 KB-03B SSE 复用）。"""
+
+    id: UUID
+    version_id: UUID
+    document_id: UUID
+    status: str
+    stage: str | None
+    progress: float | None
+    processed_units: int | None
+    total_units: int | None
+    tier: str | None
+    fallback_reason: str | None
+    attempt: int
+    retry_count: int
+    error_code: str | None
+    message: str | None
+    created_by: UUID
+    created_at: datetime
+    started_at: datetime | None
+    heartbeat_at: datetime | None
+    finished_at: datetime | None
+
+
+async def get_build_job(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    job_id: UUID,
+) -> BuildJobSnapshot:
+    """构建任务快照（`school.kb.view` + 数据范围；job 挂在文档上，范围外 404）。"""
+
+    async with db_session(tenant_id=tenant_id) as session:
+        job = await _build_job_repository(session, tenant_id).get(job_id)
+        if job is None:
+            raise KbError("BUILD_JOB_NOT_FOUND", "构建任务不存在", 404)
+        version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+            session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+        )
+        version = await version_repository.get(job.version_id)
+        if version is None:
+            raise KbError("BUILD_JOB_NOT_FOUND", "构建任务不存在", 404)
+        return BuildJobSnapshot(
+            id=job.id,
+            version_id=job.version_id,
+            document_id=version.document_id,
+            status=job.status,
+            stage=job.stage,
+            progress=job.progress,
+            processed_units=job.processed_units,
+            total_units=job.total_units,
+            tier=job.tier,
+            fallback_reason=job.fallback_reason,
+            attempt=job.attempt,
+            retry_count=job.retry_count,
+            error_code=job.error_code,
+            message=job.message,
+            created_by=job.created_by,
+            created_at=job.created_at,
+            started_at=job.started_at,
+            heartbeat_at=job.heartbeat_at,
+            finished_at=job.finished_at,
+        )
+
+
+async def retry_build(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    job_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> BuildJobSnapshot:
+    """重试失败的构建任务（只有 FAILED 可重试；attempt+1，历史不覆盖）。
+
+    状态机：job FAILED → BUILD_QUEUED（attempt+1/retry_count+1，stage/error 清空）；
+    版本 FAILED → 取件时迁移 BUILDING（本端点只把 job 排回队列）。
+    """
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            job = await _build_job_repository(session, tenant_id).get(job_id)
+            if job is None:
+                raise KbError("BUILD_JOB_NOT_FOUND", "构建任务不存在", 404)
+            try:
+                assert_retriable(job.status)
+            except NotRetriableError as exc:
+                raise KbError("KB_BUILD_NOT_RETRIABLE", str(exc), 409) from exc
+            version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+                session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            version = await version_repository.get(job.version_id)
+            if version is None:
+                raise KbError("BUILD_JOB_NOT_FOUND", "构建任务不存在", 404)
+            if version.status != KB_STATUS_FAILED:
+                raise KbError(
+                    "KB_BUILD_NOT_RETRIABLE",
+                    f"版本状态 {version.status} 与失败任务不一致，不能重试",
+                    409,
+                )
+            job.status = "BUILD_QUEUED"
+            job.stage = None
+            job.error_code = None
+            job.message = None
+            job.progress = None
+            job.processed_units = None
+            job.total_units = None
+            job.finished_at = None
+            job.started_at = None
+            job.heartbeat_at = None
+            job.attempt += 1
+            job.retry_count += 1
+            await append_audit(
+                session,
+                action="school.kb.build.retry",
+                resource_type="kb_document_version",
+                resource_id=str(job.version_id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={
+                    "job_id": str(job.id),
+                    "attempt": job.attempt,
+                    "retry_count": job.retry_count,
+                },
+                request_id=request_id,
+            )
+            snapshot = BuildJobSnapshot(
+                id=job.id,
+                version_id=job.version_id,
+                document_id=version.document_id,
+                status=job.status,
+                stage=job.stage,
+                progress=job.progress,
+                processed_units=job.processed_units,
+                total_units=job.total_units,
+                tier=job.tier,
+                fallback_reason=job.fallback_reason,
+                attempt=job.attempt,
+                retry_count=job.retry_count,
+                error_code=job.error_code,
+                message=job.message,
+                created_by=job.created_by,
+                created_at=job.created_at,
+                started_at=job.started_at,
+                heartbeat_at=job.heartbeat_at,
+                finished_at=job.finished_at,
+            )
+            attempt = job.attempt
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.build.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"job_id": str(job_id)},
+            )
+        raise
+    await _enqueue_build(tenant_id, snapshot.version_id, attempt)
+    return snapshot
+
+
 async def create_build(
     *,
     tenant_id: UUID,
@@ -1448,10 +1617,13 @@ async def create_build(
 ) -> BuildView:
     """创建构建任务（门禁：只有 APPROVED；同版本最多一个活跃任务）。
 
-    本点只落 `BUILD_QUEUED` 行 + 审计；执行器/进度/重试随 KB-03
-    （TD-288：快照接口与取件执行器是 KB-03 首个交付项）。
+    KB-03A：落 `BUILD_QUEUED` 行 + 审计后 **best-effort 入队**（worker 取件执行；
+    入队失败不失败——retry 端点可手动兜底，QUEUED 行也不会被看门狗误标 STALE）。
     """
 
+    job_id: UUID | None = None
+    job_attempt = 1
+    job_created: datetime | None = None
     try:
         async with db_session(tenant_id=tenant_id) as session:
             version_repository: TenantScopedRepository[KbDocumentVersion] = (
@@ -1512,13 +1684,9 @@ async def create_build(
                 metadata={"job_id": str(job.id), "version_no": version.version_no},
                 request_id=request_id,
             )
-            return BuildView(
-                id=job.id,
-                version_id=job.version_id,
-                status=job.status,
-                attempt=job.attempt,
-                created_at=job.created_at,
-            )
+            job_id = job.id
+            job_attempt = job.attempt
+            job_created = job.created_at
     except KbError as exc:
         if exc.http_status in (403, 409):
             await _action_denied(
@@ -1530,6 +1698,43 @@ async def create_build(
                 context={"version_id": str(version_id)},
             )
         raise
+    if job_id is None or job_created is None:
+        raise KbError("BUILD_CREATE_FAILED", "构建任务创建失败，请稍后重试", 503)
+    await _enqueue_build(tenant_id, version_id, job_attempt)
+    return BuildView(
+        id=job_id,
+        version_id=version_id,
+        status="BUILD_QUEUED",
+        attempt=job_attempt,
+        created_at=job_created,
+    )
+
+
+async def _enqueue_build(tenant_id: UUID, version_id: UUID, attempt: int) -> None:
+    """构建任务 best-effort 入队（与扫描同款：队列不可用不失败，retry 端点兜底）。"""
+
+    from app.kb.build_task import build_job_id
+    from app.workers.settings import create_producer_pool
+
+    pool = None
+    try:
+        pool = await create_producer_pool()
+        await pool.enqueue_job(
+            "build_kb_version",
+            str(tenant_id),
+            str(version_id),
+            _job_id=build_job_id(version_id, attempt),
+        )
+    except Exception as exc:
+        logger.warning(
+            "构建任务入队失败（可用 retry 端点兜底）：%s.%s",
+            type(exc).__module__,
+            type(exc).__name__,
+        )
+    finally:
+        if pool is not None:
+            with contextlib.suppress(Exception):
+                await pool.aclose()
 
 
 async def update_document_metadata(

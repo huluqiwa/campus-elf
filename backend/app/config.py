@@ -165,6 +165,32 @@ class Settings(BaseSettings):
     # 开发/测试专用：跳过扫描直接把版本置为 PENDING_APPROVAL；非开发环境必须 false。
     dev_skip_file_scan: bool = False
 
+    # ---------- 构建管线（M3-KB-03A，design §7） ----------
+    # MinerU V1 API（dev 栈 parser profile 端口 8100）；不可达时构建 FAILED（可重试）。
+    mineru_base_url: str = "http://127.0.0.1:8100"
+    mineru_timeout_seconds: float = Field(default=600.0, gt=0, le=1800)
+    # 解析档位降级链：当前档失败（5xx/超时/解析错误）→ 降下一档；全档失败 FAILED。
+    kb_parser_tier_order: str = "standard,basic,flash"
+    # TEI embedding（BGE-M3，1024 维）；rerank 实例是检索侧（KB-07），本点不用。
+    tei_embed_url: str = "http://127.0.0.1:8081"
+    tei_embed_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+    # 切块参数（TD-294：临时默认 500/15%/1000，评估后回写；全部 Settings 可配）。
+    kb_chunk_size: int = Field(default=500, ge=100, le=2000)
+    kb_chunk_overlap_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
+    kb_parent_chunk_size: int = Field(default=1000, ge=200, le=5000)
+    # 嵌入批次大小（TEI 批量接口）。
+    kb_embed_batch_size: int = Field(default=16, ge=1, le=128)
+    # 看门狗：BUILDING 心跳超过该秒数 → FAILED/STALE（可重试）。
+    kb_build_heartbeat_timeout_seconds: int = Field(default=600, ge=60, le=7200)
+
+    def kb_parser_tiers(self) -> list[str]:
+        """解析档位列表（逗号分隔配置 → 有序列表；空串非法由 Field 约束外的校验兜底）。"""
+
+        tiers = [tier.strip().lower() for tier in self.kb_parser_tier_order.split(",") if tier.strip()]
+        if not tiers:
+            raise ValueError("KB_PARSER_TIER_ORDER 不能为空")
+        return tiers
+
     def _validate_encryption_kek(self) -> None:
         """校验字段加密密钥：必须是 base64 编码的 32 字节。"""
 
