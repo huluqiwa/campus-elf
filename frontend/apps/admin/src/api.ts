@@ -2,6 +2,7 @@
 
 import {
   createApprovalsApi,
+  createTestApi,
   createImportsApi,
   createKbApi,
   createOrgApi,
@@ -15,3 +16,4 @@ export const importsApi = createImportsApi(session);
 export const rbacApi = createRbacApi(session);
 export const kbApi = createKbApi(session);
 export const approvalsApi = createApprovalsApi(session);
+export const testApi = createTestApi(session);

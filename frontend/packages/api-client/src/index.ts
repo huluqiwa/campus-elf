@@ -144,3 +144,12 @@ export {
   type KbApprovalSubmitResult,
   type KbBuildJobResult,
 } from "./approvals";
+
+export {
+  createTestApi,
+  type KbTestApi,
+  type KbTestRunDetail,
+  type KbTestRunStartResult,
+  type KbTestSetCreateResult,
+  type KbVersionApprovalView,
+} from "./testSet";

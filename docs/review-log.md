@@ -951,3 +951,7 @@
 - **M3 KB-04A 测试沙箱（2026-11-08，分支 `feature/m3-kb04a-test-sandbox`）的独立审查**：后端 20 文件（迁移 `b7d3e9f1a5c3` 三表 + RLS、status.py 扩展、test_parser/test_task、Qdrant search_points、API 三端点、测试），对照已确认简报 `docs/design-briefs/M3-KB-04A.md`（按推荐项执行：D1 检索命中 MVP 无 LLM、D2 CSV/XLSX/JSON、D3 TEST_PASSED 可重跑、D4 Qdrant 原生 RRF、D5 100% 命中阈值、D6 后端先行）。
   - **本地门禁实测（2026-11-08，win32 / CPython 3.13.13）**：ruff/mypy（249 文件）/bandit×2/alembic check（roundtrip 实测）全绿；单测 32 + 集成 12（KB-03A 回归 7 + 状态机 5）+ config 32 passed。KB-03B 的 7 条集成用例（SSE/事件/parent_id/dim 漂移/TD-291）在本分支也被覆盖（同为 test_kb_build_worker.py）。受影响侧全量由 PR 远端 CI 跑。
   - **PR 与合并事实（2026-11-08）**：PR #47（\`feature/m3-kb04a-test-sandbox\`，head \`df780bc\`）→ rebase 合并，分支已删除。PR CI：backend run \`42393250936\` **986 passed, 1 skipped（992.33s）**（四包覆盖率全过）、security run \`42393251058\` success。合并后 main 推送 CI 读数见 \`docs/handoff.md\` §1。
+- **M3 KB-04B 测试沙箱前端（2026-11-08，分支 `feature/m3-kb04b-test-frontend`）**：纯前端 10 文件（api-client `testSet.ts` 4 方法 + 契约类型、`test-logic.ts` 纯函数层、KB 抽屉测试区块 + TD-291 直显、mock E2E +2 条），`backend/` 零改动，对照已确认简报 `docs/design-briefs/M3-KB-04B.md`（按推荐项执行：D1 KB 抽屉内测试区、D2 TD-291 动态替换）。
+  - **实现中自查修掉的缺陷**：el-alert type 'danger'→'error'（Element Plus 契约）；KB_TEST_CODE 未使用导入、testSectionHint 未使用变量、loadLatestTestRun 参数未使用；build_request 去 await（同步方法）；`"\n"` 在 heredoc 中被展开为真换行（unterminated string literal）。
+  - **本地门禁实测（2026-11-08，win32 / Node 24）**：typecheck/lint/format/build 全绿；单测 **231**（api-client 85 = 80+5、admin 146 = 137+9）；mock E2E 全量 **139 passed**（基线 137 + KB 抽屉测试沙箱 +2 条）；`backend/` 零改动。受影响侧全量由 PR 远端 CI 跑。
+  - **PR 与合并事实**：待合并后回填。
