@@ -24,15 +24,18 @@ from uuid import UUID, uuid4
 
 import httpx
 from qdrant_client import AsyncQdrantClient
+from sqlalchemy import func
+from sqlalchemy import select as sa_select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.writer import append_audit
 from app.config import get_settings
 from app.db.models.kb import KbBuildJob, KbChunk, KbDocument, KbDocumentVersion, KbIndexVersion
+from app.db.models.kb_events import KbBuildEvent
 from app.db.repository import ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
-from app.kb.chunker import CHUNK_TYPE_PARENT, RawChunk, chunk_markdown
+from app.kb.chunker import CHUNK_TYPE_CHILD, CHUNK_TYPE_PARENT, RawChunk, chunk_markdown
 from app.kb.embedding import (
     EmbeddingError,
     EmbeddingPort,
@@ -103,6 +106,43 @@ class BuildPipelineError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+async def _append_event(
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    job_id: UUID,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """追加构建事件（D1：调用方事务内执行，事件与状态同事务一致）。
+
+    seq 按 job 递增（max+1）；`(job_id, seq)` 唯一约束兜底并发（理论同一事务内
+    串行，约束是防御性兜底）。事件写入失败向上抛——事件与状态同事务，写不进
+    就回滚整笔（管线会按 FAILED 收口，不留「状态推进了但事件丢失」的裂缝）。
+    """
+
+    max_seq = (
+        await session.execute(
+            sa_select(func.max(KbBuildEvent.seq)).where(KbBuildEvent.job_id == job_id)
+        )
+    ).scalar_one_or_none()
+    repository: TenantScopedRepository[KbBuildEvent] = TenantScopedRepository(
+        session,
+        KbBuildEvent,
+        tenant_id,
+        scope=ScopeBypass(reason="构建事件：随状态推进同事务写入，系统执行者"),
+    )
+    await repository.add(
+        KbBuildEvent(
+            tenant_id=tenant_id,
+            job_id=job_id,
+            seq=(max_seq or 0) + 1,
+            event_type=event_type,
+            payload_json=payload,
+        )
+    )
 
 
 def _job_repository(session: AsyncSession, tenant_id: UUID) -> TenantScopedRepository[KbBuildJob]:
@@ -241,6 +281,20 @@ async def _stage_progress(
                 job.tier = tier
             if fallback_reason is not None:
                 job.fallback_reason = fallback_reason
+            event_type = "build.stage" if processed_units in (None, 0) else "build.progress"
+            await _append_event(
+                session,
+                tenant_id,
+                job_id=job_id,
+                event_type=event_type,
+                payload={
+                    "stage": stage,
+                    "progress": progress,
+                    "processed_units": processed_units,
+                    "total_units": total_units,
+                    "tier": tier,
+                },
+            )
             await session.flush()
     except SQLAlchemyError as exc:
         logger.warning(
@@ -256,7 +310,7 @@ async def _finish(
     success: bool,
     error_code: str | None = None,
     message: str | None = None,
-    chunks: list[tuple[UUID, RawChunk, list[float]]] | None = None,
+    chunks: list[tuple[UUID, RawChunk, list[float] | None]] | None = None,
     collection: str | None = None,
     dense_dim: int | None = None,
     request_id: str | None = None,
@@ -372,6 +426,19 @@ async def _finish(
                 existing.qdrant_collection = collection
                 existing.status = "ready" if success else "failed"
 
+        await _append_event(
+            session,
+            tenant_id,
+            job_id=job.id,
+            event_type="build.done" if success else "build.error",
+            payload={
+                "status": "READY" if success else "FAILED",
+                "stage": job.stage,
+                "error_code": error_code,
+                "message": message,
+                "chunks": len(chunk_rows) if success else None,
+            },
+        )
         await append_audit(
             session,
             action="school.kb.build.completed" if success else "school.kb.build.failed",
@@ -408,7 +475,7 @@ async def _run_pipeline(
     filename: str,
     settings: Any,
     store: ObjectStore | None = None,
-) -> tuple[list[tuple[UUID, RawChunk, list[float]]], str]:
+) -> tuple[list[tuple[UUID, RawChunk, list[float] | None]], str]:
     """事务外执行管线，返回 ((chunk_id, chunk, dense) 列表, collection 名)。
 
     chunk_id 在 CHUNKING 阶段即分配（uuid4），INDEXING 的 Qdrant 点 id 与收口事务的
@@ -478,6 +545,15 @@ async def _run_pipeline(
     if not raw_chunks:
         raise BuildPipelineError("CHUNK_EMPTY", "切分结果为空（文档无可索引内容）")
     chunk_ids = [uuid4() for _ in raw_chunks]
+    # 父子映射在 CHUNKING 时即确定（组序 = 父块紧邻其子块）；子块 parent_id 供
+    # Qdrant payload 与检索侧上下文展开（Minor 3）
+    parent_of: dict[int, UUID] = {}
+    current_parent_position: int | None = None
+    for position, chunk in enumerate(raw_chunks):
+        if chunk.chunk_type == CHUNK_TYPE_PARENT:
+            current_parent_position = position
+        elif current_parent_position is not None:
+            parent_of[position] = chunk_ids[current_parent_position]
     await _stage_progress(
         tenant_id,
         job_id,
@@ -487,12 +563,16 @@ async def _run_pipeline(
     )
 
     # ---------- EMBEDDING ----------
-    dense_texts = [
+    child_dense_texts = [
         embed_input_text(
-            document_title=doc_title, section_path=chunk.section_path, chunk_text=chunk.text
+            document_title=doc_title,
+            section_path=chunk.section_path,
+            chunk_text=chunk.text,
         )
         for chunk in raw_chunks
+        if chunk.chunk_type == CHUNK_TYPE_CHILD
     ]
+    dense_texts = child_dense_texts
     total = len(dense_texts)
     await _stage_progress(
         tenant_id, job_id, stage=STAGE_EMBEDDING, processed_units=0, total_units=total
@@ -512,29 +592,43 @@ async def _run_pipeline(
             processed_units=min(start + len(batch), total),
             total_units=total,
         )
+    # D4：实际维度与配置比对（TEI 配错模型在构建期暴露，而非 KB-07 检索期）
+    if dense_vectors and len(dense_vectors[0]) != settings.kb_embed_dim:
+        raise BuildPipelineError(
+            "EMBED_DIM_MISMATCH",
+            f"嵌入维度漂移（实际 {len(dense_vectors[0])}，配置 {settings.kb_embed_dim}）；"
+            "检查 TEI 模型与 KB_EMBED_DIM 配置",
+        )
+
+    # 只索引子块（简报 D3 定案）：父块用于检索后上下文展开，不参与召回——
+    # 嵌入与存储省一半；对账语义 = 点数 == 子块数（Minor 3）
+    child_positions = [
+        position
+        for position, chunk in enumerate(raw_chunks)
+        if chunk.chunk_type == CHUNK_TYPE_CHILD
+    ]
 
     # ---------- INDEXING ----------
     await _stage_progress(
-        tenant_id, job_id, stage=STAGE_INDEXING, processed_units=0, total_units=len(raw_chunks)
+        tenant_id, job_id, stage=STAGE_INDEXING, processed_units=0, total_units=len(child_positions)
     )
     collection = collection_name(tenant_id, version_id)
-    sparse_vectors = version_sparse_weights([chunk.text for chunk in raw_chunks])
+    sparse_vectors_all = version_sparse_weights([chunk.text for chunk in raw_chunks])
     points = [
         IndexPoint(
-            chunk_id=chunk_id,
-            parent_id=None,
+            chunk_id=chunk_ids[position],
+            parent_id=parent_of.get(position),
             document_id=document_id,
             chunk_type=chunk.chunk_type,
             section_path=chunk.section_path,
             page_start=chunk.page_start,
             page_end=chunk.page_end,
             text_hash=chunk.chunk_hash,
-            dense=dense,
-            sparse=sparse,
+            dense=dense_vectors[child_index],
+            sparse=sparse_vectors_all[position],
         )
-        for chunk_id, chunk, dense, sparse in zip(
-            chunk_ids, raw_chunks, dense_vectors, sparse_vectors, strict=True
-        )
+        for child_index, position in enumerate(child_positions)
+        for chunk in [raw_chunks[position]]
     ]
     if not settings.qdrant_url:
         raise BuildPipelineError("INDEX_UNAVAILABLE", "Qdrant 未配置（QDRANT_URL 缺失）")
@@ -560,16 +654,16 @@ async def _run_pipeline(
         )
     finally:
         await client.close()
-    if written != len(raw_chunks):
+    if written != len(child_positions):
         raise BuildPipelineError(
-            "INDEX_UPSERT_FAILED", f"向量写入条数不一致（{written}/{len(raw_chunks)}）"
+            "INDEX_UPSERT_FAILED", f"向量写入条数不一致（{written}/{len(child_positions)}）"
         )
     await _stage_progress(
         tenant_id,
         job_id,
         stage=STAGE_INDEXING,
         processed_units=written,
-        total_units=len(raw_chunks),
+        total_units=len(child_positions),
     )
 
     # ---------- VALIDATING ----------
@@ -581,17 +675,21 @@ async def _run_pipeline(
         indexed = await count_points(client, collection=collection)
     finally:
         await client.close()
-    if indexed != len(raw_chunks):
+    if indexed != len(child_positions):
         raise BuildPipelineError(
             "INDEX_VALIDATE_MISMATCH",
-            f"索引对账不一致（Qdrant {indexed} vs chunks {len(raw_chunks)}）",
+            f"索引对账不一致（Qdrant {indexed} vs 子块 {len(child_positions)}）",
         )
     await _stage_progress(
         tenant_id, job_id, stage=STAGE_VALIDATING, processed_units=1, total_units=1
     )
+    dense_by_position = {
+        position: dense_vectors[child_index]
+        for child_index, position in enumerate(child_positions)
+    }
     return [
-        (chunk_ids[position], chunk, dense)
-        for position, (chunk, dense) in enumerate(zip(raw_chunks, dense_vectors, strict=True))
+        (chunk_ids[position], chunk, dense_by_position.get(position))
+        for position, chunk in enumerate(raw_chunks)
     ], collection
 
 

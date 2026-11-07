@@ -16,18 +16,21 @@
 （服务层独立事务；404 探测不审计）。
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints
 
 from app.api.pagination import PageResponse
 from app.auth.principal import Principal, require_permission
+from app.core.sse import SSE_HEADERS, format_heartbeat, format_sse
 from app.kb.service import (
     ApprovalOutcome,
+    BuildEventView,
     DocumentView,
     IncomingFile,
     KbError,
@@ -35,7 +38,9 @@ from app.kb.service import (
     create_build,
     get_build_job,
     get_document,
+    list_build_events,
     list_documents,
+    list_version_approvals,
     list_versions,
     retry_build,
     submit_version_approval,
@@ -516,4 +521,135 @@ async def retry_kb_build_job(
         started_at=snapshot.started_at,
         heartbeat_at=snapshot.heartbeat_at,
         finished_at=snapshot.finished_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# KB-03B：SSE 构建事件流 + TD-291 版本审批单查询
+# ---------------------------------------------------------------------------
+
+
+class KbVersionApprovalResponse(BaseModel):
+    """版本审批单（TD-291；复用 KB-02B 契约的关键字段）。"""
+
+    request_id: UUID
+    title: str
+    status: str
+    result: str | None
+    reject_reason: str | None
+    submitter_id: UUID
+    created_at: datetime
+    completed_at: datetime | None
+
+
+@router.get(
+    "/document-versions/{version_id}/approvals",
+    response_model=PageResponse[KbVersionApprovalResponse],
+)
+async def list_kb_version_approvals(
+    version_id: UUID,
+    viewer: Annotated[Principal, ViewerDep],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> PageResponse[KbVersionApprovalResponse]:
+    """某版本的审批单列表（created_at DESC；抽屉直显审批状态与驳回理由——TD-291）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    try:
+        approvals = await list_version_approvals(
+            tenant_id=tenant_id,
+            scope=viewer.scope_context,
+            version_id=version_id,
+            limit=limit,
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return PageResponse(
+        items=[
+            KbVersionApprovalResponse(
+                request_id=item.id,
+                title=item.title,
+                status=item.status,
+                result=item.result,
+                reject_reason=item.reject_reason,
+                submitter_id=item.submitter_id,
+                created_at=item.created_at,
+                completed_at=item.completed_at,
+            )
+            for item in approvals
+        ],
+        next_cursor=None,
+    )
+
+
+_SSE_HEARTBEAT_SECONDS = 15
+_SSE_IDLE_POLL_SECONDS = 1.0
+_SSE_MAX_STREAM_SECONDS = 3600
+
+
+@router.get("/build-jobs/{job_id}/events")
+async def stream_kb_build_events(
+    job_id: UUID,
+    viewer: Annotated[Principal, ViewerDep],
+    since: Annotated[int | None, Query(ge=0)] = None,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
+    """SSE 构建事件流（`text/event-stream`；fetch + Bearer，不用原生 EventSource）。
+
+    - 回放 `?since=<seq>`/`Last-Event-ID` 之后的事件 → 跟随新事件 →
+      `build.done`/`build.error` 后服务端关流（终态即关，不挂空流）；
+    - 空闲期 15s 心跳帧；job 终态后连入只回放历史即关；
+    - 权限同快照：`school.kb.view` + 数据范围，跨租 404。
+    """
+
+    tenant_id = _tenant_or_403(viewer)
+    # job 存在性与范围校验在连入时一次（与快照同判据）；后续事件按 seq 读取
+    try:
+        await get_build_job(tenant_id=tenant_id, scope=viewer.scope_context, job_id=job_id)
+    except KbError as exc:
+        raise _http_error(exc) from exc
+
+    # Last-Event-ID 头优先（重连语义），其次 ?since
+    after_seq = since or 0
+    if last_event_id is not None and last_event_id.isdigit():
+        after_seq = max(after_seq, int(last_event_id))
+
+    async def event_stream() -> AsyncIterator[str]:
+        import asyncio
+        import time
+
+        started = time.monotonic()
+        cursor = after_seq
+        while True:
+            events: list[BuildEventView] = []
+            try:
+                events = await list_build_events(
+                    tenant_id=tenant_id, job_id=job_id, after_seq=cursor
+                )
+            except KbError:
+                return
+            terminal_reached = False
+            for event in events:
+                cursor = event.seq
+                yield format_sse(event.event_type, {**event.payload, "seq": event.seq})
+                if event.event_type in ("build.done", "build.error"):
+                    terminal_reached = True
+            if terminal_reached:
+                return
+            # job 已终态且无新事件：回放完历史即关（终态后连入）
+            current = await get_build_job(
+                tenant_id=tenant_id,
+                scope=viewer.scope_context,
+                job_id=job_id,
+            )
+            if current.status in ("READY", "FAILED"):
+                return
+            if time.monotonic() - started > _SSE_MAX_STREAM_SECONDS:
+                return
+            yield format_heartbeat()
+            await asyncio.sleep(_SSE_IDLE_POLL_SECONDS)
+
+    return StreamingResponse(
+        event_stream(),
+        headers=SSE_HEADERS,
+        media_type="text/event-stream",
     )

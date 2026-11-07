@@ -26,6 +26,8 @@ from tests.support.dsn import assert_test_database_dsn
 from tests.support.kb_env import (
     B_UPLOADER,
     KB_BUILDER,
+    KB_SELF_APPROVER,
+    PDF,
     SCHOOL_B,
     UPLOAD_ONLY,
     VIEWER_SCHOOL,
@@ -35,6 +37,7 @@ from tests.support.kb_env import (
     login,
     make_client,
     rows,
+    upload,
 )
 
 pytestmark = [pytest.mark.integration]
@@ -86,7 +89,7 @@ class FakeEmbedder:
             [
                 int.from_bytes(hashlib.sha256(f"{text}|{i}".encode()).digest()[:2], "big")
                 / 65535.0
-                for i in range(4)
+                for i in range(1024)
             ]
             for text in texts
         ]
@@ -102,6 +105,7 @@ def _patch_ports(monkeypatch: pytest.MonkeyPatch, parser: FakeParser) -> None:
     monkeypatch.setattr(
         type(get_settings()), "kb_parser_tiers", lambda self: ["standard"], raising=True
     )
+
 
 
 @pytest.fixture(scope="module")
@@ -271,7 +275,8 @@ async def test_build_pipeline_reaches_ready_with_chunks_and_qdrant(
         )
     finally:
         await client_q.close()
-    assert indexed == len(chunk_rows)
+    child_chunk_rows = [row for row in chunk_rows if row["chunk_type"] == "child"]
+    assert indexed == len(child_chunk_rows)  # 父块不入索引（D3）
     payload = (scrolled[0][0].payload or {}) if scrolled[0] else {}
     assert payload["tenant_id_hash"] == tenant_hash(env.tenant_a)
     assert payload["version_id"] == str(version_id)
@@ -350,6 +355,7 @@ async def test_all_tiers_fail_marks_failed_and_retry_recovers(
     monkeypatch.setattr(
         type(get_settings()), "kb_parser_tiers", lambda self: ["standard"], raising=True
     )
+
     job_id, _doc, version_id = await _seed_approved_version(env, title="失败重试文档")
 
     first = await build_kb_version({}, str(env.tenant_a), str(version_id))
@@ -500,3 +506,284 @@ async def test_docx_pptx_build_fails_honestly(env: KbEnv, monkeypatch: pytest.Mo
     job = await rows("select stage, error_code from kb_build_jobs where id = :id", id=str(job_id))
     assert job[0]["stage"] == "PARSING"
     assert job[0]["error_code"] == "PARSER_UNAVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# KB-03B：事件持久化 + SSE + TD-291 + Minor 3（payload parent_id/只索子块/dim 校验）
+# ---------------------------------------------------------------------------
+
+
+async def test_build_events_persisted_in_order(env: KbEnv, monkeypatch: pytest.MonkeyPatch) -> None:
+    """全阶段构建 → kb_build_events seq 连续、类型覆盖 stage×N + progress + done。"""
+
+    markdown = "# 事件文档\n\n" + "。".join(f"内容句{n}" for n in range(30)) + "。"
+    _patch_ports(monkeypatch, FakeParser([ParsedDocument(markdown=markdown)]))
+    job_id, _doc, version_id = await _seed_approved_version(env, title="事件文档")
+
+    result = await build_kb_version({}, str(env.tenant_a), str(version_id))
+    assert result["status"] == "ready", result
+
+    events = await rows(
+        "select seq, event_type, payload_json from kb_build_events "
+        "where job_id = :id order by seq",
+        id=str(job_id),
+    )
+    assert len(events) >= 6
+    seqs = [event["seq"] for event in events]
+    assert seqs == list(range(1, len(events) + 1))
+    assert events[0]["event_type"] == "build.stage"
+    assert events[0]["payload_json"]["stage"] == "PARSING"
+    assert events[-1]["event_type"] == "build.done"
+    assert events[-1]["payload_json"]["status"] == "READY"
+    types = {event["event_type"] for event in events}
+    assert {"build.stage", "build.progress", "build.done"} <= types
+
+
+async def test_build_failure_writes_error_event(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """失败路径：build.error 是最后一 seq，payload 带错误码。"""
+
+    from app.kb import build_task
+
+    monkeypatch.setattr(build_task, "_build_embedder", lambda settings: FakeEmbedder())
+    job_id, _doc, version_id = await _seed_approved_version(
+        env,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        title="事件失败文档",
+    )
+
+    result = await build_kb_version({}, str(env.tenant_a), str(version_id))
+    assert result["status"] == "failed"
+
+    events = await rows(
+        "select seq, event_type, payload_json from kb_build_events "
+        "where job_id = :id order by seq",
+        id=str(job_id),
+    )
+    assert events[-1]["event_type"] == "build.error"
+    assert events[-1]["payload_json"]["error_code"] == "PARSER_UNAVAILABLE"
+
+
+async def test_build_events_endpoint_replay_and_since(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """SSE：回放全量 / ?since 续传 / Last-Event-ID 头等价 / 终态后流自然关闭。"""
+
+    markdown = "# 回放文档\n\n" + "。".join(f"第{n}句" for n in range(20)) + "。"
+    _patch_ports(monkeypatch, FakeParser([ParsedDocument(markdown=markdown)]))
+    job_id, _doc, version_id = await _seed_approved_version(env, title="回放文档")
+    await build_kb_version({}, str(env.tenant_a), str(version_id))
+
+    headers = await login(client, VIEWER_SCHOOL)
+    request = client.build_request(
+        "GET", f"/api/v1/school/kb/build-jobs/{job_id}/events", headers=headers
+    )
+    response = await client.send(request, stream=True)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["x-accel-buffering"] == "no"
+    body = (await response.aread()).decode("utf-8")
+    await response.aclose()
+    # 终态 job：回放完历史即关（无心跳死循环）
+    assert "event: build.stage" in body
+    assert "event: build.done" in body
+    assert body.count("event: build.done") == 1
+
+    # ?since=2：只回 seq>2
+    request = client.build_request(
+        "GET",
+        f"/api/v1/school/kb/build-jobs/{job_id}/events",
+        headers=headers,
+        params={"since": 2},
+    )
+    response = await client.send(request, stream=True)
+    body = (await response.aread()).decode("utf-8")
+    await response.aclose()
+    assert "event: build.done" in body
+    # since=2 后不应有 seq=1（seq:10/11 等含 1 的子串不算——用行首精确匹配）
+    assert 'data: {"stage":"PARSING"' not in body  # seq=1 的 stage 事件不应出现
+
+    # Last-Event-ID 头等价
+    request = client.build_request(
+        "GET",
+        f"/api/v1/school/kb/build-jobs/{job_id}/events",
+        headers={**headers, "Last-Event-ID": "2"},
+    )
+    response = await client.send(request, stream=True)
+    body = (await response.aread()).decode("utf-8")
+    await response.aclose()
+    assert 'data: {"stage":"PARSING"' not in body
+
+
+async def test_build_events_endpoint_permission(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """SSE 权限：跨租 404、无 view 403。"""
+
+    _patch_ports(monkeypatch, FakeParser([ParsedDocument(markdown="# 标题\n\n正文。")]))
+    job_id, _doc, version_id = await _seed_approved_version(env)
+    await build_kb_version({}, str(env.tenant_a), str(version_id))
+
+    b_headers = await login(client, B_UPLOADER, school_code=SCHOOL_B)
+    cross = await client.get(f"/api/v1/school/kb/build-jobs/{job_id}/events", headers=b_headers)
+    assert cross.status_code == 404
+
+    upload_headers = await login(client, UPLOAD_ONLY)
+    denied = await client.get(f"/api/v1/school/kb/build-jobs/{job_id}/events", headers=upload_headers)
+    assert denied.status_code == 403
+
+
+async def test_qdrant_payload_parent_id_and_child_only_count(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Minor 3：payload parent_id 非空指向父块；点数 == 子块数（父块不入索引）。"""
+
+    markdown = "# 父子测试\n\n" + "。".join(f"第{n}句有内容" for n in range(30)) + "。"
+    _patch_ports(monkeypatch, FakeParser([ParsedDocument(markdown=markdown)]))
+    job_id, _doc, version_id = await _seed_approved_version(env, title="父子测试")
+    await build_kb_version({}, str(env.tenant_a), str(version_id))
+    assert (await rows("select status from kb_build_jobs where id = :id", id=str(job_id)))[0][
+        "status"
+    ] == "READY"
+
+    chunk_rows = await rows(
+        "select id, chunk_type from kb_chunks where document_version_id = :id order by chunk_index",
+        id=str(version_id),
+    )
+    child_rows = [row for row in chunk_rows if row["chunk_type"] == "child"]
+    parent_ids = {str(row["id"]) for row in chunk_rows if row["chunk_type"] == "parent"}
+
+    from qdrant_client import AsyncQdrantClient
+
+    from app.kb.indexer import collection_name, count_points
+
+    settings = get_settings()
+    collection = collection_name(env.tenant_a, version_id)
+    client_q = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        indexed = await count_points(client_q, collection=collection)
+        assert indexed == len(child_rows)  # 父块不入索引
+        scrolled = await client_q.scroll(
+            collection, limit=100, with_payload=True, with_vectors=False
+        )
+    finally:
+        await client_q.close()
+    points = scrolled[0]
+    assert len(points) == len(child_rows)
+    child_chunk_ids = {str(row["id"]) for row in child_rows}
+    for point in points:
+        payload = point.payload or {}
+        assert payload["chunk_type"] == "child"
+        assert payload["parent_id"] in parent_ids  # 指向真实父块行
+        assert str(point.id) in child_chunk_ids  # 点 id == 子块 chunk 行 id
+    client_q = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        await client_q.delete_collection(collection)
+    finally:
+        await client_q.close()
+
+
+async def test_embed_dim_drift_fails_build(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4：实际维度与 KB_EMBED_DIM 漂移 → FAILED EMBED_DIM_MISMATCH。"""
+
+    class WrongDimEmbedder:
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            import hashlib
+
+            return [
+                [float(int.from_bytes(hashlib.sha256(text.encode()).digest()[:1])) % 7 + 1]
+                for text in texts
+            ]  # 1 维 ≠ 配置 1024
+
+    from app.kb import build_task
+
+    _patch_ports(monkeypatch, FakeParser([ParsedDocument(markdown="# 维度\n\n正文。")]))
+    monkeypatch.setattr(build_task, "_build_embedder", lambda settings: WrongDimEmbedder())
+    _job_id, _doc, version_id = await _seed_approved_version(env, title="维度漂移文档")
+
+    result = await build_kb_version({}, str(env.tenant_a), str(version_id))
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "EMBED_DIM_MISMATCH"
+
+
+async def test_version_approvals_endpoint_tdj291(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """TD-291：REJECTED 版本查审批单 → 理由/审批人可见；空版本返回空表；跨租 404。"""
+
+    uploader = await login(client, "kb-uploader")
+    approver = await login(client, KB_SELF_APPROVER)
+    headers_b = await login(client, B_UPLOADER, school_code=SCHOOL_B)
+
+    response = await upload(
+        client,
+        uploader,
+        key=f"td291-{uuid_module.uuid4().hex[:12]}",
+        files=[("td291.pdf", PDF, "application/pdf")],
+    )
+    assert response.status_code == 201
+    doc = response.json()["documents"][0]
+    version_id = doc["current_version"]["id"]
+
+    await execute(
+        "update kb_document_versions set status = 'PENDING_APPROVAL', scan_engine='clamav',"
+        " scanned_at=now() where id = :vid",
+        vid=version_id,
+    )
+    await execute(
+        "update kb_documents set status = 'PENDING_APPROVAL' where id = :doc", doc=doc["id"]
+    )
+
+    submit = await client.post(
+        f"/api/v1/school/kb/document-versions/{version_id}/submit-approval",
+        headers=uploader,
+    )
+    assert submit.status_code == 201
+    request_id = submit.json()["request_id"]
+    reject = await client.post(
+        f"/api/v1/school/approvals/{request_id}/reject",
+        headers=approver,
+        json={"reason": "内容与学校口径不符"},
+    )
+    assert reject.status_code == 200
+
+    listing = await client.get(
+        f"/api/v1/school/kb/document-versions/{version_id}/approvals", headers=uploader
+    )
+    assert listing.status_code == 200
+    items = listing.json()["items"]
+    assert len(items) == 1
+    assert items[0]["status"] == "REJECTED"
+    assert items[0]["reject_reason"] == "内容与学校口径不符"
+    assert items[0]["result"] == "reject"
+
+    response2 = await upload(
+        client,
+        uploader,
+        key=f"td291b-{uuid_module.uuid4().hex[:12]}",
+        files=[("td291b.pdf", PDF, "application/pdf")],
+    )
+    version2 = response2.json()["documents"][0]["current_version"]["id"]
+    await execute(
+        "update kb_document_versions set status='PENDING_APPROVAL', scan_engine='clamav',"
+        " scanned_at=now() where id = :vid",
+        vid=version2,
+    )
+    await execute(
+        "update kb_documents set status='PENDING_APPROVAL' where id = :doc",
+        doc=response2.json()["documents"][0]["id"],
+    )
+    empty = await client.get(
+        f"/api/v1/school/kb/document-versions/{version2}/approvals", headers=uploader
+    )
+    assert empty.status_code == 200
+    assert empty.json()["items"] == []
+
+    cross = await client.get(
+        f"/api/v1/school/kb/document-versions/{version_id}/approvals", headers=headers_b
+    )
+    assert cross.status_code == 404

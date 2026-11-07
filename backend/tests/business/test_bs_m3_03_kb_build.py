@@ -208,7 +208,8 @@ async def test_bs_m3_03_real_engine_build_reaches_ready(
         indexed = await count_points(client_q, collection=collection)
     finally:
         await client_q.close()
-    assert indexed == len(chunk_rows)
+    child_rows = [row for row in chunk_rows if row["chunk_type"] == "child"]
+    assert indexed == len(child_rows)  # 父块不入索引（KB-03B D3）
 
     audits = await rows(
         "select action from audit_logs where tenant_id = :tid and action in "

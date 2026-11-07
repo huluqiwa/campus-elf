@@ -23,6 +23,7 @@ from app.db.models.kb import (
     KbIndexVersion,
     KbUploadBatch,
 )
+from app.db.models.kb_events import KbBuildEvent
 from app.db.models.onboarding import SchoolReviewRecord, TenantRegistrationRequest
 from app.db.models.org import (
     Course,
@@ -61,6 +62,7 @@ __all__ = [
     "Department",
     "ImportJob",
     "ImportRowError",
+    "KbBuildEvent",
     "KbBuildJob",
     "KbChunk",
     "KbDocument",
