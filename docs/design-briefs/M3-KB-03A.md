@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 日期 | 2026-11-07 |
-| 状态 | 待用户确认（确认前不写任何生产代码） |
+| 状态 | 已完成（2026-11-07，D1–D4 全按推荐项执行；独立审查两轮 2B/6M/12m → 0B/0M/3m 全部处置；交付事实见 §9） |
 | 关联功能点 | M3 第 6 点：KB-03 构建进度与执行管线（后端 A 点；SSE/前端进度为 KB-03B 下一简报）。KB-01/KB-02 已全点合并（`3e763ca`/`d6de5a6`/`7d1ce56`/`edc34f6`/`45f84d4`） |
 | 验收引用 | `docs/milestone.md` §6.2（:247「KB-03 构建进度」）与 §6.4（:268-274）、`docs/spec.md` §3.6 KB-03（:260-272）、`docs/design.md` §7（:890-930）/§5.6（SSE 归 B 点）/§4.3（:224-227）、`docs/state-machines.md` §3/§4、TD-288（快照接口+取件执行器为本点首个交付项） |
 | 前置技术债 | **TD-288**（`BUILD_QUEUED` 无消费者 → 本点兑现）；**TD-291** 在 KB-03B 兑现（按 version 查审批单端点与前端直显同批）；TD-046（上线验证必须带一次真实 `/v1/file_parse` → 本点业务场景即兑现）；TD-041（jieba SyntaxWarning M3 评估 → 本点决策见 D3） |
@@ -155,3 +155,12 @@
   4. **D4 测试策略**：CI fake ports 全绿；真实 MinerU/TEI 用例本地跑（探测 skip）；业务场景仅本地（TD-170 同口径）。
 - 其余两项（D5 降级链、D6 worker 形态）推荐直接按 A 执行，有异议请在确认时指出。
 - **确认结论**：用户 2026-11-07 问题卡片确认 D1–D4 全按推荐项执行（① A/B 两点切分；② PDF/MD/TXT 先行，DOCX/PPTX 诚实失败 → TD-293；③ 切块可配+临时默认 500/15%/1000 → TD-294；④ fake ports 进 CI + 真实引擎本地跑）。D5/D6 未提异议，按推荐执行。
+
+## 9. 交付事实（2026-11-07）
+
+- **PR #43**（`feature/m3-kb03a-build-pipeline`，head `5186768` + 3 个测试修复 `69f5465`/`e6c0125`/`b00172f`）→ rebase 合并 **`87f9b83`**，分支已删除。合并授权：用户在 PR CI 全绿 + 复审 0B/0M 后确认。
+- **PR CI**：backend run `42376473762` **979 passed, 1 skipped（936.50s）**——skipped 为真实引擎业务场景在 CI 的预期 skip（TD-295）；四包分支覆盖率 79.92/82.41/81.25/66.67% 全过；security run `42376473695` success。首跑红在 worker 函数数守卫（3→4 未更新），3 个测试修复提交收口。
+- **审查**：两轮独立只读子智能体 **2B/6M/12m → 0B/0M/3m** 全部处置。B1 异常漏斗（Qdrant/对象存储/GBK 文本三类失败逃逸成假 STALE——九类异常全落 FAILED+error_code）；B2 arq 默认 job_timeout=300s 腰斩合法长解析（Function timeout_s=1800 显式覆盖）；M1 收口 attempt 校验（防跨 attempt 混装）；M2 QUEUED 滞留重投；M3 跨节重叠泄漏；M4 BM25 avgdl 归一。复审 3 条 Minor（Qdrant payload parent_id/父块入索引/dim 校验）随 KB-03B/KB-07 处置。
+- **本地门禁**：ruff/mypy（246 文件）/bandit×2/alembic check 全绿 + roundtrip 实测；单测 **32**；集成 **7**（真实 Qdrant）；业务场景 **1 passed（58.28s，真实 MinerU standard + TEI + Qdrant → READY，TD-046 兑现）**；迁移回滚 12 passed。
+- **TD**：TD-288 已完成（快照+取件执行器+QUEUED 重投）；TD-046 已兑现（真实解析证据）；TD-293（LibreOffice）、TD-294（切块实验+jieba 评估）、TD-295（CI GPU）已登记。
+- **实现顺序对简报 §4 的偏差**：无。
