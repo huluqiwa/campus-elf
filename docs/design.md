@@ -647,6 +647,8 @@ GET  /api/v1/platform/tenants/{id}/review-records
 | POST | `/school/approvals/{id}/approve` | 通过 |
 | POST | `/school/approvals/{id}/reject` | 驳回（理由必填） |
 | POST | `/school/approvals/{id}/cancel` | 提交人撤销自己的 PENDING 单（KB-02；`school.kb.upload` 自助路径，引擎强校验 submitter） |
+
+**M3 KB-02B 已实现（前端，2026-11-07）**：审批中心页 `/approvals`（挂 `school.approval.todo`；待办/已办两 tab 游标分页 + 详情抽屉：版本快照、步骤与动作留痕、驳回理由）；通过/驳回挂 `school.kb.approval`（通过一次确认、驳回理由前端先拦 strip 非空 + ≤500 码点）、撤销挂 `school.kb.upload` 自助（提交人判据）；自批**不做前端预判**（前端无版本归属数据，403 交后端裁决）。KB 文档抽屉入口：按状态+权限给「提交审批」（仅 `PENDING_APPROVAL`）/「创建构建」（仅 `APPROVED`），重复动作吃后端 409（服务端是唯一门禁）；REJECTED 文档给「到审批中心 → 已办查看」指引（文档维度直显理由挂 TD-291 → KB-03）；`kb-logic` 补 `APPROVED/REJECTED` 文案。mock 判据以函数名锚点手抄后端（TD-253 口径），全栈链路缺口登记 TD-292。
 | POST | `/campus/leaves` | 学生提交请假 |
 | GET | `/campus/leaves` | 我的请假 |
 | POST | `/campus/leaves/{id}/withdraw` | 撤回 |

@@ -22,6 +22,8 @@ const MENU: MenuItem[] = [
   { index: "/departments", title: "部门树", permission: "school.personnel.view" },
   { index: "/kb/documents", title: "知识库", permission: "school.kb.view" },
   { index: "/kb/upload", title: "上传文档", permission: "school.kb.upload" },
+  // M3 KB-02B：审批中心（通过/驳回另有 school.kb.approval，抽屉内按码给控件）
+  { index: "/approvals", title: "审批中心", permission: "school.approval.todo" },
   { index: "/imports", title: "批量导入", permission: "school.personnel.import" },
   { index: "/rollover", title: "学年流转", permission: "school.org.manage" },
   { index: "/settings/roles", title: "角色权限", permission: "school.role.manage" },

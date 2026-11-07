@@ -201,11 +201,14 @@ export interface KbStatusMeta {
   tone: KbTone;
 }
 
-/** 文档状态三档（`school_kb.py` 的 `status`）；未知档位显示原码，不默认成安全态。 */
+/** 文档状态五档（`school_kb.py` 的 `status`；KB-02 起 +APPROVED/REJECTED）；未知档位显示原码，不默认成安全态。 */
 const DOCUMENT_STATUS_META: Record<string, KbStatusMeta> = {
   UPLOADED: { label: "待扫描/扫描中", tone: "info" },
   PENDING_APPROVAL: { label: "待审批", tone: "success" },
   SCAN_FAILED: { label: "扫描未通过", tone: "danger" },
+  // KB-02：审批结论两态。APPROVED 用 info（可以建构建了但还没建），成功绿留给发布后的终态。
+  APPROVED: { label: "已审批·待构建", tone: "info" },
+  REJECTED: { label: "已驳回", tone: "danger" },
 };
 
 export function documentStatusMeta(status: string): KbStatusMeta {
