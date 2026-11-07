@@ -21,6 +21,9 @@ from app.db.models.kb import (
     KbDocument,
     KbDocumentVersion,
     KbIndexVersion,
+    KbTestCase,
+    KbTestRun,
+    KbTestSet,
     KbUploadBatch,
 )
 from app.db.models.kb_events import KbBuildEvent
@@ -68,6 +71,9 @@ __all__ = [
     "KbDocument",
     "KbDocumentVersion",
     "KbIndexVersion",
+    "KbTestCase",
+    "KbTestRun",
+    "KbTestSet",
     "KbUploadBatch",
     "MfaRecoveryCode",
     "OrgClass",

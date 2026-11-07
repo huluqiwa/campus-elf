@@ -154,3 +154,49 @@ async def count_points(client: AsyncQdrantClient, *, collection: str) -> int:
         logger.warning("Qdrant count 失败：%s.%s", type(exc).__module__, type(exc).__name__)
         raise IndexError_("INDEX_COUNT_FAILED", "向量索引计数失败") from exc
     return int(result.count)
+
+
+async def search_points(
+    client: AsyncQdrantClient,
+    *,
+    collection: str,
+    dense: list[float],
+    sparse: SparseVector,
+    top_k: int = 10,
+) -> list[dict[str, Any]]:
+    """Qdrant 混合检索（dense + sparse → 服务端 RRF 融合，design §7.5）。
+
+    返回 `[{"chunk_id": str, "score": float, "payload": dict}]`，按 RRF 分数降序。
+    """
+
+    try:
+        response = await client.query_points(
+            collection,
+            prefetch=[
+                qmodels.Prefetch(query=dense, using="dense", limit=top_k * 2),
+                qmodels.Prefetch(
+                    query=qmodels.SparseVector(
+                        indices=sparse.indices, values=sparse.values
+                    ),
+                    using="sparse",
+                    limit=top_k * 2,
+                ),
+            ],
+            query=qmodels.FusionQuery(fusion=qmodels.Fusion.RRF),
+            limit=top_k,
+            with_payload=True,
+        )
+    except Exception as exc:
+        logger.warning("Qdrant search 失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise IndexError_("SEARCH_FAILED", "向量检索失败") from exc
+    results = []
+    for point in response.points:
+        payload = point.payload or {}
+        results.append(
+            {
+                "chunk_id": str(point.id),
+                "score": point.score,
+                "payload": payload,
+            }
+        )
+    return results

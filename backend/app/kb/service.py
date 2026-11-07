@@ -1573,6 +1573,245 @@ async def list_version_approvals(
         return [_request_view(row, type_codes.get(row.type_id, "")) for row in rows_out]
 
 
+async def create_test_set(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    name: str,
+    file_data: bytes,
+    filename: str,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    """上传测试集（解析 + 行级校验 + 落库；整批原子）。"""
+
+    from app.kb.test_parser import TestSetParseError, detect_test_set_format, parse_test_set
+
+    fmt = detect_test_set_format(filename)
+    try:
+        parse_result = parse_test_set(file_data, fmt)
+    except TestSetParseError as exc:
+        raise KbError(exc.code, exc.message, 422) from exc
+    if not parse_result.is_valid:
+        raise KbError(
+            "TEST_SET_INVALID",
+            f"测试集校验失败（{len(parse_result.errors)} 条行级错误），整批未保存",
+            422,
+            extra={"errors": parse_result.errors[:20]},
+        )
+    if len(parse_result.cases) > 200:
+        raise KbError("TOO_MANY_CASES", "测试集最多 200 条用例", 422)
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+                session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            version = await version_repository.get(version_id)
+            if version is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            store = build_object_store(get_settings())
+            object_key = f"kb-test-sets/{tenant_id}/{version_id}/{uuid4()}/{filename}"
+            await store.put(object_key, file_data, "application/octet-stream")
+            from app.db.models.kb import KbTestCase, KbTestSet
+
+            set_id = uuid4()
+            test_set = KbTestSet(
+                id=set_id,
+                tenant_id=tenant_id,
+                document_version_id=version_id,
+                name=name,
+                file_object_key=object_key,
+                file_format=fmt,
+                case_count=len(parse_result.cases),
+                created_by=user_id,
+            )
+            set_repository: TenantScopedRepository[KbTestSet] = TenantScopedRepository(
+                session, KbTestSet, tenant_id,
+                scope=ScopeBypass(reason="测试集上传：按版本 id 操作，school.kb.test 判据在外层"),
+            )
+            await set_repository.add(test_set)
+            await session.flush()
+            case_repository: TenantScopedRepository[KbTestCase] = TenantScopedRepository(
+                session, KbTestCase, tenant_id,
+                scope=ScopeBypass(reason="测试集上传：写入用例行，系统执行者"),
+            )
+            for case in parse_result.cases:
+                await case_repository.add(
+                    KbTestCase(
+                        tenant_id=tenant_id,
+                        test_set_id=set_id,
+                        row_no=case.row_no,
+                        question=case.question,
+                        expected_answer=case.expected_answer,
+                        expected_points=case.expected_points,
+                        expected_chunk_ids=case.expected_chunk_ids,
+                        category=case.category,
+                        is_adversarial=case.is_adversarial,
+                    )
+                )
+            await append_audit(
+                session,
+                action="school.kb.test_set.created",
+                resource_type="kb_document_version",
+                resource_id=str(version_id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={"test_set_id": str(set_id), "name": name, "case_count": len(parse_result.cases), "format": fmt},
+                request_id=request_id,
+            )
+            await session.flush()
+            return {"test_set_id": set_id, "name": name, "case_count": len(parse_result.cases)}
+    except KbError:
+        raise
+    except Exception as exc:
+        logger.warning("测试集上传失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise KbError("TEST_SET_UPLOAD_FAILED", "测试集上传失败，请稍后重试", 503) from exc
+
+
+async def start_test_run(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    test_set_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    """发起测试运行（门禁：READY/TEST_FAILED/TEST_PASSED 可测试；活跃 run 唯一）。"""
+
+    from app.kb.status import NotTestableError, assert_test_allowed
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+                session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            version = await version_repository.get(version_id)
+            if version is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            try:
+                assert_test_allowed(version.status)
+            except NotTestableError as exc:
+                raise KbError("KB_NOT_TESTABLE", str(exc), 409) from exc
+            from app.db.models.kb import KbTestRun, KbTestSet
+
+            test_set = await TenantScopedRepository(
+                session, KbTestSet, tenant_id,
+                scope=ScopeBypass(reason="测试运行：读取测试集，school.kb.test 判据在外层"),
+            ).get(test_set_id)
+            if test_set is None or test_set.document_version_id != version_id:
+                raise KbError("TEST_SET_NOT_FOUND", "测试集不存在或不属于该版本", 404)
+            run_repository: TenantScopedRepository[KbTestRun] = TenantScopedRepository(
+                session, KbTestRun, tenant_id,
+                scope=ScopeBypass(reason="测试运行：创建运行，school.kb.test 判据在外层"),
+            )
+            active = (
+                await session.execute(
+                    run_repository.base_query().where(
+                        KbTestRun.version_id == version_id,
+                        KbTestRun.status == "TESTING",
+                    )
+                )
+            ).scalar_one_or_none()
+            if active is not None:
+                raise KbError(
+                    "TEST_ALREADY_RUNNING",
+                    "该版本已有进行中的测试运行",
+                    409,
+                    extra={"run_id": str(active.id)},
+                )
+            run_id = uuid4()
+            run = KbTestRun(
+                id=run_id,
+                tenant_id=tenant_id,
+                test_set_id=test_set_id,
+                version_id=version_id,
+                status="TESTING",
+                started_by=user_id,
+                started_at=datetime.now(UTC),
+            )
+            await run_repository.add(run)
+            await session.flush()
+            await append_audit(
+                session,
+                action="school.kb.test.started",
+                resource_type="kb_document_version",
+                resource_id=str(version_id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={"run_id": str(run_id), "test_set_id": str(test_set_id)},
+                request_id=request_id,
+            )
+            run_created = run.created_at
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.test.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"version_id": str(version_id), "test_set_id": str(test_set_id)},
+            )
+        raise
+
+    from app.workers.settings import create_producer_pool
+
+    pool = None
+    try:
+        pool = await create_producer_pool()
+        await pool.enqueue_job("run_kb_test", str(tenant_id), str(version_id))
+    except Exception as exc:
+        logger.warning("测试任务入队失败：%s.%s", type(exc).__module__, type(exc).__name__)
+    finally:
+        if pool is not None:
+            with contextlib.suppress(Exception):
+                await pool.aclose()
+
+    return {"run_id": run_id, "version_id": version_id, "test_set_id": test_set_id, "status": "TESTING", "created_at": run_created}
+
+
+async def get_test_run(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    run_id: UUID,
+) -> dict[str, Any]:
+    """查询测试运行结果（metrics_json 全字段）。"""
+
+    async with db_session(tenant_id=tenant_id) as session:
+        from app.db.models.kb import KbTestRun
+
+        run = await TenantScopedRepository(
+            session, KbTestRun, tenant_id,
+            scope=ScopeBypass(reason="测试查询：按 run id 精确读取，外层 school.kb.view 判据"),
+        ).get(run_id)
+        if run is None:
+            raise KbError("TEST_RUN_NOT_FOUND", "测试运行不存在", 404)
+        version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+            session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+        )
+        version = await version_repository.get(run.version_id)
+        if version is None:
+            raise KbError("TEST_RUN_NOT_FOUND", "测试运行不存在", 404)
+        return {
+            "run_id": run.id,
+            "version_id": run.version_id,
+            "test_set_id": run.test_set_id,
+            "status": run.status,
+            "metrics_json": run.metrics_json,
+            "started_by": run.started_by,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+        }
+
+
 async def get_build_job(
     *,
     tenant_id: UUID,

@@ -382,3 +382,130 @@ class KbIndexVersion(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Bas
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="building")
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+TEST_SET_FORMATS = ("csv", "xlsx", "json")
+_TEST_SET_FORMAT_SQL = ", ".join(f"'{f}'" for f in TEST_SET_FORMATS)
+TEST_RUN_STATUSES = ("TESTING", "TEST_PASSED", "TEST_FAILED", "STALE")
+_TEST_RUN_STATUS_SQL = ", ".join(f"'{s}'" for s in TEST_RUN_STATUSES)
+
+
+class KbTestSet(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """测试集（M3 KB-04A；CSV/XLSX/JSON 上传 → 行级校验 → 落库）。"""
+
+    __tablename__ = "kb_test_sets"
+    __table_args__ = (
+        CheckConstraint(
+            f"file_format IN ({_TEST_SET_FORMAT_SQL})", name="file_format_valid"
+        ),
+        CheckConstraint("case_count >= 0", name="case_count_nonnegative"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_kb_test_sets_tenant_id_tenants",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["document_version_id", "tenant_id"],
+            ["kb_document_versions.id", "kb_document_versions.tenant_id"],
+            name="fk_kb_test_sets_document_version_id_kb_document_versions",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["created_by", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_kb_test_sets_created_by_users",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_kb_test_sets_id_tenant_id"),
+        Index("ix_kb_test_sets_tenant_id", "tenant_id"),
+        Index("ix_kb_test_sets_document_version_id", "document_version_id"),
+    )
+
+    document_version_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    file_object_key: Mapped[str] = mapped_column(String(300), nullable=False)
+    file_format: Mapped[str] = mapped_column(String(10), nullable=False)
+    case_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+
+
+class KbTestCase(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """测试用例（一行一条；question 必填，其余可选）。"""
+
+    __tablename__ = "kb_test_cases"
+    __table_args__ = (
+        CheckConstraint("row_no >= 1", name="row_no_positive"),
+        ForeignKeyConstraint(
+            ["test_set_id", "tenant_id"],
+            ["kb_test_sets.id", "kb_test_sets.tenant_id"],
+            name="fk_kb_test_cases_test_set_id_kb_test_sets",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_kb_test_cases_id_tenant_id"),
+        UniqueConstraint("test_set_id", "row_no", name="uq_kb_test_cases_test_set_row_no"),
+        Index("ix_kb_test_cases_tenant_id", "tenant_id"),
+        Index("ix_kb_test_cases_test_set_id", "test_set_id"),
+    )
+
+    test_set_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    row_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_answer: Mapped[str | None] = mapped_column(Text)
+    expected_points: Mapped[list[str] | None] = mapped_column(JSONB)
+    expected_chunk_ids: Mapped[list[str] | None] = mapped_column(JSONB)
+    category: Mapped[str | None] = mapped_column(String(64))
+    is_adversarial: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+
+class KbTestRun(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """测试运行（READY→TESTING→TEST_PASSED/FAILED；活跃唯一由部分唯一索引兜底）。"""
+
+    __tablename__ = "kb_test_runs"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_TEST_RUN_STATUS_SQL})", name="status_valid"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_kb_test_runs_tenant_id_tenants",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["test_set_id", "tenant_id"],
+            ["kb_test_sets.id", "kb_test_sets.tenant_id"],
+            name="fk_kb_test_runs_test_set_id_kb_test_sets",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["version_id", "tenant_id"],
+            ["kb_document_versions.id", "kb_document_versions.tenant_id"],
+            name="fk_kb_test_runs_version_id_kb_document_versions",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["started_by", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_kb_test_runs_started_by_users",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_kb_test_runs_id_tenant_id"),
+        Index(
+            "uq_kb_test_runs_tenant_version_testing",
+            "tenant_id",
+            "version_id",
+            unique=True,
+            postgresql_where=text("status = 'TESTING'"),
+        ),
+        Index("ix_kb_test_runs_tenant_id", "tenant_id"),
+    )
+
+    test_set_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    version_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, server_default="TESTING")
+    metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    report_object_key: Mapped[str | None] = mapped_column(String(300))
+    started_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
