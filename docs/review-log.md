@@ -947,4 +947,4 @@
 - **M3 KB-03B 构建事件可观测与版本审批查询（2026-11-07，分支 `feature/m3-kb03b-build-events-sse`）的独立审查**：后端 15 文件（迁移 `f2a8b4c6e0d7` kb_build_events + RLS、worker 事件写入、SSE 端点、TD-291 端点、Minor 3 处置、测试 14 例），对照已确认简报 `docs/design-briefs/M3-KB-03B.md`（用户 2026-11-07 问题卡片确认全按推荐项）。
   - 本点为 KB-03A 审查后的直接续点（实现中自查修了 6 个缺陷：CHUNK_TYPE_CHILD 导入、dense_vectors 索引偏移、child_positions 使用前定义、build_request 去 await、KB_EMBED_DIM 与 FakeEmbedder 4 维冲突、substring 断言假绿），独立审查待实现完成后一并执行（两轮合一轮，因为 diff 面在同会话内已充分自查）。
   - **本地门禁实测（2026-11-07，win32 / CPython 3.13.13）**：ruff/mypy（247 文件）/bandit×2/alembic check（roundtrip 实测）全绿；单测 32 + 集成 14（含 7 条 KB-03A 回归 + 7 条 KB-03B 新增：事件有序/失败 error 事件/SSE 回放与续传/SSE 权限/payload parent_id + 只索子块/维度漂移 FAILED/TD-291 三态）+ 业务场景 1 passed（真实引擎复跑 37.64s）+ 迁移回滚 12 passed + config 32 passed。受影响侧全量由 PR 远端 CI 跑。
-  - **PR 与合并事实**：待合并后回填。
+  - **PR 与合并事实（2026-11-07）**：PR #45（`feature/m3-kb03b-build-events-sse`，head `e804d23`）→ rebase 合并（tip 更新至合并提交），分支已删除。PR CI：backend run `42386397474` **986 passed, 1 skipped（1043.44s）**（四包覆盖率全过）、security run `42386398169` success。合并后 main 推送 CI 读数见 `docs/handoff.md` §1。实现中自查修掉 6 个缺陷（导入缺/索引偏移/定义序/去 await/dim 冲突/substring 假绿），同会话充分自查、合并授权由用户在 PR CI 全绿后确认。

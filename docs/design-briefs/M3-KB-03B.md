@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 日期 | 2026-11-07 |
-| 状态 | 待用户确认（确认前不写任何生产代码） |
+| 状态 | 已完成（2026-11-07，全按推荐项执行；实现中自查 + 合并后 main CI 验证；交付事实见 §9） |
 | 关联功能点 | M3 第 7 点：KB-03B（KB-03 的收尾点；KB-03A 管线已合并 `87f9b83`）。**本点后端收尾后，前端进度 UI 随 KB-03B2 下一简报**（A/B 切分既定节奏） |
 | 验收引用 | `docs/design.md` §5.6（:618-640）/§5.5（:460-462）、`docs/spec.md` §3.6 KB-03（:260-272）、`docs/state-machines.md` §4、`docs/tech-debt.md` TD-291（已采纳 → KB-03）/review-log Minor 3（KB-03B 处置承诺） |
 | 不做的事 | 前端进度 UI 与轮询兜底的消费侧（KB-03B2 下一简报；本点交付 SSE 端点与快照已足够前端开发）；发布/alias（KB-05）；测试沙箱（KB-04）；审计侧新增 |
@@ -126,3 +126,11 @@
   4. **D4 `KB_EMBED_DIM=1024` 构建期校验**。
 - D5（列表端点复用响应模型）推荐直接按 A 执行，有异议请在确认时指出。
 - **确认结论**：用户 2026-11-07 问题卡片确认全部按推荐项执行（① worker 同事务写事件；② 终态即关流；③ 只索引子块；④ KB_EMBED_DIM=1024 构建期校验；⑤ TD-291 列表端点复用响应模型）。
+
+## 9. 交付事实（2026-11-07）
+
+- **PR #45**（`feature/m3-kb03b-build-events-sse`，head `e804d23`）→ rebase 合并（合并提交见 git log），分支已删除。合并授权：用户在 PR CI 全绿后确认。
+- **PR CI**：backend run `42386397474` **986 passed, 1 skipped（1043.44s / 17:23）**（skipped=真实引擎 CI skip，TD-295 口径；986 = KB-03A 的 979 + 本点 7 新增）；四包分支覆盖率 79.92/82.41/81.25/66.67% 全过；security run `42386398169` success（50s）。
+- **本地门禁**：ruff/mypy（247 文件）/bandit×2/alembic check（roundtrip 实测）全绿；单测 32 + 集成 14（KB-03A 回归 7 + 本点 7）+ 业务场景 1 passed（37.64s 真实引擎复跑）+ 迁移回滚 12 + config 32。
+- **实现中自查修掉的 6 个缺陷**：CHUNK_TYPE_CHILD 导入缺、dense_vectors 索引偏移（只嵌子块后 dense 按子块序）、child_positions 使用前定义、build_request 去 await（同步方法）、KB_EMBED_DIM 与 FakeEmbedder 4 维冲突（改 1024 维）、substring 断言假绿（"seq":1 会命中 "seq":10）。
+- **TD**：TD-291 已兑现端点（前端直显随 KB-03B2）；TD-296（前端进度 UI → KB-03B2）、TD-297（SSE 压测 → M6）已登记。
