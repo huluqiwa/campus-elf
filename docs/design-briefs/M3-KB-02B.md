@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 日期 | 2026-11-07 |
-| 状态 | 已实现（2026-11-07，用户确认全按推荐项执行；独立审查两轮整改中，合并事实与 CI 读数待回填 §9） |
+| 状态 | 已完成（2026-11-07，用户确认全按推荐项执行；独立审查两轮 0B/2M/7m → 0B/0M/4m 全部处置；交付事实见 §9） |
 | 关联功能点 | M3 第 5 点：KB-02B 审批中心前端（KB-02 后端已合并 `edc34f6`，全部接口真实可用） |
 | 验收引用 | `docs/spec.md` §3.6 KB-02（:250-258）、`docs/design.md` §5.10（:629-639）、`docs/design-briefs/M3-KB-02.md` §1（后端契约已交付）、KB-01B 前端先例（简报 `M3-KB-01B-frontend.md` D1–D9） |
 | 不做的事 | 后端改动（`backend/` 零改动，见 D2 驳回理由可见性的边界）；构建进度展示（KB-03）；请假/账号删除的审批类型（M5）；全栈 E2E（TD-170 口径维持仅本地，本点不新增）；未审批文档的编辑/再上传（KB-05） |
@@ -128,3 +128,13 @@
   2. **D1 审批中心独立路由 `/approvals`**（挂 `school.approval.todo`），不做进 KB 文档页。
   3. **D3 通过一次确认、驳回理由先拦**（无逐字确认）。
 - **确认结论**：用户 2026-11-07 问题卡片确认全部按推荐项执行（① D2 纯前端+指引，TD-291 去向 KB-03；② D1 独立路由 `/approvals`；③ D3 通过一次确认、驳回理由先拦；④ D4 独立 approval-mock）。
+
+## 9. 交付事实（2026-11-07）
+
+- **PR #41**（`feature/m3-kb02b-approval-frontend`，head `634b623`）→ rebase 合并 **`45f84d4`**，分支已删除。
+- **PR CI**：frontend/e2e run `42361593542`（单测 **80 + 137 passed**、Playwright **137 passed / 2.3m**，与本地读数逐项一致）、security run `42361593541` success（42s）。
+- **合并后 main（tip `45f84d4`）推送 CI**：frontend run `42365771452`（单测 **80 + 137 passed**、Playwright **137 passed / 2.1m**，与 PR run 逐项一致）、security run `42365771466` success。
+- **本地门禁**：`pnpm typecheck` / `lint` / `format:check` / `build` 全绿；单测 **217**（api-client 80 + admin 137）；mock E2E 全量 **137 passed**（基线 120 + approvals 13 + KB +4）；`backend/` 零改动。TD-254 前检在开发中两次正确拦截（改 `.vue`/spec 后未 build 即跑 E2E 被拒）。
+- **审查**：两轮独立只读子智能体 **0B/2M/7m → 0B/0M/4m** 全部处置（Major＝kb-logic 两档文案单测缺、文档同批缺；复审确认 409 emit-changed 时序无竞态、「他人处理的单不入我的已办」与后端 `list_done` 语义一致）。
+- **TD**：TD-291（文档维度驳回理由 → KB-03）、TD-292（审批/构建全栈 E2E → M3 收尾或 KB-05 前）已登记。
+- **实现顺序对简报 §4 的偏差**：无——api-client → 逻辑层 → 页面/抽屉 → mock/E2E → 门禁 → 审查按序执行。
