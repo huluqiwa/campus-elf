@@ -134,3 +134,10 @@
   4. **D6 后端先行**（KB-04B 前端下一简报）。
 - 其余两项（D2 解析格式、D4 Qdrant 原生 RRF）推荐直接按 A 执行，有异议请在确认时指出。
 - **确认结论**：按推荐项执行（用户未逐项响应，沿用既有惯例）。
+
+## 9. 交付事实（2026-11-08）
+
+- **PR #47**（`feature/m3-kb04a-test-sandbox`，head `df780bc`）→ rebase 合并，分支已删除。合并授权：用户在 PR CI 全绿后确认。
+- **PR CI**：backend run `42393250936` **986 passed, 1 skipped（992.33s / 16:32）**（skipped=真实引擎 CI skip，TD-295）；四包分支覆盖率 79.92/82.41/81.25/66.67% 全过；security run `42393251058` success。
+- **本地门禁**：ruff/mypy（249 文件）/bandit×2/alembic check（roundtrip 实测）全绿；67 passed（KB-03A/B 回归 + 新增测试）。
+- **TD**：TD-298（LLM 回答+Ragas → M4）、TD-299（100% 阈值调整 → TD-294）、TD-300（测试集版本绑定 → KB-08）已登记。
