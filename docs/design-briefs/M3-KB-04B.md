@@ -44,3 +44,10 @@
 |---|---|---|
 | TD-301 | SSE 进度条未做（TD-296 延后口径不变） | 维持延后 |
 EOF
+
+## 9. 交付事实（2026-11-08）
+
+- **PR #49**（`feature/m3-kb04b-test-frontend`，head `ad1b3c9`）→ rebase 合并，分支已删除。合并授权：用户在 PR CI 全绿后确认。
+- **PR CI**：frontend/e2e run（单测 **85 + 146 passed**、Playwright **139 passed / 3m17s**）、security run success。
+- **本地门禁**：typecheck/lint/format/build 全绿；单测 **231**（85+146，+14）；mock E2E **139 passed**（基线 137 + 测试沙箱 2 条）；`backend/` 零改动。
+- **TD**：TD-291 已兑现（前端直显审批驳回理由，替换 KB-02B 静态指引）；TD-296 维持延后。

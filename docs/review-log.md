@@ -954,4 +954,4 @@
 - **M3 KB-04B 测试沙箱前端（2026-11-08，分支 `feature/m3-kb04b-test-frontend`）**：纯前端 10 文件（api-client `testSet.ts` 4 方法 + 契约类型、`test-logic.ts` 纯函数层、KB 抽屉测试区块 + TD-291 直显、mock E2E +2 条），`backend/` 零改动，对照已确认简报 `docs/design-briefs/M3-KB-04B.md`（按推荐项执行：D1 KB 抽屉内测试区、D2 TD-291 动态替换）。
   - **实现中自查修掉的缺陷**：el-alert type 'danger'→'error'（Element Plus 契约）；KB_TEST_CODE 未使用导入、testSectionHint 未使用变量、loadLatestTestRun 参数未使用；build_request 去 await（同步方法）；`"\n"` 在 heredoc 中被展开为真换行（unterminated string literal）。
   - **本地门禁实测（2026-11-08，win32 / Node 24）**：typecheck/lint/format/build 全绿；单测 **231**（api-client 85 = 80+5、admin 146 = 137+9）；mock E2E 全量 **139 passed**（基线 137 + KB 抽屉测试沙箱 +2 条）；`backend/` 零改动。受影响侧全量由 PR 远端 CI 跑。
-  - **PR 与合并事实**：待合并后回填。
+  - **PR 与合并事实（2026-11-08）**：PR #49（`feature/m3-kb04b-test-frontend`，head `ad1b3c9`）→ rebase 合并，分支已删除。PR CI：frontend/e2e run（单测 **85 + 146 passed**、Playwright **139 passed / 3m17s**）、security success。合并后 main 推送 CI 读数见 `docs/handoff.md` §1。
