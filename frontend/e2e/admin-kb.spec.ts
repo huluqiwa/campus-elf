@@ -534,3 +534,130 @@ test("轮询截止③：超过 5 分钟停止刷新并提示手动查看", async
   await page.waitForTimeout(6000);
   expect(captures.detailIds).toHaveLength(0);
 });
+
+// ---------------------------------------------------------------------------
+// M3 KB-02B：文档抽屉的审批入口（提交审批 / 创建构建 / REJECTED 指引）
+// ---------------------------------------------------------------------------
+
+import { mockApprovalsApi } from "./helpers/approval-mock";
+import { FIXTURE_KB_DOCUMENTS } from "./helpers/kb-mock";
+
+test("抽屉审批入口：PENDING_APPROVAL + upload 权限可提交，成功后本抽屉会话内禁用", async ({
+  page,
+}) => {
+  // 独占版本（不与 approval 夹具共享），提交走 201
+  const doc = kbDocument({
+    id: "60000000-0000-0000-0000-0000000000a1",
+    title: "可提交样例",
+    status: "PENDING_APPROVAL",
+    current_version: kbVersion({
+      id: "61000000-0000-0000-0000-0000000000a1",
+      filename: "可提交样例.pdf",
+    }),
+  });
+  await mockAuth(page, { authenticated: true, user: { permissions: BOTH } });
+  await mockKbApi(page, { documents: [doc] });
+  await mockApprovalsApi(page, { documents: [doc] });
+
+  await page.goto("/kb/documents");
+  await page
+    .locator(".el-table__row", { hasText: "可提交样例" })
+    .getByRole("button", { name: "查看" })
+    .click();
+  const drawer = page.getByTestId("kb-document-drawer");
+  await expect(drawer).toBeVisible();
+
+  await drawer.getByTestId("kb-submit-approval").click();
+  await expect(page.getByText("已提交审批，可在「审批中心 → 已办」查看进度或撤销")).toBeVisible();
+  await expect(drawer.getByTestId("kb-submit-approval-done")).toBeDisabled();
+  await expect(drawer.getByTestId("kb-submit-approval")).toHaveCount(0);
+});
+
+test("抽屉审批入口：同版本已有待审批单 → 后端 409 提示，不发整页刷新", async ({ page }) => {
+  // 夹具第一条待审批单挂在 校园安全手册 v...0001 上 → 提交同一版本命中 APPROVAL_ALREADY_PENDING
+  await mockAuth(page, { authenticated: true, user: { permissions: BOTH } });
+  await mockKbApi(page, { documents: FIXTURE_KB_DOCUMENTS });
+  await mockApprovalsApi(page, { documents: FIXTURE_KB_DOCUMENTS });
+
+  await page.goto("/kb/documents");
+  await page
+    .locator(".el-table__row", { hasText: "校园安全手册" })
+    .getByRole("button", { name: "查看" })
+    .click();
+  const drawer = page.getByTestId("kb-document-drawer");
+  await expect(drawer).toBeVisible();
+
+  await drawer.getByTestId("kb-submit-approval").click();
+  await expect(page.getByText("该版本已有待审批的申请")).toBeVisible();
+});
+
+test("抽屉构建入口：APPROVED + build 权限可创建，重复创建吃 409", async ({ page }) => {
+  const doc = kbDocument({
+    id: "60000000-0000-0000-0000-0000000000b1",
+    title: "已审批样例",
+    status: "APPROVED",
+    current_version: kbVersion({
+      id: "61000000-0000-0000-0000-0000000000b1",
+      filename: "已审批样例.pdf",
+      status: "APPROVED",
+    }),
+  });
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: [...BOTH, "school.kb.build"] },
+  });
+  await mockKbApi(page, { documents: [doc] });
+  const approvals = await mockApprovalsApi(page, { documents: [doc] });
+
+  await page.goto("/kb/documents");
+  await page
+    .locator(".el-table__row", { hasText: "已审批样例" })
+    .getByRole("button", { name: "查看" })
+    .click();
+  const drawer = page.getByTestId("kb-document-drawer");
+  await expect(drawer).toBeVisible();
+
+  await drawer.getByTestId("kb-create-build").click();
+  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText("构建任务已创建（BUILD_QUEUED）")).toBeVisible();
+  expect(approvals.state.jobs).toHaveLength(1);
+
+  // 重开抽屉：会话内记忆复位，再点 → 后端 409 BUILD_ALREADY_ACTIVE
+  await page.locator(".el-drawer__close-btn").click();
+  await page
+    .locator(".el-table__row", { hasText: "已审批样例" })
+    .getByRole("button", { name: "查看" })
+    .click();
+  await expect(drawer).toBeVisible();
+  await drawer.getByTestId("kb-create-build").click();
+  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText("该版本已有进行中的构建任务")).toBeVisible();
+  expect(approvals.state.jobs).toHaveLength(1);
+});
+
+test("REJECTED 文档：显示已驳回文案与审批中心指引，无入口按钮", async ({ page }) => {
+  const doc = kbDocument({
+    id: "60000000-0000-0000-0000-0000000000c1",
+    title: "被驳回样例",
+    status: "REJECTED",
+    current_version: kbVersion({
+      id: "61000000-0000-0000-0000-0000000000c1",
+      filename: "被驳回样例.pdf",
+      status: "REJECTED",
+    }),
+  });
+  await mockAuth(page, { authenticated: true, user: { permissions: BOTH } });
+  await mockKbApi(page, { documents: [doc] });
+  await mockApprovalsApi(page, { documents: [doc] });
+
+  await page.goto("/kb/documents");
+  const row = page.locator(".el-table__row", { hasText: "被驳回样例" });
+  await expect(row).toContainText("已驳回");
+  await row.getByRole("button", { name: "查看" }).click();
+  const drawer = page.getByTestId("kb-document-drawer");
+  await expect(drawer).toBeVisible();
+
+  await expect(drawer.getByTestId("kb-reject-guidance")).toContainText("审批中心 → 已办");
+  await expect(drawer.getByTestId("kb-submit-approval")).toHaveCount(0);
+  await expect(drawer.getByTestId("kb-create-build")).toHaveCount(0);
+});

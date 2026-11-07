@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from "vue-router";
 
 import { useAuthStore } from "../stores/auth";
 import AdminLayout from "../views/AdminLayout.vue";
+import ApprovalsView from "../views/ApprovalsView.vue";
 import ChangePasswordView from "../views/ChangePasswordView.vue";
 import ClassesView from "../views/ClassesView.vue";
 import DepartmentsView from "../views/DepartmentsView.vue";
@@ -78,6 +79,14 @@ export const router = createRouter({
           name: "kb-upload",
           component: KbUploadView,
           meta: { requiresAuth: true, permission: "school.kb.upload" },
+        },
+        {
+          // M3 KB-02B：审批中心挂 school.approval.todo；通过/驳回另有 school.kb.approval，
+          // 在详情抽屉内按码给控件（菜单只是体验，逐请求 403 由后端裁决）
+          path: "approvals",
+          name: "approvals",
+          component: ApprovalsView,
+          meta: { requiresAuth: true, permission: "school.approval.todo" },
         },
         {
           path: "imports",

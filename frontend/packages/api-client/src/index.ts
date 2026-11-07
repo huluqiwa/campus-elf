@@ -132,3 +132,15 @@ export {
   type UserBindingsView,
   type UserLookupView,
 } from "./rbac";
+
+export {
+  createApprovalsApi,
+  type ApprovalActionView,
+  type ApprovalDecideInput,
+  type ApprovalDetailView,
+  type ApprovalRequestView,
+  type ApprovalStepView,
+  type ApprovalsApi,
+  type KbApprovalSubmitResult,
+  type KbBuildJobResult,
+} from "./approvals";

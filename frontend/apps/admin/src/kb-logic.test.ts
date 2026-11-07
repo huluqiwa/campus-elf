@@ -214,10 +214,13 @@ describe("上传签名与幂等键", () => {
 });
 
 describe("状态文案与色调", () => {
-  it("三档文档状态与五种扫描状态有中文标签和颜色", () => {
+  it("五档文档状态与五种扫描状态有中文标签和颜色", () => {
     expect(documentStatusMeta("UPLOADED")).toEqual({ label: "待扫描/扫描中", tone: "info" });
     expect(documentStatusMeta("PENDING_APPROVAL")).toEqual({ label: "待审批", tone: "success" });
     expect(documentStatusMeta("SCAN_FAILED")).toEqual({ label: "扫描未通过", tone: "danger" });
+    // KB-02 审批结论两态（审查 M1）：不再显示原码
+    expect(documentStatusMeta("APPROVED")).toEqual({ label: "已审批·待构建", tone: "info" });
+    expect(documentStatusMeta("REJECTED")).toEqual({ label: "已驳回", tone: "danger" });
 
     expect(scanStateMeta("pending")).toEqual({ label: "扫描中/待扫描", tone: "info" });
     expect(scanStateMeta("passed")).toEqual({ label: "已通过", tone: "success" });
