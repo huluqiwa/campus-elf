@@ -4,7 +4,8 @@
 感染/完整性失败 → `SCAN_FAILED`；瞬时扫描故障**不迁移**（保持 UPLOADED 等重试）。
 KB-02 起：`PENDING_APPROVAL` 经审批迁移到 `APPROVED` / `REJECTED`；构建门禁
 `assert_build_allowed` 只认可 `APPROVED`——未审批创建构建是 KB-02 的 409 依据。
-KB-03A 起：`APPROVED → BUILDING → READY/FAILED`，`FAILED → BUILDING` 是重试
+KB-03A 起：`APPROVED → BUILDING → READY/FAILED`，`FAILED → BUILDING` 是重试；
+KB-04A 起：`READY/TEST_* → TESTING → TEST_PASSED/TEST_FAILED`
 （`assert_retriable` 只有 FAILED 可重试）；READY 的内容变更走 KB-05 再上传新版本，不出边。
 """
 
@@ -16,6 +17,9 @@ KB_STATUS_REJECTED = "REJECTED"
 KB_STATUS_BUILDING = "BUILDING"
 KB_STATUS_READY = "READY"
 KB_STATUS_FAILED = "FAILED"
+KB_STATUS_TESTING = "TESTING"
+KB_STATUS_TEST_PASSED = "TEST_PASSED"
+KB_STATUS_TEST_FAILED = "TEST_FAILED"
 
 _TERMINAL_IN_THIS_POINT: frozenset[str] = frozenset()
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
@@ -28,7 +32,11 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # （「修改内容生成新版本」走 KB-05 的再上传路径，不出边）。
     KB_STATUS_BUILDING: frozenset({KB_STATUS_READY, KB_STATUS_FAILED}),
     KB_STATUS_FAILED: frozenset({KB_STATUS_BUILDING}),
-    KB_STATUS_READY: _TERMINAL_IN_THIS_POINT,
+    # KB-04A：READY → TESTING → TEST_PASSED/TEST_FAILED；TEST_* → TESTING（重跑）
+    KB_STATUS_READY: frozenset({KB_STATUS_TESTING}),
+    KB_STATUS_TESTING: frozenset({KB_STATUS_TEST_PASSED, KB_STATUS_TEST_FAILED}),
+    KB_STATUS_TEST_PASSED: frozenset({KB_STATUS_TESTING}),
+    KB_STATUS_TEST_FAILED: frozenset({KB_STATUS_TESTING}),
 }
 
 
@@ -48,6 +56,12 @@ class NotBuildableError(Exception):
     """当前版本状态不可创建构建任务（未审批 409 的依据，AGENTS.md §4）。"""
 
     code = "KB_NOT_APPROVED"
+
+
+class NotTestableError(Exception):
+    """当前版本状态不可发起测试（KB-04A 的 409 依据）。"""
+
+    code = "KB_NOT_TESTABLE"
 
 
 class NotRetriableError(Exception):
@@ -100,6 +114,17 @@ def assert_build_allowed(status: str) -> None:
 
     if status != KB_STATUS_APPROVED:
         raise NotBuildableError(f"版本状态 {status} 不可创建构建任务（必须先审批通过）")
+
+
+def assert_test_allowed(status: str) -> None:
+    """断言版本可发起测试（READY / TEST_FAILED / TEST_PASSED 可测试/重跑）。
+
+    异常:
+        NotTestableError: 其他状态（APPROVED 未构建、BUILDING 构建中、TESTING 已在测等）。
+    """
+
+    if status not in (KB_STATUS_READY, KB_STATUS_TEST_FAILED, KB_STATUS_TEST_PASSED):
+        raise NotTestableError(f"版本状态 {status} 不可发起测试（须先构建到 READY）")
 
 
 def assert_retriable(job_status: str) -> None:

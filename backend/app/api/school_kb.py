@@ -36,13 +36,16 @@ from app.kb.service import (
     KbError,
     VersionView,
     create_build,
+    create_test_set,
     get_build_job,
     get_document,
+    get_test_run,
     list_build_events,
     list_documents,
     list_version_approvals,
     list_versions,
     retry_build,
+    start_test_run,
     submit_version_approval,
     update_document_metadata,
     upload_documents,
@@ -652,4 +655,144 @@ async def stream_kb_build_events(
         event_stream(),
         headers=SSE_HEADERS,
         media_type="text/event-stream",
+    )
+
+
+# ---------------------------------------------------------------------------
+# KB-04A：测试沙箱（test-sets 上传 / tests 运行 / test-runs 查询）
+# ---------------------------------------------------------------------------
+
+
+class KbTestSetCreateResponse(BaseModel):
+    """测试集上传结果。"""
+
+    test_set_id: UUID
+    name: str
+    case_count: int
+
+
+class KbTestSetUploadForm(BaseModel):
+    """测试集上传表单（multipart 中 name 为字符串字段）。"""
+
+    name: str
+
+
+class KbTestRunStartResponse(BaseModel):
+    """测试运行发起结果。"""
+
+    run_id: UUID
+    version_id: UUID
+    test_set_id: UUID
+    status: str
+
+
+class KbTestRunDetailResponse(BaseModel):
+    """测试运行详情（metrics_json 全字段）。"""
+
+    run_id: UUID
+    version_id: UUID
+    test_set_id: UUID
+    status: str
+    metrics_json: dict[str, object] | None
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+TestSetDep = require_permission("school.kb.test", realm="tenant")
+
+
+@router.post(
+    "/versions/{version_id}/test-sets",
+    status_code=201,
+    response_model=KbTestSetCreateResponse,
+)
+async def upload_kb_test_set(
+    version_id: UUID,
+    builder: Annotated[Principal, TestSetDep],
+    request: Request,
+    file: Annotated[UploadFile, File(description="测试集文件（CSV/XLSX/JSON）")],
+    name: Annotated[str, Form(description="测试集名称")],
+) -> KbTestSetCreateResponse:
+    """上传测试集（CSV/XLSX/JSON；行级校验，整批原子）。"""
+
+    tenant_id = _tenant_or_403(builder)
+    file_data = await file.read()
+    await file.close()
+    try:
+        result = await create_test_set(
+            tenant_id=tenant_id,
+            scope=builder.scope_context,
+            version_id=version_id,
+            user_id=builder.user_id,
+            name=name,
+            file_data=file_data,
+            filename=file.filename or "test.csv",
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbTestSetCreateResponse(
+        test_set_id=result["test_set_id"],
+        name=result["name"],
+        case_count=result["case_count"],
+    )
+
+
+@router.post(
+    "/versions/{version_id}/tests",
+    status_code=201,
+    response_model=KbTestRunStartResponse,
+)
+async def start_kb_test_run(
+    version_id: UUID,
+    builder: Annotated[Principal, TestSetDep],
+    request: Request,
+    test_set_id: Annotated[UUID, Form(description="测试集 id")],
+) -> KbTestRunStartResponse:
+    """发起测试运行（READY/TEST_FAILED/TEST_PASSED 可测试；活跃 run 唯一）。"""
+
+    tenant_id = _tenant_or_403(builder)
+    try:
+        result = await start_test_run(
+            tenant_id=tenant_id,
+            scope=builder.scope_context,
+            version_id=version_id,
+            test_set_id=test_set_id,
+            user_id=builder.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbTestRunStartResponse(
+        run_id=result["run_id"],
+        version_id=result["version_id"],
+        test_set_id=result["test_set_id"],
+        status=result["status"],
+    )
+
+
+@router.get("/test-runs/{run_id}", response_model=KbTestRunDetailResponse)
+async def get_kb_test_run(
+    run_id: UUID,
+    viewer: Annotated[Principal, ViewerDep],
+) -> KbTestRunDetailResponse:
+    """查询测试运行结果（metrics_json 全字段；跨租/范围外 404）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    try:
+        result = await get_test_run(
+            tenant_id=tenant_id,
+            scope=viewer.scope_context,
+            run_id=run_id,
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbTestRunDetailResponse(
+        run_id=result["run_id"],
+        version_id=result["version_id"],
+        test_set_id=result["test_set_id"],
+        status=result["status"],
+        metrics_json=result["metrics_json"],
+        started_at=result["started_at"],
+        finished_at=result["finished_at"],
     )
