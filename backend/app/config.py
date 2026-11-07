@@ -180,6 +180,8 @@ class Settings(BaseSettings):
     kb_parent_chunk_size: int = Field(default=1000, ge=200, le=5000)
     # 嵌入批次大小（TEI 批量接口）。
     kb_embed_batch_size: int = Field(default=16, ge=1, le=128)
+    # dense 维度（BGE-M3 = 1024）；EMBEDDING 后与实际比对，漂移即 FAILED（简报 D4）。
+    kb_embed_dim: int = Field(default=1024, ge=1, le=4096)
     # 看门狗：BUILDING 心跳超过该秒数 → FAILED/STALE（可重试）。
     kb_build_heartbeat_timeout_seconds: int = Field(default=600, ge=60, le=7200)
 

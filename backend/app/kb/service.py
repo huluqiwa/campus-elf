@@ -43,7 +43,13 @@ from app.audit.writer import append_audit
 from app.config import Settings, get_settings
 from app.core.metrics import record_audit_write_failure
 from app.db.models.approval import APPROVAL_TYPE_KB_DOCUMENT, ApprovalRequest, ApprovalType
-from app.db.models.kb import KbBuildJob, KbDocument, KbDocumentVersion, KbUploadBatch
+from app.db.models.kb import (
+    KbBuildJob,
+    KbDocument,
+    KbDocumentVersion,
+    KbUploadBatch,
+)
+from app.db.models.kb_events import KbBuildEvent
 from app.db.repository import CursorError, ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
 from app.kb.status import (
@@ -1442,6 +1448,16 @@ async def cancel_version_approval(
 
 
 @dataclass(frozen=True)
+class BuildEventView:
+    """构建事件读取视图（SSE 回放帧负载）。"""
+
+    seq: int
+    event_type: str
+    payload: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class BuildJobSnapshot:
     """构建任务快照（TD-288：全字段；进度/阶段/tier/错误供轮询兜底与 KB-03B SSE 复用）。"""
 
@@ -1464,6 +1480,97 @@ class BuildJobSnapshot:
     started_at: datetime | None
     heartbeat_at: datetime | None
     finished_at: datetime | None
+
+
+async def list_build_events(
+    *,
+    tenant_id: UUID,
+    job_id: UUID,
+    after_seq: int = 0,
+) -> list[BuildEventView]:
+    """按 seq 升序列出 job 的构建事件（SSE 回放/续传基底；`?since=N` 只回 N 之后）。"""
+
+    async with db_session(tenant_id=tenant_id) as session:
+        repository: TenantScopedRepository[KbBuildEvent] = TenantScopedRepository(
+            session,
+            KbBuildEvent,
+            tenant_id,
+            scope=ScopeBypass(reason="构建事件回放：按 job id 精确读取，school.kb.view 判据在外层"),
+        )
+        rows_out = (
+            (
+                await session.execute(
+                    repository.base_query()
+                    .where(
+                        KbBuildEvent.job_id == job_id,
+                        KbBuildEvent.seq > after_seq,
+                    )
+                    .order_by(KbBuildEvent.seq.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [
+            BuildEventView(
+                seq=event.seq,
+                event_type=event.event_type,
+                payload=dict(event.payload_json),
+                created_at=event.created_at,
+            )
+            for event in rows_out
+        ]
+
+
+async def list_version_approvals(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    limit: int = 20,
+) -> list[ApprovalRequestView]:
+    """TD-291：某版本的审批单列表（created_at DESC；撤销/重提交的多行历史全可见）。"""
+
+    from app.approval.service import _request_repository, _request_view
+
+    async with db_session(tenant_id=tenant_id) as session:
+        version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+            session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+        )
+        version = await version_repository.get(version_id)
+        if version is None:
+            raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+        repository = _request_repository(session, tenant_id)
+        rows_out = (
+            (
+                await session.execute(
+                    repository.base_query()
+                    .where(ApprovalRequest.document_version_id == version_id)
+                    .order_by(ApprovalRequest.created_at.desc(), ApprovalRequest.id.desc())
+                    .limit(max(1, min(limit, 100)))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rows_out:
+            return []
+        type_repository: TenantScopedRepository[ApprovalType] = TenantScopedRepository(
+            session, ApprovalType, tenant_id, scope=_APPROVAL_BYPASS
+        )
+        type_rows = (
+            (
+                await session.execute(
+                    type_repository.base_query().where(
+                        ApprovalType.id.in_({row.type_id for row in rows_out})
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        type_codes = {row.id: row.code for row in type_rows}
+        return [_request_view(row, type_codes.get(row.type_id, "")) for row in rows_out]
 
 
 async def get_build_job(
