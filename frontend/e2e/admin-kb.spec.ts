@@ -661,3 +661,67 @@ test("REJECTED 文档：显示已驳回文案与审批中心指引，无入口�
   await expect(drawer.getByTestId("kb-submit-approval")).toHaveCount(0);
   await expect(drawer.getByTestId("kb-create-build")).toHaveCount(0);
 });
+
+// ---------------------------------------------------------------------------
+// M3 KB-04B：测试沙箱前端（上传→运行→轮询→结果 + TD-291 直显驳回理由）
+// ---------------------------------------------------------------------------
+
+import { mockTestApi } from "./helpers/test-mock";
+
+test("测试沙箱：READY 文档上传测试集→运行→刷新→TEST_PASSED", async ({ page }) => {
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: [...BOTH, "school.kb.test"] },
+  });
+  const doc = kbDocument({
+    id: "60000000-0000-0000-0000-0000000000d1",
+    title: "测试沙箱文档",
+    status: "READY",
+    current_version: kbVersion({
+      id: "61000000-0000-0000-0000-0000000000d1",
+      filename: "测试沙箱.pdf",
+      status: "READY",
+    }),
+  });
+  await mockKbApi(page, { documents: [doc] });
+  await mockTestApi(page);
+
+  await page.goto("/kb/documents");
+  await page
+    .locator(".el-table__row", { hasText: "测试沙箱文档" })
+    .getByRole("button", { name: "查看" })
+    .click();
+  const drawer = page.getByTestId("kb-document-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByTestId("kb-test-section")).toBeVisible();
+
+  // 上传并运行
+  await drawer.getByTestId("kb-test-set-name").fill("冒烟测试集");
+  await drawer.locator('input[data-testid="kb-test-set-file"]').setInputFiles({
+    name: "test.csv",
+    mimeType: "text/csv",
+    buffer: Buffer.from("question\n什么是开学时间？"),
+  });
+  await drawer.getByTestId("kb-test-start").click();
+  await expect(page.getByText("测试集已上传")).toBeVisible();
+  await expect(drawer.getByTestId("kb-test-run-status")).toContainText("测试进行中");
+
+  // 刷新 → TEST_PASSED
+  await drawer.getByTestId("kb-test-poll").click();
+  await expect(drawer.getByTestId("kb-test-run-status")).toContainText("测试通过");
+  await expect(drawer.getByTestId("kb-test-run-status")).toContainText("通过率 100%");
+});
+
+test("测试沙箱：无 school.kb.test 码 → 测试区块不出现", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: VIEW_ONLY } });
+  await mockKbApi(page);
+
+  await page.goto("/kb/documents");
+  await page
+    .locator(".el-table__row", { hasText: "校园安全手册" })
+    .getByRole("button", { name: "查看" })
+    .click();
+  const drawer = page.getByTestId("kb-document-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByTestId("kb-test-section")).toHaveCount(0);
+});

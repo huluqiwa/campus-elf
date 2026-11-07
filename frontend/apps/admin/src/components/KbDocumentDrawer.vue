@@ -9,11 +9,11 @@
  * REJECTED 的驳回理由不直显（前端没有按 version 查审批单的端点，TD-291），给审批中心指引。
  */
 import { ApiError, toUserMessage } from "@campus-elf/api-client";
-import type { KbDocumentView, KbVersionView } from "@campus-elf/api-client";
+import type { KbDocumentView, KbVersionView, KbVersionApprovalView } from "@campus-elf/api-client";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, ref, watch } from "vue";
 
-import { approvalsApi, kbApi } from "../api";
+import { approvalsApi, kbApi, testApi } from "../api";
 import { reportError } from "../error-toast";
 import {
   KB_BUILD_CODE,
@@ -23,6 +23,14 @@ import {
 } from "../approval-logic";
 import { KB_PAGE_SIZE, documentStatusMeta, formatBytes } from "../kb-logic";
 import { useAuthStore } from "../stores/auth";
+import {
+  caseSummaries,
+  passRateLabel,
+  testRunStatusMeta,
+  testSetFileError,
+  testSectionGate,
+  type KbTestRunDetail,
+} from "../test-logic";
 import KbScanTag from "./KbScanTag.vue";
 
 const props = defineProps<{
@@ -39,6 +47,14 @@ const emit = defineEmits<{
 const auth = useAuthStore();
 const permissions = computed(() => auth.user?.permissions ?? []);
 
+const approvals = ref<KbVersionApprovalView[]>([]);
+const testRun = ref<KbTestRunDetail | null>(null);
+const testSetName = ref("");
+const testFile = ref<File | null>(null);
+const testFileError = ref<string | null>(null);
+const uploadingTestSet = ref(false);
+const startingTestRun = ref(false);
+
 const detail = ref<KbDocumentView | null>(null);
 const loading = ref(false);
 const versions = ref<KbVersionView[]>([]);
@@ -53,6 +69,13 @@ const submittedInSession = ref<Set<string>>(new Set());
 const buildCreatedInSession = ref<Set<string>>(new Set());
 const submitting = ref(false);
 const building = ref(false);
+
+const testGate = computed(() =>
+  detail.value
+    ? testSectionGate(detail.value.status, permissions.value)
+    : { visible: false, hint: null },
+);
+const latestApproval = computed(() => approvals.value[0] ?? null);
 
 const canSubmitEntry = computed(() => {
   const version = detail.value?.current_version;
@@ -185,12 +208,82 @@ watch([() => props.modelValue, () => props.documentId], ([open, id]) => {
   versionsLoading.value = false;
   submittedInSession.value = new Set();
   buildCreatedInSession.value = new Set();
+  testRun.value = null;
+  testSetName.value = "";
+  testFile.value = null;
+  testFileError.value = null;
   if (!open || id === null) return;
+  // TD-291：加载审批单（最近一单直显状态与驳回理由）
+  void loadApprovals(id, generation);
+  loadLatestTestRun();
   // 只在打开时重置：关闭抽屉不能被当成新一轮，否则并发的两个 404 会二次提示
   goneNotified = false;
   void loadDetail(id, generation);
   void loadVersions(id, generation);
 });
+
+async function loadApprovals(docId: string, generation: number): Promise<void> {
+  try {
+    const items = await testApi.listVersionApprovals(docId);
+    if (generation !== loadGeneration) return;
+    approvals.value = items;
+  } catch {
+    if (generation === loadGeneration) approvals.value = [];
+  }
+}
+
+function loadLatestTestRun(): void {
+  // KB-04A 没有按 version 查最新 run 的端点——抽屉暂不预载（TD-296 前端进度随后续）
+}
+
+function onTestFileChange(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  testFile.value = input.files?.[0] ?? null;
+  testFileError.value = testFile.value ? testSetFileError(testFile.value) : null;
+}
+
+async function uploadAndRun(): Promise<void> {
+  const version = detail.value?.current_version;
+  if (!version || !testFile.value || testFileError.value) return;
+  const name = testSetName.value.trim() || testFile.value.name.replace(/\.[^.]+$/, "");
+  uploadingTestSet.value = true;
+  try {
+    const testSet = await testApi.uploadTestSet(version.id, {
+      name,
+      file: testFile.value,
+    });
+    uploadingTestSet.value = false;
+    startingTestRun.value = true;
+    const run = await testApi.startTestRun(version.id, testSet.test_set_id);
+    testRun.value = {
+      ...run,
+      metrics_json: null,
+      started_at: new Date().toISOString(),
+      finished_at: null,
+    };
+    ElMessage.success(`测试集已上传（${testSet.case_count} 条），测试运行已发起`);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      ElMessage.warning(toUserMessage(error, "该版本已有进行中的测试运行"));
+    } else {
+      reportError(error, "测试集上传或测试发起失败");
+    }
+  } finally {
+    uploadingTestSet.value = false;
+    startingTestRun.value = false;
+  }
+}
+
+async function pollTestRun(): Promise<void> {
+  const current = testRun.value;
+  if (!current) return;
+  try {
+    const fresh = await testApi.getTestRun(current.run_id);
+    testRun.value = fresh;
+  } catch {
+    // 轮询失败不中断
+  }
+}
 
 function formatDateTime(iso: string): string {
   const date = new Date(iso);
@@ -274,15 +367,27 @@ function currentScan() {
         </template>
         <p v-else class="muted">暂无版本。</p>
 
-        <el-alert
+        <div
           v-if="detail.status === 'REJECTED'"
           class="reject-guidance"
-          type="info"
-          :closable="false"
-          show-icon
           data-testid="kb-reject-guidance"
-          :title="REJECT_REASON_GUIDANCE"
-        />
+        >
+          <el-alert
+            v-if="latestApproval && latestApproval.reject_reason"
+            type="error"
+            :closable="false"
+            show-icon
+            :title="latestApproval.reject_reason"
+            data-testid="kb-reject-reason-display"
+          />
+          <el-alert
+            v-else
+            type="info"
+            :closable="false"
+            show-icon
+            :title="REJECT_REASON_GUIDANCE"
+          />
+        </div>
 
         <div
           v-if="detail.status === 'PENDING_APPROVAL' || detail.status === 'APPROVED'"
@@ -332,6 +437,57 @@ function currentScan() {
             已创建构建任务
           </el-button>
         </div>
+
+        <section v-if="testGate.visible" class="test-section" data-testid="kb-test-section">
+          <h3>测试</h3>
+          <p v-if="testGate.hint" class="muted" data-testid="kb-test-hint">{{ testGate.hint }}</p>
+          <template v-if="testGate.visible && !testGate.hint">
+            <p v-if="testRun" class="muted" data-testid="kb-test-run-status">
+              {{ testRunStatusMeta(testRun.status).label }}
+              <template v-if="testRun.finished_at">
+                · 通过率 {{ passRateLabel(testRun.metrics_json) }} ·
+                {{ caseSummaries(testRun.metrics_json).length }} 条
+              </template>
+            </p>
+            <div v-if="!testRun" class="test-upload-row">
+              <el-input
+                v-model="testSetName"
+                placeholder="测试集名称（可选）"
+                size="small"
+                class="test-name-input"
+                data-testid="kb-test-set-name"
+              />
+              <input
+                type="file"
+                accept=".csv,.xlsx,.json"
+                data-testid="kb-test-set-file"
+                @change="onTestFileChange"
+              />
+            </div>
+            <p v-if="testFileError" class="test-error" data-testid="kb-test-file-error">
+              {{ testFileError }}
+            </p>
+            <el-button
+              v-if="!testRun"
+              type="primary"
+              size="small"
+              :disabled="!testFile || !!testFileError"
+              :loading="uploadingTestSet || startingTestRun"
+              data-testid="kb-test-start"
+              @click="uploadAndRun"
+            >
+              上传并运行测试
+            </el-button>
+            <el-button
+              v-if="testRun && testRun.status === 'TESTING'"
+              size="small"
+              data-testid="kb-test-poll"
+              @click="pollTestRun"
+            >
+              刷新结果
+            </el-button>
+          </template>
+        </section>
 
         <h3>版本列表</h3>
         <el-table :data="versions" size="small" data-testid="kb-version-table">
@@ -394,5 +550,33 @@ function currentScan() {
 }
 .load-more {
   margin-top: 8px;
+}
+.test-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+.test-section h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.test-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.test-name-input {
+  width: 180px;
+}
+.test-error {
+  color: var(--el-color-danger);
+  font-size: 12px;
+  margin: 0;
+}
+.reject-guidance {
+  margin-bottom: 4px;
 }
 </style>
