@@ -86,6 +86,7 @@ async def seed_test_passed_version(
     doc_id: UUID | None = None,
     version_no: int = 1,
     title: str = "发布用文档",
+    markdown: str = MARKDOWN,
 ) -> tuple[UUID, UUID]:
     """直接落文档/版本（APPROVED）→ 真实构建到 READY → 置 TEST_PASSED。
 
@@ -93,9 +94,10 @@ async def seed_test_passed_version(
     追加前把文档拨回 APPROVED（claim 要求文档 ∈ APPROVED/FAILED），模拟
     「内容修改 → 新版本走一遍管线」的真实流转。TEST_PASSED 由本脚手架直接落库
     （模拟 KB-04A 沙箱通过的可达终态；沙箱判分链路由 KB-04A 用例覆盖）。
+    markdown 可传自定义内容（KB-06 分块预览用多章节/表格/代码结构）。
     """
 
-    patch_ports(monkeypatch, FakeParser(ParsedDocument(markdown=MARKDOWN)))
+    patch_ports(monkeypatch, FakeParser(ParsedDocument(markdown=markdown)))
     new_doc = doc_id is None
     doc = doc_id or uuid4()
     version_id = uuid4()

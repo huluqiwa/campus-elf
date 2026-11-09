@@ -9,9 +9,13 @@
   （`PENDING_APPROVAL` 才可提交；409 `KB_NOT_SUBMITTABLE`/`APPROVAL_ALREADY_PENDING`）；
 - `POST /school/kb/document-versions/{version_id}/build`：创建构建任务（只有 `APPROVED`；
   未审批 409 `KB_NOT_APPROVED` + 审计；本点只落 `BUILD_QUEUED`，进度随 KB-03）；
-- `PUT /school/kb/documents/{document_id}`：标题/标签/描述编辑（免审但审计前后值）。
+- `PUT /school/kb/documents/{document_id}`：标题/标签/描述编辑（免审但审计前后值）；
+- `GET /school/kb/versions/{version_id}/chunks`：分块列表（游标分页 + q/章节/类型/父块筛选，KB-06A）；
+- `GET /school/kb/chunks/{chunk_id}`：分块详情（父/子引用，KB-06A）；
+- `GET /school/kb/versions/{version_id}/chunks/stats`：版本分块统计（KB-06A）。
 
 权限：上传/提交/元数据 `school.kb.upload`；查询 `school.kb.view`；构建 `school.kb.build`；
+分块预览 `school.kb.view_chunks`（KB-06A）；
 发布/回滚/下线 `school.kb.publish`（KB-05）；删除 `school.kb.delete`（KB-05）。
 拒绝审计：提交/构建的 403/409 写 `school.kb.approval.denied` / `school.kb.build.denied`，
 KB-05 发布/回滚/下线/删除的 403/409 写 `school.kb.publish.denied` / `school.kb.rollback.denied`
@@ -20,7 +24,7 @@ KB-05 发布/回滚/下线/删除的 403/409 写 `school.kb.publish.denied` / `s
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
@@ -30,6 +34,14 @@ from pydantic import BaseModel, Field, StringConstraints
 from app.api.pagination import PageResponse
 from app.auth.principal import Principal, require_permission
 from app.core.sse import SSE_HEADERS, format_heartbeat, format_sse
+from app.kb.chunk_read import (
+    ChunkRef,
+    ChunkStats,
+    ChunkView,
+    chunk_stats,
+    get_chunk,
+    list_chunks,
+)
 from app.kb.service import (
     ApprovalOutcome,
     BuildEventView,
@@ -66,6 +78,7 @@ ViewerDep = require_permission("school.kb.view", realm="tenant")
 BuilderDep = require_permission("school.kb.build", realm="tenant")
 PublisherDep = require_permission("school.kb.publish", realm="tenant")
 DeleterDep = require_permission("school.kb.delete", realm="tenant")
+ChunkViewerDep = require_permission("school.kb.view_chunks", realm="tenant")
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -950,3 +963,170 @@ async def delete_kb_document_version(
         status=view.status,
         was_active=view.was_active,
     )
+
+
+# ---------------------------------------------------------------------------
+# 分块预览（KB-06A：只读；权限 school.kb.view_chunks；实现见 app/kb/chunk_read.py）
+# ---------------------------------------------------------------------------
+
+
+class KbChunkResponse(BaseModel):
+    """知识库分块（KB-10 的人工编辑三列不暴露）。"""
+
+    id: UUID
+    chunk_type: str
+    chunk_index: int
+    parent_id: UUID | None
+    text: str
+    text_markdown: str
+    section_path: str | None
+    page_start: int | None
+    page_end: int | None
+    token_count: int
+    char_count: int
+    embedding_status: str
+    created_at: datetime
+
+
+class KbChunkRef(BaseModel):
+    """父/子块引用。"""
+
+    id: UUID
+    chunk_index: int
+
+
+class KbChunkDetailResponse(KbChunkResponse):
+    """分块详情（含版本归属与父/子引用）。"""
+
+    document_version_id: UUID
+    parent: KbChunkRef | None
+    children: list[KbChunkRef]
+
+
+class KbChunkSectionStat(BaseModel):
+    """章节统计行（chunk_count 降序、路径升序）。"""
+
+    section_path: str
+    chunk_count: int
+
+
+class KbChunkStatsResponse(BaseModel):
+    """版本分块统计（per-version 固定口径，不随筛选参数变化）。"""
+
+    total_chunks: int
+    parent_count: int
+    child_count: int
+    embedding_status: dict[str, int]
+    total_tokens: int
+    total_chars: int
+    section_count: int
+    sections: list[KbChunkSectionStat]
+
+
+def _chunk_response(view: ChunkView) -> KbChunkResponse:
+    return KbChunkResponse(
+        id=view.id,
+        chunk_type=view.chunk_type,
+        chunk_index=view.chunk_index,
+        parent_id=view.parent_id,
+        text=view.text,
+        text_markdown=view.text_markdown,
+        section_path=view.section_path,
+        page_start=view.page_start,
+        page_end=view.page_end,
+        token_count=view.token_count,
+        char_count=view.char_count,
+        embedding_status=view.embedding_status,
+        created_at=view.created_at,
+    )
+
+
+def _chunk_ref_response(ref: ChunkRef) -> KbChunkRef:
+    return KbChunkRef(id=ref.id, chunk_index=ref.chunk_index)
+
+
+def _chunk_stats_response(stats: ChunkStats) -> KbChunkStatsResponse:
+    return KbChunkStatsResponse(
+        total_chunks=stats.total_chunks,
+        parent_count=stats.parent_count,
+        child_count=stats.child_count,
+        embedding_status=stats.embedding_status,
+        total_tokens=stats.total_tokens,
+        total_chars=stats.total_chars,
+        section_count=stats.section_count,
+        sections=[
+            KbChunkSectionStat(section_path=s.section_path, chunk_count=s.chunk_count)
+            for s in stats.sections
+        ],
+    )
+
+
+@router.get("/versions/{version_id}/chunks", response_model=PageResponse[KbChunkResponse])
+async def list_kb_document_chunks(
+    version_id: UUID,
+    viewer: Annotated[Principal, ChunkViewerDep],
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    cursor: Annotated[str | None, Query()] = None,
+    q: Annotated[str | None, Query(max_length=200)] = None,
+    section_path: Annotated[str | None, Query(max_length=500)] = None,
+    chunk_type: Annotated[Literal["parent", "child"] | None, Query()] = None,
+    parent_id: UUID | None = None,
+) -> PageResponse[KbChunkResponse]:
+    """按版本列出分块（`chunk_index ASC` 游标分页；q/章节/类型/父块筛选）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    try:
+        page = await list_chunks(
+            tenant_id=tenant_id,
+            scope=viewer.scope_context,
+            version_id=version_id,
+            limit=limit,
+            cursor=cursor,
+            q=q,
+            section_path=section_path,
+            chunk_type=chunk_type,
+            parent_id=parent_id,
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return PageResponse(
+        items=[_chunk_response(chunk) for chunk in page.items],
+        next_cursor=page.next_cursor,
+    )
+
+
+@router.get("/chunks/{chunk_id}", response_model=KbChunkDetailResponse)
+async def get_kb_chunk(
+    chunk_id: UUID, viewer: Annotated[Principal, ChunkViewerDep]
+) -> KbChunkDetailResponse:
+    """分块详情（不存在/跨租/范围外同码 404，不泄露存在性）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    try:
+        detail = await get_chunk(
+            tenant_id=tenant_id, scope=viewer.scope_context, chunk_id=chunk_id
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbChunkDetailResponse(
+        **_chunk_response(detail.chunk).model_dump(),
+        document_version_id=detail.document_version_id,
+        parent=_chunk_ref_response(detail.parent) if detail.parent is not None else None,
+        children=[_chunk_ref_response(ref) for ref in detail.children],
+    )
+
+
+@router.get("/versions/{version_id}/chunks/stats", response_model=KbChunkStatsResponse)
+async def get_kb_chunk_stats(
+    version_id: UUID, viewer: Annotated[Principal, ChunkViewerDep]
+) -> KbChunkStatsResponse:
+    """版本分块统计（总数/父子/embedding/token/字符/章节清单）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    try:
+        stats = await chunk_stats(
+            tenant_id=tenant_id, scope=viewer.scope_context, version_id=version_id
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _chunk_stats_response(stats)

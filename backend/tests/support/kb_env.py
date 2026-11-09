@@ -41,6 +41,9 @@ KB_BUILDER = "kb-builder"
 KB_SELF_APPROVER = "kb-self-approver"
 KB_PUBLISHER = "kb-publisher"
 KB_B_PUBLISHER = "kb-b-publisher"
+KB_CHUNK_VIEWER = "kb-chunk-viewer"
+KB_CHUNK_SELF = "kb-chunk-self"
+KB_B_CHUNK_VIEWER = "kb-b-chunk-viewer"
 
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 MD = "# \u6821\u89c4\n\n\u6309\u65f6\u5230\u6821\u3002\n".encode()
@@ -154,6 +157,31 @@ async def _seed_data(engine: AsyncEngine) -> tuple[UUID, UUID]:
         login_id=KB_B_PUBLISHER,
         password=PASSWORD,
         permissions=("school.kb.publish", "school.kb.delete", "school.kb.view"),
+        scope_types=("school",),
+    )
+    # KB-06：分块预览（端点只挂 school.kb.view_chunks；self 范围验证范围收窄、租户 B 验证跨租 404）
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_CHUNK_VIEWER,
+        password=PASSWORD,
+        permissions=("school.kb.view_chunks",),
+        scope_types=("school",),
+    )
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_CHUNK_SELF,
+        password=PASSWORD,
+        permissions=("school.kb.view_chunks",),
+        scope_types=("self",),
+    )
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_B,
+        login_id=KB_B_CHUNK_VIEWER,
+        password=PASSWORD,
+        permissions=("school.kb.view_chunks",),
         scope_types=("school",),
     )
     await seed_tenant_user(
