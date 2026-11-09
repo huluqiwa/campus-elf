@@ -1,12 +1,18 @@
 <script setup lang="ts">
 /**
- * 知识库文档详情抽屉（M3 KB-01B 简报 D5；KB-02B 增审批入口）：
+ * 知识库文档详情抽屉（M3 KB-01B 简报 D5；KB-02B 增审批入口；KB-05B 增发布/回滚/下线/删除）：
  * 打开即读详情 + 第一页版本；版本列表按 `next_cursor` 追加；文档不可见（404）时提示并让列表刷新。
  *
  * KB-02B 入口（简报 D2-A）：按钮按「文档状态 + 权限码」渲染，**不做服务端状态预判**——
  * 同版本已有待审批单/活跃构建时按钮仍在，点了吃后端 409（服务端是唯一门禁）；
  * 提交/创建成功后在本抽屉会话内记忆并禁用按钮（重开抽屉会复位，届时 409 兜底）；
  * REJECTED 的驳回理由不直显（前端没有按 version 查审批单的端点，TD-291），给审批中心指引。
+ *
+ * KB-05B 发布动作（简报 M3-KB-05B D2-A/D5-A）：发布只对 TEST_PASSED、下线/删除/回滚只对
+ * PUBLISHED；门禁纯函数在 kb-logic（服务端仍是唯一门禁）。前端无法感知「当前活跃版本」
+ * （后端无 active 端点）——本会话内 publish/rollback 成功响应记忆 activeVersionId 用于
+ * 回滚目标排除，刷新/重开复位，选到活跃版本吃后端 409 `KB_ROLLBACK_TARGET_IS_ACTIVE`。
+ * 写动作成功后重读详情与版本列表（不手改本地状态，187g-C 口径）。
  */
 import { ApiError, toUserMessage } from "@campus-elf/api-client";
 import type { KbDocumentView, KbVersionView, KbVersionApprovalView } from "@campus-elf/api-client";
@@ -21,7 +27,17 @@ import {
   REJECT_REASON_GUIDANCE,
   kbEntryConflictMessage,
 } from "../approval-logic";
-import { KB_PAGE_SIZE, documentStatusMeta, formatBytes } from "../kb-logic";
+import {
+  KB_PAGE_SIZE,
+  deleteGate,
+  documentStatusMeta,
+  formatBytes,
+  kbPublishActionMessage,
+  offlineGate,
+  publishGate,
+  rollbackTargets,
+  type KbRollbackTarget,
+} from "../kb-logic";
 import { useAuthStore } from "../stores/auth";
 import {
   caseSummaries,
@@ -70,6 +86,13 @@ const buildCreatedInSession = ref<Set<string>>(new Set());
 const submitting = ref(false);
 const building = ref(false);
 
+// KB-05B：发布动作状态。activeVersionId 只来自本会话成功响应（后端无 active 查询端点）。
+const publishing = ref(false);
+const offlining = ref(false);
+const deleting = ref(false);
+const rollingBack = ref(false);
+const activeVersionId = ref<string | null>(null);
+
 const testGate = computed(() =>
   detail.value
     ? testSectionGate(detail.value.status, permissions.value)
@@ -98,6 +121,27 @@ const canBuildEntry = computed(() => {
     !buildCreatedInSession.value.has(version.id)
   );
 });
+
+// KB-05B 发布动作门禁（kb-logic 纯函数；对 current_version 的自身状态判定，与后端守卫同源）。
+const currentVersion = computed(() => detail.value?.current_version ?? null);
+const canPublish = computed(() => {
+  const version = currentVersion.value;
+  return version !== null && publishGate(version.status, version.id, permissions.value);
+});
+const canOffline = computed(() => {
+  const version = currentVersion.value;
+  return version !== null && offlineGate(version.status, version.id, permissions.value);
+});
+const canDelete = computed(() => {
+  const version = currentVersion.value;
+  return version !== null && deleteGate(version.status, version.id, permissions.value);
+});
+// 回滚与下线同门禁（PUBLISHED + school.kb.publish）；目标候选见 rollbackTargetList。
+const canRollback = computed(() => canOffline.value);
+const rollbackTargetList = computed(() => rollbackTargets(versions.value, activeVersionId.value));
+const publishRowVisible = computed(
+  () => canPublish.value || canOffline.value || canRollback.value || canDelete.value,
+);
 
 async function submitApproval(): Promise<void> {
   const version = detail.value?.current_version;
@@ -144,6 +188,128 @@ async function createBuild(): Promise<void> {
     reportError(error, "创建构建失败");
   } finally {
     building.value = false;
+  }
+}
+
+// ---- KB-05B：发布/回滚/下线/删除（服务端是唯一门禁；409 走 kbPublishActionMessage 兜底） ----
+
+/** 动作成功/409 后重读服务端状态（409 常意味着并发状态已变，重读同样有价值）。 */
+async function refreshAfterAction(): Promise<void> {
+  const id = props.documentId;
+  if (id === null) return;
+  const generation = loadGeneration;
+  await Promise.all([loadDetail(id, generation), loadVersions(id, generation)]);
+}
+
+function publishActionError(error: unknown, fallback: string): void {
+  if (error instanceof ApiError && error.status === 409) {
+    ElMessage.warning(kbPublishActionMessage(error, fallback));
+    return;
+  }
+  reportError(error, fallback);
+}
+
+async function publishCurrent(): Promise<void> {
+  const version = currentVersion.value;
+  if (!version) return;
+  const confirmed = await ElMessageBox.confirm(
+    `发布 v${version.version_no}？发布后新会话将检索到该版本的内容（已在线的会话不受影响）。`,
+    "发布确认",
+    { type: "warning" },
+  ).catch(() => false);
+  if (!confirmed) return;
+  publishing.value = true;
+  try {
+    const result = await kbApi.publishVersion(version.id);
+    activeVersionId.value = result.version_id;
+    if (!result.alias_synced) {
+      ElMessage.warning(`v${result.version_no} 已发布，但 Qdrant alias 同步未完成，请稍后刷新确认`);
+    } else if (result.replayed) {
+      ElMessage.success(`v${result.version_no} 已是活跃发布（重放：已重建 alias）`);
+    } else {
+      ElMessage.success(`v${result.version_no} 已发布`);
+    }
+    await refreshAfterAction();
+  } catch (error) {
+    publishActionError(error, "发布失败");
+    await refreshAfterAction();
+  } finally {
+    publishing.value = false;
+  }
+}
+
+async function rollbackTo(target: KbRollbackTarget): Promise<void> {
+  const confirmed = await ElMessageBox.confirm(
+    `回滚到 v${target.version_no}（${target.filename}）？活跃发布将切换到该版本，原活跃版本保持已发布状态。`,
+    "回滚确认",
+    { type: "warning" },
+  ).catch(() => false);
+  if (!confirmed) return;
+  rollingBack.value = true;
+  try {
+    const result = await kbApi.rollbackVersion(target.id);
+    activeVersionId.value = result.version_id;
+    ElMessage.success(`已回滚：v${result.version_no} 成为活跃发布`);
+    await refreshAfterAction();
+  } catch (error) {
+    publishActionError(error, "回滚失败");
+    await refreshAfterAction();
+  } finally {
+    rollingBack.value = false;
+  }
+}
+
+async function offlineCurrent(): Promise<void> {
+  const version = currentVersion.value;
+  if (!version) return;
+  const confirmed = await ElMessageBox.confirm(
+    `下线 v${version.version_no}？下线后该版本不再对外提供检索；状态为终态，不能重新发布（重发需上传新版本走新链路）。`,
+    "下线确认",
+    { type: "warning" },
+  ).catch(() => false);
+  if (!confirmed) return;
+  offlining.value = true;
+  try {
+    const result = await kbApi.offlineVersion(version.id);
+    if (result.was_active) activeVersionId.value = null;
+    ElMessage.success(
+      result.was_active
+        ? `v${version.version_no} 已下线，活跃发布已撤除`
+        : `v${version.version_no} 已下线`,
+    );
+    await refreshAfterAction();
+  } catch (error) {
+    publishActionError(error, "下线失败");
+    await refreshAfterAction();
+  } finally {
+    offlining.value = false;
+  }
+}
+
+async function deleteCurrent(): Promise<void> {
+  const version = currentVersion.value;
+  if (!version) return;
+  const confirmed = await ElMessageBox.confirm(
+    `删除 v${version.version_no}？软删除为终态且不可逆；若它是当前活跃发布，新会话将检索不到该文档。向量数据保留（清理由后台任务负责）。`,
+    "删除确认",
+    { type: "warning", confirmButtonText: "删除" },
+  ).catch(() => false);
+  if (!confirmed) return;
+  deleting.value = true;
+  try {
+    const result = await kbApi.deleteVersion(version.id);
+    if (result.was_active) activeVersionId.value = null;
+    ElMessage.success(
+      result.was_active
+        ? `v${version.version_no} 已删除，活跃发布已撤除`
+        : `v${version.version_no} 已删除`,
+    );
+    await refreshAfterAction();
+  } catch (error) {
+    publishActionError(error, "删除失败");
+    await refreshAfterAction();
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -208,6 +374,7 @@ watch([() => props.modelValue, () => props.documentId], ([open, id]) => {
   versionsLoading.value = false;
   submittedInSession.value = new Set();
   buildCreatedInSession.value = new Set();
+  activeVersionId.value = null;
   testRun.value = null;
   testSetName.value = "";
   testFile.value = null;
@@ -438,6 +605,61 @@ function currentScan() {
           </el-button>
         </div>
 
+        <!-- KB-05B：发布动作行（TEST_PASSED 发布；PUBLISHED 下线/回滚/删除）。 -->
+        <div v-if="publishRowVisible" class="entry-row" data-testid="kb-publish-row">
+          <el-button
+            v-if="canPublish"
+            type="success"
+            :loading="publishing"
+            data-testid="kb-publish"
+            @click="publishCurrent"
+          >
+            发布
+          </el-button>
+          <el-dropdown
+            v-if="canRollback"
+            class="rollback-dropdown"
+            trigger="click"
+            data-testid="kb-rollback"
+            @command="rollbackTo"
+          >
+            <el-button :loading="rollingBack" data-testid="kb-rollback-trigger">回滚</el-button>
+            <template #dropdown>
+              <el-dropdown-menu data-testid="kb-rollback-menu">
+                <el-dropdown-item v-if="rollbackTargetList.length === 0" disabled>
+                  无可回滚目标（需其他已发布版本）
+                </el-dropdown-item>
+                <el-dropdown-item
+                  v-for="target in rollbackTargetList"
+                  :key="target.id"
+                  :command="target"
+                  data-testid="kb-rollback-target"
+                >
+                  v{{ target.version_no }} · {{ target.filename }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-button
+            v-if="canOffline"
+            :loading="offlining"
+            data-testid="kb-offline"
+            @click="offlineCurrent"
+          >
+            下线
+          </el-button>
+          <el-button
+            v-if="canDelete"
+            type="danger"
+            plain
+            :loading="deleting"
+            data-testid="kb-delete"
+            @click="deleteCurrent"
+          >
+            删除
+          </el-button>
+        </div>
+
         <section v-if="testGate.visible" class="test-section" data-testid="kb-test-section">
           <h3>测试</h3>
           <p v-if="testGate.hint" class="muted" data-testid="kb-test-hint">{{ testGate.hint }}</p>
@@ -492,6 +714,13 @@ function currentScan() {
         <h3>版本列表</h3>
         <el-table :data="versions" size="small" data-testid="kb-version-table">
           <el-table-column prop="version_no" label="版本" width="70" />
+          <el-table-column label="状态" width="130">
+            <template #default="{ row }">
+              <el-tag :type="documentStatusMeta(row.status).tone" size="small">
+                {{ documentStatusMeta(row.status).label }}
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column prop="filename" label="文件名" min-width="150" />
           <el-table-column label="大小" width="90">
             <template #default="{ row }">{{ formatBytes(row.size_bytes) }}</template>
@@ -547,6 +776,10 @@ function currentScan() {
 .entry-row {
   display: flex;
   gap: 8px;
+}
+/* el-dropdown 不是 flex 子项原生尺寸，self 对齐让回滚按钮与同行按钮等高排列 */
+.rollback-dropdown {
+  align-self: center;
 }
 .load-more {
   margin-top: 8px;

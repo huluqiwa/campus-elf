@@ -48,6 +48,9 @@ services:
       # 知识库全栈 E2E 用开发跳过扫描：上传直接 PENDING_APPROVAL + engine=dev-skip。
       # 只在 dev/test 生效；非 dev/test 会被 Settings 拒绝（backend/app/config.py:236-238）。
       DEV_SKIP_FILE_SCAN: "true"
+      # KB-05B（TD-292）：构建 embedding 与测试运行需要 TEI；指向本编排内的 tei-embed 服务
+      # （MD/TXT 解析走 MarkdownNormalizer，不需要 MinerU）。
+      TEI_EMBED_URL: http://tei-embed:80
       # 重置邮件里的前端地址指向 admin 端 preview（Playwright 从邮件提取 token 后跳 4173）
       PASSWORD_RESET_URL_BASE: http://127.0.0.1:4173/reset-password
     ports:
@@ -83,8 +86,46 @@ services:
     pids_limit: 256
     restart: unless-stopped
 
+  # KB-05B（TD-292）：构建管线 EMBEDDING 段与测试运行的问题向量化需要 TEI（BGE-M3）。
+  # 镜像/参数与 dev compose（deploy/docker-compose.yml 的 tei-embed）逐字一致；
+  # 模型卷复用 dev 栈已下载的 campus-elf_tei_models（external），避免重复拉取 GB 级模型。
+  tei-embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d
+    command:
+      - "--model-id"
+      - "BAAI/bge-m3"
+      - "--revision"
+      - "5617a9f61b028005a4858fdac845db406aefb181"
+      - "--port"
+      - "80"
+      - "--auto-truncate"
+      - "--dtype"
+      - "float32"
+      - "--max-batch-tokens"
+      - "2048"
+      - "--max-client-batch-size"
+      - "8"
+    environment:
+      HF_HOME: /data
+      HF_HUB_DOWNLOAD_TIMEOUT: "600"
+    volumes:
+      - tei_models:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:80/health || wget -q -O - http://localhost:80/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+    restart: unless-stopped
+    mem_limit: 2560m
+    cpus: 2
+    pids_limit: 512
+
 volumes:
   e2e_objects:
+  tei_models:
+    external: true
+    name: campus-elf_tei_models
 
 networks:
   default:

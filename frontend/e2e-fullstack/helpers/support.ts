@@ -37,6 +37,9 @@ export interface E2EAccounts {
   devices: { school_code: string; login_id: string; password: string };
   kb_admin: { school_code: string; login_id: string; password: string };
   kb_uploader: { school_code: string; login_id: string; password: string };
+  /** KB-05B（TD-292）：审批人（审批中心 + 通过/驳回）与发布人（构建/测试/发布/删除）。 */
+  kb_approver: { school_code: string; login_id: string; password: string };
+  kb_publisher: { school_code: string; login_id: string; password: string };
   role_admin: { school_code: string; login_id: string; password: string };
   role_target: { school_code: string; login_id: string; password: string };
   mfa_target: {

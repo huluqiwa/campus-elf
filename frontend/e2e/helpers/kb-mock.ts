@@ -42,6 +42,8 @@ export interface KbDocumentFixture {
   description: string | null;
   status: string;
   current_version: KbVersionFixture | null;
+  /** 显式版本行（KB-05B）：提供时版本列表与发布动作直接读写这些行；缺省时按 current_version 合成旧行（只读）。 */
+  versions?: KbVersionFixture[];
   created_at: string;
   updated_at: string;
 }
@@ -53,11 +55,17 @@ export interface KbUploadCapture {
   contentType: string | null;
 }
 
+export interface KbVersionActionCapture {
+  method: string;
+  path: string;
+}
+
 export interface KbMockCaptures {
   uploads: KbUploadCapture[];
   listUrls: string[];
   detailIds: string[];
   versionUrls: string[];
+  versionActions: KbVersionActionCapture[];
 }
 
 export interface KbMockOptions {
@@ -81,6 +89,8 @@ export interface KbMockOptions {
   missingDocumentIds?: string[];
   /** 详情固定返回的错误（模拟权限被撤/服务端拒绝），优先于 missingDocumentIds。 */
   detailError?: { status: number; body: unknown };
+  /** KB-05B：初始活跃发布（docId → versionId），模拟库里的 alias 行；缺省 = 无活跃发布。 */
+  activePublishByDocument?: Record<string, string>;
 }
 
 export interface KbMock {
@@ -251,6 +261,7 @@ function cloneDocument(document: KbDocumentFixture): KbDocumentFixture {
     ...document,
     tags: [...document.tags],
     current_version: document.current_version ? cloneVersion(document.current_version) : null,
+    versions: document.versions?.map(cloneVersion),
   };
 }
 
@@ -297,8 +308,14 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     listUrls: [],
     detailIds: [],
     versionUrls: [],
+    versionActions: [],
   };
   const replayByKey = new Map<string, { batch_id: string; documents: KbDocumentFixture[] }>();
+  /** KB-05B：每文档活跃发布（mock 的 alias 行，含首次发布时间——重放保留原值，service.py:2577）；夹具不预置——「已发布但无指针」的重放拒绝路径因此可测。 */
+  const activePublish = new Map<string, { versionId: string; publishedAt: string }>();
+  for (const [docId, versionId] of Object.entries(options.activePublishByDocument ?? {})) {
+    activePublish.set(docId, { versionId, publishedAt: new Date().toISOString() });
+  }
 
   let listRequests = 0;
   let uploadSeq = 0;
@@ -306,6 +323,7 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
   let uploadErrorConsumed = false;
 
   function versionsFor(document: KbDocumentFixture): KbVersionFixture[] {
+    if (document.versions !== undefined) return document.versions;
     const latest = document.current_version;
     if (latest === null) return [];
     const versions: KbVersionFixture[] = [];
@@ -462,6 +480,214 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     const nextCursor = offset + limit < all.length ? String(offset + limit) : null;
     return json(route, 200, { items, next_cursor: nextCursor });
   }
+
+  // ---- KB-05B：发布/回滚/下线/删除（判据手抄自 service.py 的 publish/rollback/offline/delete） ----
+
+  /** 跨文档按版本 id 找行（只查显式 versions；合成行不可变、不参与动作）。 */
+  function findVersion(
+    versionId: string,
+  ): { document: KbDocumentFixture; version: KbVersionFixture } | null {
+    for (const document of documents) {
+      const version = document.versions?.find((item) => item.id === versionId);
+      if (version) return { document, version };
+    }
+    return null;
+  }
+
+  /**
+   * 状态写入：版本行 + current_version（同 id 时镜像状态）+ 文档行镜像（design §4.3）。
+   * `syncDocument`：后端 offline/delete 只在 was_active 时同步文档行（service.py:2826-2845/2903-2922，
+   * 非活跃 PUBLISHED 版本下线后文档行保持 PUBLISHED）；publish/rollback 无条件同步。
+   */
+  function setVersionStatus(
+    document: KbDocumentFixture,
+    version: KbVersionFixture,
+    status: string,
+    now: string,
+    syncDocument = true,
+  ): void {
+    version.status = status;
+    if (document.current_version?.id === version.id) {
+      document.current_version.status = status;
+    }
+    if (syncDocument) {
+      document.status = status;
+    }
+    document.updated_at = now;
+  }
+
+  /** publish/rollback 把文档的当前版本指针切到目标版本行（service.py:2592-2593/2760-2761）。 */
+  function migrateCurrentVersion(document: KbDocumentFixture, version: KbVersionFixture): void {
+    document.current_version = version;
+    document.updated_at = new Date().toISOString();
+  }
+
+  function publishPayload(
+    document: KbDocumentFixture,
+    version: KbVersionFixture,
+    previousVersionId: string | null,
+    replayed: boolean,
+    publishedAt: string,
+  ): Record<string, unknown> {
+    return {
+      document_id: document.id,
+      version_id: version.id,
+      version_no: version.version_no,
+      status: "PUBLISHED",
+      alias: `tenant_mock_kb_${document.id.slice(0, 8)}_active`,
+      collection: `tenant_mock_kb_v${version.version_no}`,
+      previous_version_id: previousVersionId,
+      published_at: publishedAt,
+      replayed,
+      alias_synced: true,
+    };
+  }
+
+  await page.route("**/api/v1/school/kb/versions/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const method = request.method();
+    captures.versionActions.push({ method, path });
+    const match = path.match(/\/school\/kb\/versions\/([^/]+)(\/(publish|rollback|offline))?$/);
+    if (!match) return json(route, 404, { detail: "未 mock 的版本路径" });
+    const versionId = match[1] ?? "";
+    const action = match[3];
+
+    // 404 探测不区分跨租/范围外（后端同口径，不泄露存在性；service.py:2460 等）。
+    const found = findVersion(versionId);
+    if (!found) {
+      return json(route, 404, { detail: { code: "VERSION_NOT_FOUND", message: "文档版本不存在" } });
+    }
+    const { document, version } = found;
+    const now = new Date().toISOString();
+    const active = activePublish.get(document.id) ?? null;
+    const activeVersionId = active?.versionId ?? null;
+
+    if (method === "POST" && action === "publish") {
+      // 幂等重放判定（service.py:2473）：已 PUBLISHED 走恢复路径，不做 TEST_PASSED 断言。
+      const replay = version.status === "PUBLISHED";
+      if (!replay && version.status !== "TEST_PASSED") {
+        // assert_publishable（status.py:182）
+        return json(route, 409, {
+          detail: {
+            code: "KB_NOT_TEST_PASSED",
+            message: `版本状态 ${version.status} 不可发布（必须先通过测试）`,
+          },
+        });
+      }
+      if (replay) {
+        if (active === null) {
+          // service.py:2506-2512：已发布但指针已撤除（被下线/删除），重放发布不可达
+          return json(route, 409, {
+            detail: {
+              code: "KB_PUBLISHED_NOT_ACTIVE",
+              message: "版本已发布但活跃发布指针已撤除（活跃版本被下线或删除），不可重放发布",
+            },
+          });
+        }
+        if (active.versionId !== version.id) {
+          // service.py:2513-2519：已发布但不是活跃发布，走回滚
+          return json(route, 409, {
+            detail: {
+              code: "KB_PUBLISHED_NOT_ACTIVE",
+              message: "版本已发布但不是活跃发布，请使用回滚端点切换",
+            },
+          });
+        }
+        // 重放 = 重建 alias/payload，状态与首次发布时间不变（service.py:2521/2577 previous=None）
+        return json(route, 200, publishPayload(document, version, null, true, active.publishedAt));
+      }
+      // 索引就绪复核在真实后端做（KB_INDEX_NOT_READY，service.py:2479）；mock 版本恒视为已索引。
+      const previous = activeVersionId;
+      activePublish.set(document.id, { versionId: version.id, publishedAt: now });
+      migrateCurrentVersion(document, version);
+      setVersionStatus(document, version, "PUBLISHED", now);
+      return json(route, 200, publishPayload(document, version, previous, false, now));
+    }
+
+    if (method === "POST" && action === "rollback") {
+      // assert_rollback_target（status.py:215）先于活跃判定（service.py:2676→2683→2686）
+      if (version.status !== "PUBLISHED") {
+        return json(route, 409, {
+          detail: {
+            code: "KB_NOT_PUBLISHED",
+            message: `回滚目标状态 ${version.status} 非法（目标必须是 PUBLISHED）`,
+          },
+        });
+      }
+      if (activeVersionId === null) {
+        // service.py:2683
+        return json(route, 409, {
+          detail: {
+            code: "KB_NO_ACTIVE_PUBLISH",
+            message: "该文档当前没有活跃发布，无法回滚",
+          },
+        });
+      }
+      if (activeVersionId === version.id) {
+        // service.py:2686
+        return json(route, 409, {
+          detail: {
+            code: "KB_ROLLBACK_TARGET_IS_ACTIVE",
+            message: "目标版本已是当前活跃发布",
+          },
+        });
+      }
+      // 蓝绿共存：原活跃版本保持 PUBLISHED，只切指针（state-machines §3）
+      const previous = activeVersionId;
+      activePublish.set(document.id, { versionId: version.id, publishedAt: now });
+      migrateCurrentVersion(document, version);
+      setVersionStatus(document, version, "PUBLISHED", now);
+      return json(route, 200, publishPayload(document, version, previous, false, now));
+    }
+
+    if (method === "POST" && action === "offline") {
+      // assert_offline_allowed（status.py:193）
+      if (version.status !== "PUBLISHED") {
+        return json(route, 409, {
+          detail: {
+            code: "KB_NOT_PUBLISHED",
+            message: `版本状态 ${version.status} 不可下线（只有 PUBLISHED 可下线）`,
+          },
+        });
+      }
+      const wasActive = activeVersionId === version.id;
+      if (wasActive) activePublish.delete(document.id);
+      // 后端只在 was_active 时同步文档行（service.py:2826-2845）
+      setVersionStatus(document, version, "OFFLINE", now, wasActive);
+      return json(route, 200, {
+        document_id: document.id,
+        version_id: version.id,
+        status: "OFFLINE",
+        was_active: wasActive,
+      });
+    }
+
+    if (method === "DELETE" && action === undefined) {
+      // assert_deletable（status.py:204）；软删终态，collection 保留（清理归 M6，TD-303）
+      if (version.status !== "PUBLISHED") {
+        return json(route, 409, {
+          detail: {
+            code: "KB_NOT_PUBLISHED",
+            message: `版本状态 ${version.status} 不可删除（只有 PUBLISHED 可删除）`,
+          },
+        });
+      }
+      const wasActive = activeVersionId === version.id;
+      if (wasActive) activePublish.delete(document.id);
+      // 后端只在 was_active 时同步文档行（service.py:2903-2922）
+      setVersionStatus(document, version, "DELETED", now, wasActive);
+      return json(route, 200, {
+        document_id: document.id,
+        version_id: version.id,
+        status: "DELETED",
+        was_active: wasActive,
+      });
+    }
+
+    return json(route, 404, { detail: "未 mock 的版本路径" });
+  });
 
   await page.route("**/api/v1/school/kb/documents**", async (route) => {
     const request = route.request();

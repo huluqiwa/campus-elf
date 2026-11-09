@@ -90,6 +90,12 @@ KB_ADMIN_LOGIN_ID = "e2e-kb-admin"
 KB_ADMIN_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
 KB_UPLOADER_LOGIN_ID = "e2e-kb-uploader"
 KB_UPLOADER_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
+# KB-05B（TD-292）全栈专用：审批人与发布人分账号（审批职责分离的真实边界断言：
+# uploader 无审批中心入口、publisher 无审批入口/审批 403）。口令同 KB-01C 随机生成。
+KB_APPROVER_LOGIN_ID = "e2e-kb-approver"
+KB_APPROVER_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
+KB_PUBLISHER_LOGIN_ID = "e2e-kb-publisher"
+KB_PUBLISHER_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
 
 PDF_BYTES = b"%PDF-1.4\n% e2e seed qualification\n%%EOF\n"
 
@@ -325,6 +331,32 @@ async def main() -> None:
             permissions=("school.kb.upload",),
             scope_types=("self",),
         )
+        # KB-05B（TD-292）：审批人（审批中心 + 通过/驳回）；发布人（构建/测试/发布/删除）。
+        # 职责分离的真实边界：publisher 不给审批码——UI 无审批中心入口，直连接口 403。
+        await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=KB_APPROVER_LOGIN_ID,
+            password=KB_APPROVER_PASSWORD,
+            user_type="school_admin",
+            permissions=("school.approval.todo", "school.kb.approval", "school.kb.view"),
+            scope_types=("school",),
+        )
+        await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=KB_PUBLISHER_LOGIN_ID,
+            password=KB_PUBLISHER_PASSWORD,
+            user_type="school_admin",
+            permissions=(
+                "school.kb.view",
+                "school.kb.build",
+                "school.kb.test",
+                "school.kb.publish",
+                "school.kb.delete",
+            ),
+            scope_types=("school",),
+        )
         await seed_tenant_user(
             engine,
             school_code=school_code,
@@ -410,6 +442,18 @@ async def main() -> None:
                 "school_code": school_code,
                 "login_id": KB_UPLOADER_LOGIN_ID,
                 "password": KB_UPLOADER_PASSWORD,
+            },
+            {
+                "realm": "tenant",
+                "school_code": school_code,
+                "login_id": KB_APPROVER_LOGIN_ID,
+                "password": KB_APPROVER_PASSWORD,
+            },
+            {
+                "realm": "tenant",
+                "school_code": school_code,
+                "login_id": KB_PUBLISHER_LOGIN_ID,
+                "password": KB_PUBLISHER_PASSWORD,
             },
             {
                 "realm": "tenant",
@@ -500,6 +544,16 @@ async def main() -> None:
             "school_code": school_code,
             "login_id": KB_UPLOADER_LOGIN_ID,
             "password": KB_UPLOADER_PASSWORD,
+        },
+        "kb_approver": {
+            "school_code": school_code,
+            "login_id": KB_APPROVER_LOGIN_ID,
+            "password": KB_APPROVER_PASSWORD,
+        },
+        "kb_publisher": {
+            "school_code": school_code,
+            "login_id": KB_PUBLISHER_LOGIN_ID,
+            "password": KB_PUBLISHER_PASSWORD,
         },
         "role_admin": {
             "school_code": school_code,

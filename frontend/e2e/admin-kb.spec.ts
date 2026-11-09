@@ -725,3 +725,265 @@ test("测试沙箱：无 school.kb.test 码 → 测试区块不出现", async ({
   await expect(drawer).toBeVisible();
   await expect(drawer.getByTestId("kb-test-section")).toHaveCount(0);
 });
+
+// ---- M3 KB-05B：发布/回滚/下线/删除（接口 mock；判据手抄 service.py，锚点见 kb-mock.ts）----
+
+const PUBLISH_PERMS = [...BOTH, "school.kb.publish", "school.kb.delete"];
+
+/** 蓝绿夹具：v1 已发布（可回滚目标）、v2 测试通过（待发布）。 */
+function blueGreenDocument(): KbDocumentFixture {
+  return kbDocument({
+    id: "60000000-0000-0000-0000-0000000000d1",
+    title: "发布样例",
+    status: "TEST_PASSED",
+    current_version: kbVersion({
+      id: "61000000-0000-0000-0000-0000000000d2",
+      version_no: 2,
+      filename: "发布样例-v2.pdf",
+      status: "TEST_PASSED",
+    }),
+    versions: [
+      kbVersion({
+        id: "61000000-0000-0000-0000-0000000000d1",
+        version_no: 1,
+        filename: "发布样例-v1.pdf",
+        status: "PUBLISHED",
+      }),
+      kbVersion({
+        id: "61000000-0000-0000-0000-0000000000d2",
+        version_no: 2,
+        filename: "发布样例-v2.pdf",
+        status: "TEST_PASSED",
+      }),
+    ],
+  });
+}
+
+function publishedDocument(): KbDocumentFixture {
+  return kbDocument({
+    id: "60000000-0000-0000-0000-0000000000e1",
+    title: "已发布样例",
+    status: "PUBLISHED",
+    current_version: kbVersion({
+      id: "61000000-0000-0000-0000-0000000000e1",
+      filename: "已发布样例.pdf",
+      status: "PUBLISHED",
+    }),
+    versions: [
+      kbVersion({
+        id: "61000000-0000-0000-0000-0000000000e1",
+        version_no: 1,
+        filename: "已发布样例.pdf",
+        status: "PUBLISHED",
+      }),
+    ],
+  });
+}
+
+async function openDrawer(page: Page, title: string): Promise<ReturnType<Page["getByTestId"]>> {
+  await page
+    .locator(".el-table__row", { hasText: title })
+    .getByRole("button", { name: "查看" })
+    .click();
+  const drawer = page.getByTestId("kb-document-drawer");
+  await expect(drawer).toBeVisible();
+  return drawer;
+}
+
+test("KB-05B 发布：TEST_PASSED 可发布，成功后状态列/详情变已发布，服务端状态双写", async ({
+  page,
+}) => {
+  const doc = blueGreenDocument();
+  await mockAuth(page, { authenticated: true, user: { permissions: PUBLISH_PERMS } });
+  const mock = await mockKbApi(page, { documents: [doc] });
+
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "发布样例");
+
+  // 版本表状态列：v1 已发布、v2 测试通过·可发布（14 档文案）
+  const versionTable = drawer.getByTestId("kb-version-table");
+  await expect(versionTable).toContainText("已发布");
+  await expect(versionTable).toContainText("测试通过·可发布");
+
+  await drawer.getByTestId("kb-publish").click();
+  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText("v2 已发布")).toBeVisible();
+
+  // 服务端状态断言（不只看 toast）：版本行、current_version、文档行三方同步
+  // （mockKbApi 会克隆夹具，断言必须走 mock.state.documents，不是 spec 持有的 doc 引用）
+  const state = mock.state.documents[0];
+  const v2 = state?.versions?.[1];
+  expect(v2?.status).toBe("PUBLISHED");
+  expect(state?.status).toBe("PUBLISHED");
+  expect(state?.current_version?.status).toBe("PUBLISHED");
+  expect(mock.captures.versionActions).toEqual([
+    { method: "POST", path: expect.stringContaining("/publish") },
+  ]);
+});
+
+test("KB-05B 发布门禁：READY 或缺 publish 码都不给发布按钮（前端门禁只是 UX）", async ({
+  page,
+}) => {
+  const readyDoc = kbDocument({
+    id: "60000000-0000-0000-0000-0000000000f1",
+    title: "未测试样例",
+    status: "READY",
+    current_version: kbVersion({
+      id: "61000000-0000-0000-0000-0000000000f1",
+      filename: "未测试样例.pdf",
+      status: "READY",
+    }),
+  });
+  await mockAuth(page, { authenticated: true, user: { permissions: PUBLISH_PERMS } });
+  await mockKbApi(page, { documents: [readyDoc] });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "未测试样例");
+  await expect(drawer.getByTestId("kb-publish")).toHaveCount(0);
+  await expect(drawer.getByTestId("kb-publish-row")).toHaveCount(0);
+});
+
+test("KB-05B 回滚：发布后可回滚到旧 PUBLISHED 版本；重开抽屉后选活跃版本吃 409 兜底", async ({
+  page,
+}) => {
+  const doc = blueGreenDocument();
+  await mockAuth(page, { authenticated: true, user: { permissions: PUBLISH_PERMS } });
+  const mock = await mockKbApi(page, {
+    documents: [doc],
+    // v1 是当前活跃发布（真实蓝绿状态：文档显示 v2 的 TEST_PASSED，活跃发布仍是 v1）
+    activePublishByDocument: { [doc.id]: "61000000-0000-0000-0000-0000000000d1" },
+  });
+
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "发布样例");
+  await drawer.getByTestId("kb-publish").click();
+  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText("v2 已发布")).toBeVisible();
+
+  // 发布成功后刷新：回滚下拉排除会话内已知活跃 v2，只列 v1
+  await drawer.getByTestId("kb-rollback-trigger").click();
+  const menu = page.getByTestId("kb-rollback-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu).toContainText("v1 · 发布样例-v1.pdf");
+  await expect(menu).not.toContainText("v2");
+  await menu.getByTestId("kb-rollback-target").click();
+  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText("已回滚：v1 成为活跃发布")).toBeVisible();
+  expect(mock.captures.versionActions).toHaveLength(2);
+
+  // 重开抽屉：活跃记忆复位，v1/v2 都是 PUBLISHED 全列；选到活跃 v1 → 后端 409 兜底（D2-A）
+  await page.locator(".el-drawer__close-btn").click();
+  const reopened = await openDrawer(page, "发布样例");
+  await reopened.getByTestId("kb-rollback-trigger").click();
+  const reopenedMenu = page.getByTestId("kb-rollback-menu");
+  await expect(reopenedMenu).toContainText("v2 · 发布样例-v2.pdf");
+  await reopenedMenu.getByTestId("kb-rollback-target").first().click();
+  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText("目标版本已是当前活跃发布")).toBeVisible();
+});
+
+test("KB-05B 回滚门禁：文档无活跃发布（指针已撤）→ 409 KB_NO_ACTIVE_PUBLISH 可执行提示", async ({
+  page,
+}) => {
+  const doc = publishedDocument();
+  await mockAuth(page, { authenticated: true, user: { permissions: PUBLISH_PERMS } });
+  // 不给 activePublishByDocument：PUBLISHED 版本但无 alias 行（真实世界的指针撤除边缘态）
+  await mockKbApi(page, { documents: [doc] });
+
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "已发布样例");
+  await drawer.getByTestId("kb-rollback-trigger").click();
+  await page.getByTestId("kb-rollback-menu").getByTestId("kb-rollback-target").click();
+  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText("该文档当前没有活跃发布，无法回滚")).toBeVisible();
+  // 409 后状态不变（回滚失败不产生副作用；断言走 mock.state，见发布用例注记）
+  await expect(drawer.getByTestId("kb-version-table")).toContainText("已发布");
+});
+
+test("KB-05B 下线：PUBLISHED 可下线，活跃发布撤除，终态后动作区消失", async ({ page }) => {
+  const doc = publishedDocument();
+  await mockAuth(page, { authenticated: true, user: { permissions: PUBLISH_PERMS } });
+  const mock = await mockKbApi(page, {
+    documents: [doc],
+    activePublishByDocument: { [doc.id]: "61000000-0000-0000-0000-0000000000e1" },
+  });
+
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "已发布样例");
+  await drawer.getByTestId("kb-offline").click();
+  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText("v1 已下线，活跃发布已撤除")).toBeVisible();
+
+  const state = mock.state.documents[0];
+  expect(state?.status).toBe("OFFLINE");
+  expect(state?.versions?.[0]?.status).toBe("OFFLINE");
+  expect(mock.captures.versionActions).toEqual([
+    { method: "POST", path: expect.stringContaining("/offline") },
+  ]);
+  // OFFLINE 是终态：动作区（发布/回滚/下线/删除）整体消失
+  await expect(drawer.getByTestId("kb-publish-row")).toHaveCount(0);
+  // 版本表状态列变为已下线
+  await expect(drawer.getByTestId("kb-version-table")).toContainText("已下线");
+});
+
+test("KB-05B 删除：PUBLISHED 可软删，确认按钮为「删除」，状态列变已删除", async ({ page }) => {
+  const doc = publishedDocument();
+  await mockAuth(page, { authenticated: true, user: { permissions: PUBLISH_PERMS } });
+  const mock = await mockKbApi(page, {
+    documents: [doc],
+    activePublishByDocument: { [doc.id]: "61000000-0000-0000-0000-0000000000e1" },
+  });
+
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "已发布样例");
+  await drawer.getByTestId("kb-delete").click();
+  // 删除确认框的执行按钮是「删除」（D5-A 一次确认），不是默认 OK
+  await page.locator(".el-message-box").getByRole("button", { name: "删除" }).click();
+  await expect(page.getByText("v1 已删除，活跃发布已撤除")).toBeVisible();
+
+  const state = mock.state.documents[0];
+  expect(state?.status).toBe("DELETED");
+  expect(state?.versions?.[0]?.status).toBe("DELETED");
+  expect(mock.captures.versionActions).toEqual([
+    { method: "DELETE", path: expect.not.stringContaining("/publish") },
+  ]);
+  await expect(drawer.getByTestId("kb-publish-row")).toHaveCount(0);
+  await expect(drawer.getByTestId("kb-version-table")).toContainText("已删除");
+});
+
+test("KB-05B 权限分授：有 publish 无 delete 只见下线/回滚；有 delete 无 publish 只见删除", async ({
+  page,
+}) => {
+  const docA = publishedDocument();
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: [...BOTH, "school.kb.publish"] },
+  });
+  await mockKbApi(page, {
+    documents: [docA],
+    activePublishByDocument: { [docA.id]: "61000000-0000-0000-0000-0000000000e1" },
+  });
+  await page.goto("/kb/documents");
+  const drawerA = await openDrawer(page, "已发布样例");
+  await expect(drawerA.getByTestId("kb-offline")).toBeVisible();
+  await expect(drawerA.getByTestId("kb-rollback")).toBeVisible();
+  await expect(drawerA.getByTestId("kb-delete")).toHaveCount(0);
+  await page.locator(".el-drawer__close-btn").click();
+
+  // 第二种权限组合用独立页面（auth mock 按 page 注册，互不污染）
+  const page2 = await page.context().newPage();
+  const docB = publishedDocument();
+  await mockAuth(page2, {
+    authenticated: true,
+    user: { permissions: [...BOTH, "school.kb.delete"] },
+  });
+  await mockKbApi(page2, {
+    documents: [docB],
+    activePublishByDocument: { [docB.id]: "61000000-0000-0000-0000-0000000000e1" },
+  });
+  await page2.goto("/kb/documents");
+  const drawerB = await openDrawer(page2, "已发布样例");
+  await expect(drawerB.getByTestId("kb-delete")).toBeVisible();
+  await expect(drawerB.getByTestId("kb-offline")).toHaveCount(0);
+  await expect(drawerB.getByTestId("kb-rollback")).toHaveCount(0);
+  await page2.close();
+});

@@ -201,7 +201,10 @@ export interface KbStatusMeta {
   tone: KbTone;
 }
 
-/** 文档状态五档（`school_kb.py` 的 `status`；KB-02 起 +APPROVED/REJECTED）；未知档位显示原码，不默认成安全态。 */
+/**
+ * 文档/版本状态文案（权威全集 14 档，与后端 `app/kb/status.py:16-29` 同集；KB-05B 补齐
+ * 构建生命周期四态、测试结论两态与发布三态）。未知档位显示原码，不默认成安全态。
+ */
 const DOCUMENT_STATUS_META: Record<string, KbStatusMeta> = {
   UPLOADED: { label: "待扫描/扫描中", tone: "info" },
   PENDING_APPROVAL: { label: "待审批", tone: "success" },
@@ -209,10 +212,136 @@ const DOCUMENT_STATUS_META: Record<string, KbStatusMeta> = {
   // KB-02：审批结论两态。APPROVED 用 info（可以建构建了但还没建），成功绿留给发布后的终态。
   APPROVED: { label: "已审批·待构建", tone: "info" },
   REJECTED: { label: "已驳回", tone: "danger" },
+  // KB-03：构建生命周期。FAILED 是版本态（可重试重建），BUILDING 进行中。
+  BUILDING: { label: "构建中", tone: "info" },
+  READY: { label: "已构建·待测试", tone: "info" },
+  FAILED: { label: "构建失败", tone: "danger" },
+  // KB-04：测试沙箱（版本生命周期档位；测试运行的独立状态见 test-logic 的运行态 map）。
+  TESTING: { label: "测试进行中", tone: "warning" },
+  TEST_PASSED: { label: "测试通过·可发布", tone: "success" },
+  TEST_FAILED: { label: "测试未通过", tone: "danger" },
+  // KB-05：发布三态。PUBLISHED 拿成功绿；OFFLINE 是主动下线的终态用中性色；DELETED 危险。
+  PUBLISHED: { label: "已发布", tone: "success" },
+  OFFLINE: { label: "已下线", tone: "info" },
+  DELETED: { label: "已删除", tone: "danger" },
 };
 
 export function documentStatusMeta(status: string): KbStatusMeta {
   return DOCUMENT_STATUS_META[status] ?? { label: `未知状态（${status}）`, tone: "warning" };
+}
+
+// ---- KB-05B：发布/回滚/下线/删除的前端门禁与文案 ----
+
+/** 权限码（与后端 `school_kb.py:64-68` 的依赖声明同名；发布/回滚/下线同码，删除独立码）。 */
+export const KB_PUBLISH_CODE = "school.kb.publish";
+export const KB_DELETE_CODE = "school.kb.delete";
+
+/** 版本状态常量（发布门禁与目标过滤用；全集见 `DOCUMENT_STATUS_META` 注释）。 */
+export const KB_STATUS_TEST_PASSED = "TEST_PASSED";
+export const KB_STATUS_PUBLISHED = "PUBLISHED";
+
+/**
+ * 发布按钮门禁（后端 `assert_publishable` 的 UX 镜像，`status.py:92-96`：只有 TEST_PASSED 可发布）。
+ * 服务端仍是唯一门禁：这里为 false 就不给按钮，为 true 点了仍可能吃后端 409。
+ */
+export function publishGate(
+  status: string,
+  versionId: string | null | undefined,
+  permissions: readonly string[],
+): boolean {
+  return (
+    status === KB_STATUS_TEST_PASSED &&
+    versionId !== null &&
+    versionId !== undefined &&
+    permissions.includes(KB_PUBLISH_CODE)
+  );
+}
+
+/** 下线按钮门禁（后端只有 PUBLISHED 可下线，`status.py:101-105`）。 */
+export function offlineGate(
+  status: string,
+  versionId: string | null | undefined,
+  permissions: readonly string[],
+): boolean {
+  return (
+    status === KB_STATUS_PUBLISHED &&
+    versionId !== null &&
+    versionId !== undefined &&
+    permissions.includes(KB_PUBLISH_CODE)
+  );
+}
+
+/** 删除按钮门禁（PUBLISHED + 独立码 `school.kb.delete`，与发布分授）。 */
+export function deleteGate(
+  status: string,
+  versionId: string | null | undefined,
+  permissions: readonly string[],
+): boolean {
+  return (
+    status === KB_STATUS_PUBLISHED &&
+    versionId !== null &&
+    versionId !== undefined &&
+    permissions.includes(KB_DELETE_CODE)
+  );
+}
+
+export interface KbRollbackTarget {
+  id: string;
+  version_no: number;
+  filename: string;
+}
+
+/**
+ * 回滚目标候选：已加载版本里的 PUBLISHED 行（蓝绿共存，D2-A）。
+ * `activeVersionId` 来自本会话内 publish/rollback 成功响应的记忆；刷新/首次打开为 null
+ * （前端无法感知活跃版本，TD 已登记）——此时全列 PUBLISHED，选到活跃版本吃后端
+ * 409 `KB_ROLLBACK_TARGET_IS_ACTIVE`（服务端是唯一门禁）。
+ */
+export function rollbackTargets(
+  versions: readonly (KbRollbackTarget & { status: string })[],
+  activeVersionId: string | null,
+): KbRollbackTarget[] {
+  return versions
+    .filter((version) => version.status === KB_STATUS_PUBLISHED && version.id !== activeVersionId)
+    .map(({ id, version_no, filename }) => ({ id, version_no, filename }));
+}
+
+/** 从 ApiError detail 里取机器可读码（`approval-logic.approvalErrorCode` 同型）。 */
+function kbPublishErrorCode(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  const detail = error.detail;
+  if (!detail || typeof detail !== "object") return null;
+  const { code } = detail as { code?: unknown };
+  return typeof code === "string" ? code : null;
+}
+
+/** 发布/回滚/下线/删除 409 码 → 可执行指引（每条都给下一步；KB-05 后端审查 m-4 先例）。 */
+const PUBLISH_ACTION_HINTS: Record<string, string> = {
+  KB_NOT_TEST_PASSED: "该版本未通过测试沙箱验证，请先发起测试并通过后再发布",
+  KB_PUBLISHED_NOT_ACTIVE: "该版本已发布但不是当前活跃版本，请使用「回滚」切换到它",
+  KB_NOT_PUBLISHED: "该版本已不是已发布状态（可能已被下线或删除），请刷新后重试",
+  KB_NO_ACTIVE_PUBLISH: "该文档当前没有活跃发布，无法回滚",
+  KB_ROLLBACK_TARGET_IS_ACTIVE: "目标版本已是当前活跃发布，无需回滚",
+  KB_INDEX_NOT_READY: "该版本的向量索引未就绪，请先创建构建并等构建完成",
+  KB_INDEX_INCOMPLETE: "该版本的向量索引不完整，请重新创建构建",
+};
+
+/**
+ * 发布/回滚/下线/删除的 409 人话文案：后端 `detail.message` 是主文案（已是可执行中文），
+ * 缺失/泛化时按码给指引，再退调用方 fallback（`kbEntryConflictMessage` 同型，服务端优先）。
+ */
+export function kbPublishActionMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    const detail = error.detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const serverMessage = (detail as Record<string, unknown>).message;
+      if (typeof serverMessage === "string" && serverMessage) return serverMessage;
+      // detail 是结构化对象但没有 message：error.message 是客户端哨兵（「请求失败（N）」），
+      // 展示给用户没有信息量——直接按码给指引或退调用方 fallback。
+      return PUBLISH_ACTION_HINTS[kbPublishErrorCode(error) ?? ""] ?? fallback;
+    }
+  }
+  return toUserMessage(error, fallback);
 }
 
 /**

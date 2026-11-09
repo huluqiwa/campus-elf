@@ -12,15 +12,16 @@ from app.workers.tasks import echo
 
 
 def test_worker_settings_registers_tasks() -> None:
-    """Worker 入口挂载 echo、导入任务（M2-ORG02）、知识库扫描（KB-01）与构建（KB-03A）。"""
+    """Worker 入口挂载 echo、导入任务（M2-ORG02）、知识库扫描（KB-01）、构建（KB-03A）与测试运行（KB-04A，KB-05B 补注册）。"""
 
-    assert len(WorkerSettings.functions) == 4
+    assert len(WorkerSettings.functions) == 5
     names = [getattr(item, 'name', None) for item in WorkerSettings.functions]
     assert run_import_job in WorkerSettings.functions
     assert scan_kb_version in WorkerSettings.functions
     assert echo in WorkerSettings.functions
-    # build_kb_version 经 Function 包装（timeout_s=1800），按 name 断言
+    # build_kb_version / run_kb_test 经 Function 包装（显式 timeout_s），按 name 断言
     assert 'build_kb_version' in names
+    assert 'run_kb_test' in names
 
 
 def test_worker_settings_build_function_has_explicit_timeout() -> None:
@@ -32,6 +33,17 @@ def test_worker_settings_build_function_has_explicit_timeout() -> None:
     functions = [item for item in WorkerSettings.functions if isinstance(item, Function)]
     build = next(item for item in functions if item.name == "build_kb_version")
     assert build.timeout_s == 1800
+
+
+def test_worker_settings_test_run_function_has_explicit_timeout() -> None:
+    """KB-05B（漏注册修复）：测试运行也显式覆盖 timeout——200 条用例 × 逐条嵌入 + 检索
+    在 CPU TEI 上可超 arq 默认 300s；防「注册了函数但吃了默认超时」的同类回归。"""
+
+    from arq.worker import Function
+
+    functions = [item for item in WorkerSettings.functions if isinstance(item, Function)]
+    test_run = next(item for item in functions if item.name == "run_kb_test")
+    assert test_run.timeout_s == 600
 
 
 def test_worker_settings_registers_kb_scan_watchdog_cron() -> None:

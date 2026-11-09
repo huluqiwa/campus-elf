@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "./auth";
 import { createKbApi } from "./kb";
-import type { KbDocumentView, KbVersionView } from "./kb";
+import type { KbDocumentView, KbPublishResult, KbVersionStateResult, KbVersionView } from "./kb";
 
 function sessionStub(
   handler: (path: string, init?: RequestInit) => { status?: number; body?: unknown } | undefined,
@@ -150,5 +150,86 @@ describe("createKbApi 读取接口", () => {
     const page = await createKbApi(session).listVersions("d-1", { limit: 20, cursor: "o-1" });
     expect(calls[0].path).toBe("/api/v1/school/kb/documents/d-1/versions?limit=20&cursor=o-1");
     expect(page.next_cursor).toBe("o-2");
+  });
+});
+
+// KB-05B：发布/回滚/下线/删除四动作（后端契约 school_kb.py:854/879/903/928）。
+const PUBLISH_RESULT: KbPublishResult = {
+  document_id: "d-1",
+  version_id: "v-1",
+  version_no: 1,
+  status: "PUBLISHED",
+  alias: "tenant_abc_kb_doc_active",
+  collection: "tenant_abc_kb_v1",
+  previous_version_id: null,
+  published_at: "2026-11-10T00:00:00Z",
+  replayed: false,
+  alias_synced: true,
+};
+
+const STATE_RESULT: KbVersionStateResult = {
+  document_id: "d-1",
+  version_id: "v-1",
+  status: "OFFLINE",
+  was_active: true,
+};
+
+describe("createKbApi 发布动作", () => {
+  it("publish POST 到 /versions/{id}/publish，无请求体", async () => {
+    const { session, calls } = sessionStub(() => ({ body: PUBLISH_RESULT }));
+    const result = await createKbApi(session).publishVersion("v-1");
+    expect(calls[0].path).toBe("/api/v1/school/kb/versions/v-1/publish");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.body).toBeUndefined();
+    expect(result.alias_synced).toBe(true);
+  });
+
+  it("rollback 的 path id 是回滚目标版本（D2-A），无请求体", async () => {
+    const { session, calls } = sessionStub(() => ({
+      body: { ...PUBLISH_RESULT, version_id: "v-0" },
+    }));
+    const result = await createKbApi(session).rollbackVersion("v-0");
+    expect(calls[0].path).toBe("/api/v1/school/kb/versions/v-0/rollback");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(result.version_id).toBe("v-0");
+  });
+
+  it("publish 409 KB_NOT_TEST_PASSED 原样抛出", async () => {
+    const detail = { code: "KB_NOT_TEST_PASSED", message: "该版本未通过测试，不能发布" };
+    const { session } = sessionStub(() => ({ status: 409, body: detail }));
+    await expect(createKbApi(session).publishVersion("v-1")).rejects.toMatchObject({
+      status: 409,
+      detail,
+    });
+  });
+});
+
+describe("createKbApi 状态变更动作", () => {
+  it("offline POST 到 /versions/{id}/offline，返回 was_active", async () => {
+    const { session, calls } = sessionStub(() => ({ body: STATE_RESULT }));
+    const result = await createKbApi(session).offlineVersion("v-1");
+    expect(calls[0].path).toBe("/api/v1/school/kb/versions/v-1/offline");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(result.was_active).toBe(true);
+    expect(result.status).toBe("OFFLINE");
+  });
+
+  it("deleteVersion 用 DELETE 方法且无请求体", async () => {
+    const { session, calls } = sessionStub(() => ({
+      body: { ...STATE_RESULT, status: "DELETED" },
+    }));
+    const result = await createKbApi(session).deleteVersion("v-1");
+    expect(calls[0].path).toBe("/api/v1/school/kb/versions/v-1");
+    expect(calls[0].init?.method).toBe("DELETE");
+    expect(result.status).toBe("DELETED");
+  });
+
+  it("offline 409 KB_NOT_PUBLISHED 原样抛出", async () => {
+    const detail = { code: "KB_NOT_PUBLISHED", message: "只有已发布版本可以下线" };
+    const { session } = sessionStub(() => ({ status: 409, body: detail }));
+    await expect(createKbApi(session).offlineVersion("v-1")).rejects.toMatchObject({
+      status: 409,
+      detail,
+    });
   });
 });
