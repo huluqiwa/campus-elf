@@ -139,8 +139,36 @@ wait_worker_running() {
   exit 1
 }
 
+wait_tei_healthy() {
+  # KB-05B（TD-292）：构建 embedding 与测试运行依赖 tei-embed；模型加载要几分钟，
+  # 不等 healthy 会让第一个构建任务在 TEI 未就绪时失败（E2E 稳定性）。
+  # 上限 700s > healthcheck 的 start_period 600s（review m-6）：脚本放弃时间必须晚于
+  # 容器自己判死的时间，否则「脚本报错但容器稍后 healthy」的自造 flake。
+  local status="" i
+  echo "[e2e-stack] 等待 tei-embed healthy（首次启动需加载 BGE-M3，可达数分钟）…"
+  for i in $(seq 1 140); do
+    status="$(e2e_compose ps --format '{{.Health}}' tei-embed 2>/dev/null | head -1 || true)"
+    if [[ "${status}" == "healthy" ]]; then
+      echo "[e2e-stack] tei-embed healthy"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "[e2e-stack] 错误：tei-embed 未在 700s 内 healthy（最后状态：${status:-unknown}）。" >&2
+  e2e_compose logs --tail 50 tei-embed >&2 || true
+  exit 1
+}
+
 cmd_up() {
   # 账号文件已在 up) 入口删除（含端口非法等提前退出路径），这里不再重复。
+  # 0) tei-embed 的模型卷是 external（复用 dev 栈 campus-elf_tei_models，review m-6）：
+  #    dev 栈从未跑过 rag profile 的机器上会直接 external volume not found，先预检给出可操作提示。
+  if ! docker volume inspect campus-elf_tei_models >/dev/null 2>&1; then
+    echo "[e2e-stack] 错误：找不到 external 卷 campus-elf_tei_models（tei-embed 复用 dev 栈的 BGE-M3 模型）。" >&2
+    echo "[e2e-stack] 处理：cd deploy && docker compose --profile rag up tei-embed（跑一次 dev 栈下载模型），" >&2
+    echo "[e2e-stack]        或 docker volume create campus-elf_tei_models（接受首次启动重新下载 GB 级模型）。" >&2
+    exit 1
+  fi
   # 1) 依赖栈（幂等；同时修正角色口令漂移）；其 compose 文件不含 E2E 必填变量，
   #    先于 ensure_e2e_secrets 执行也不会插值失败。
   bash "${REPO_ROOT}/scripts/test-stack.sh" up
@@ -163,6 +191,7 @@ cmd_up() {
   e2e_compose up -d --build
   wait_backend_healthy
   wait_worker_running
+  wait_tei_healthy
 
   # 4) seed（真实 HTTP 注册→审核→开通 + 直写平台/租户账号）
   echo "[e2e-stack] 生成种子数据 …"

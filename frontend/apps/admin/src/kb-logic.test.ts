@@ -4,19 +4,26 @@ import { ApiError } from "@campus-elf/api-client";
 import type { KbDocumentView, KbVersionView } from "@campus-elf/api-client";
 
 import {
+  KB_DELETE_CODE,
   KB_MAX_BATCH_BYTES,
   KB_MAX_FILE_BYTES,
+  KB_PUBLISH_CODE,
   SCAN_POLL_WINDOW_MS,
   batchPreflightError,
   buildMetadata,
   defaultTitle,
+  deleteGate,
   documentStatusMeta,
   filePreflightError,
   formatBytes,
   kbErrorInfo,
+  kbPublishActionMessage,
   metadataError,
+  offlineGate,
   parseTags,
   pendingScanDocumentIds,
+  publishGate,
+  rollbackTargets,
   scanEngineLabel,
   scanStateMeta,
   scanTone,
@@ -338,5 +345,108 @@ describe("展示辅助", () => {
     expect(staleBannerText(new Date(2026, 9, 31, 9, 5, 7))).toBe(
       "数据可能不是最新（上次成功 09:05:07）",
     );
+  });
+});
+
+describe("发布态状态文案（KB-05B：权威全集 14 档，backend app/kb/status.py:16-29）", () => {
+  it("构建生命周期四态", () => {
+    expect(documentStatusMeta("BUILDING")).toEqual({ label: "构建中", tone: "info" });
+    expect(documentStatusMeta("READY")).toEqual({ label: "已构建·待测试", tone: "info" });
+    expect(documentStatusMeta("FAILED")).toEqual({ label: "构建失败", tone: "danger" });
+    expect(documentStatusMeta("TESTING")).toEqual({ label: "测试进行中", tone: "warning" });
+  });
+
+  it("测试结论两态", () => {
+    expect(documentStatusMeta("TEST_PASSED")).toEqual({
+      label: "测试通过·可发布",
+      tone: "success",
+    });
+    expect(documentStatusMeta("TEST_FAILED")).toEqual({ label: "测试未通过", tone: "danger" });
+  });
+
+  it("发布三态：成功绿留给 PUBLISHED，OFFLINE 中性，DELETED 危险", () => {
+    expect(documentStatusMeta("PUBLISHED")).toEqual({ label: "已发布", tone: "success" });
+    expect(documentStatusMeta("OFFLINE")).toEqual({ label: "已下线", tone: "info" });
+    expect(documentStatusMeta("DELETED")).toEqual({ label: "已删除", tone: "danger" });
+  });
+});
+
+describe("发布/回滚/下线/删除门禁（镜像后端 school_kb.py:64-68 与 status.py 守卫）", () => {
+  const ALL = [KB_PUBLISH_CODE, KB_DELETE_CODE];
+
+  it("publishGate：只有 TEST_PASSED + school.kb.publish 才亮", () => {
+    expect(publishGate("TEST_PASSED", "v-1", ALL)).toBe(true);
+    // 状态不对：门禁拒绝（后端 assert_publishable 的前端 UX 镜像）
+    expect(publishGate("READY", "v-1", ALL)).toBe(false);
+    expect(publishGate("PUBLISHED", "v-1", ALL)).toBe(false);
+    expect(publishGate("TEST_FAILED", "v-1", ALL)).toBe(false);
+    // 缺码
+    expect(publishGate("TEST_PASSED", "v-1", ["school.kb.view"])).toBe(false);
+    // 没有当前版本（详情未加载完）
+    expect(publishGate("TEST_PASSED", null, ALL)).toBe(false);
+    expect(publishGate("TEST_PASSED", undefined, ALL)).toBe(false);
+  });
+
+  it("offlineGate：PUBLISHED + school.kb.publish", () => {
+    expect(offlineGate("PUBLISHED", "v-1", ALL)).toBe(true);
+    expect(offlineGate("TEST_PASSED", "v-1", ALL)).toBe(false);
+    expect(offlineGate("OFFLINE", "v-1", ALL)).toBe(false);
+    expect(offlineGate("PUBLISHED", "v-1", ["school.kb.delete"])).toBe(false);
+    expect(offlineGate("PUBLISHED", null, ALL)).toBe(false);
+  });
+
+  it("deleteGate：PUBLISHED + school.kb.delete（独立码，与发布分授）", () => {
+    expect(deleteGate("PUBLISHED", "v-1", [KB_DELETE_CODE])).toBe(true);
+    expect(deleteGate("PUBLISHED", "v-1", [KB_PUBLISH_CODE])).toBe(false);
+    expect(deleteGate("OFFLINE", "v-1", [KB_DELETE_CODE])).toBe(false);
+    expect(deleteGate("PUBLISHED", null, [KB_DELETE_CODE])).toBe(false);
+  });
+
+  it("rollbackTargets：只列 PUBLISHED，已知活跃版本被排除，未知活跃全列", () => {
+    const versions = [
+      { id: "v-1", version_no: 1, filename: "a.md", status: "PUBLISHED" },
+      { id: "v-2", version_no: 2, filename: "b.md", status: "PUBLISHED" },
+      { id: "v-3", version_no: 3, filename: "c.md", status: "TEST_PASSED" },
+      { id: "v-4", version_no: 4, filename: "d.md", status: "OFFLINE" },
+    ];
+    expect(rollbackTargets(versions, null)).toHaveLength(2);
+    expect(rollbackTargets(versions, null).map((t) => t.id)).toEqual(["v-1", "v-2"]);
+    // 会话内已知活跃（publish/rollback 响应记忆，D2-A）：排除
+    expect(rollbackTargets(versions, "v-2").map((t) => t.id)).toEqual(["v-1"]);
+    // 全被排除时给空数组（下拉显示「无可回滚目标」而不是隐藏按钮——按钮可见性只看权限+状态）
+    expect(rollbackTargets([versions[0]], "v-1")).toEqual([]);
+  });
+});
+
+describe("发布动作 409 文案（服务端 message 是主文案，码是兜底；KB-05 审查 m-4 先例）", () => {
+  it("KB_PUBLISHED_NOT_ACTIVE 引导用回滚", () => {
+    const error = new ApiError("请求失败（409）", 409, {
+      code: "KB_PUBLISHED_NOT_ACTIVE",
+      message: "版本已发布但不是活跃发布，请使用回滚端点切换",
+    });
+    expect(kbPublishActionMessage(error, "操作失败")).toBe(
+      "版本已发布但不是活跃发布，请使用回滚端点切换",
+    );
+  });
+
+  it("服务端 message 缺失时按码给可执行指引", () => {
+    const bare = (code: string) => new ApiError("请求失败（409）", 409, { code });
+    expect(kbPublishActionMessage(bare("KB_NOT_TEST_PASSED"), "操作失败")).toContain("测试");
+    expect(kbPublishActionMessage(bare("KB_PUBLISHED_NOT_ACTIVE"), "操作失败")).toContain("回滚");
+    expect(kbPublishActionMessage(bare("KB_NOT_PUBLISHED"), "操作失败")).toContain("已发布");
+    expect(kbPublishActionMessage(bare("KB_NO_ACTIVE_PUBLISH"), "操作失败")).toContain("活跃发布");
+    expect(kbPublishActionMessage(bare("KB_ROLLBACK_TARGET_IS_ACTIVE"), "操作失败")).toContain(
+      "已是当前活跃",
+    );
+    expect(kbPublishActionMessage(bare("KB_INDEX_NOT_READY"), "操作失败")).toContain("构建");
+    expect(kbPublishActionMessage(bare("KB_INDEX_INCOMPLETE"), "操作失败")).toContain("构建");
+  });
+
+  it("未知码回落到调用方 fallback；普通 Error 遵循 toUserMessage 惯例显示其 message", () => {
+    const unknown = new ApiError("请求失败（409）", 409, { code: "SOMETHING_ELSE" });
+    expect(kbPublishActionMessage(unknown, "操作失败")).toBe("操作失败");
+    // 非 ApiError 交给 toUserMessage：有 message 显示 message，无 message 退 fallback
+    expect(kbPublishActionMessage(new Error("网络错误"), "操作失败")).toBe("网络错误");
+    expect(kbPublishActionMessage(new Error(""), "操作失败")).toBe("操作失败");
   });
 });

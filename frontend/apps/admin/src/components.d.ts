@@ -12,6 +12,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AccountDetailDrawer: typeof import('./components/AccountDetailDrawer.vue')['default']
+    ApprovalDetailDrawer: typeof import('./components/ApprovalDetailDrawer.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElAside: typeof import('element-plus/es')['ElAside']
     ElButton: typeof import('element-plus/es')['ElButton']
@@ -23,6 +24,9 @@ declare module 'vue' {
     ElDescriptionsItem: typeof import('element-plus/es')['ElDescriptionsItem']
     ElDialog: typeof import('element-plus/es')['ElDialog']
     ElDrawer: typeof import('element-plus/es')['ElDrawer']
+    ElDropdown: typeof import('element-plus/es')['ElDropdown']
+    ElDropdownItem: typeof import('element-plus/es')['ElDropdownItem']
+    ElDropdownMenu: typeof import('element-plus/es')['ElDropdownMenu']
     ElForm: typeof import('element-plus/es')['ElForm']
     ElFormItem: typeof import('element-plus/es')['ElFormItem']
     ElHeader: typeof import('element-plus/es')['ElHeader']
@@ -49,6 +53,8 @@ declare module 'vue' {
     ElText: typeof import('element-plus/es')['ElText']
     ElTree: typeof import('element-plus/es')['ElTree']
     ElUpload: typeof import('element-plus/es')['ElUpload']
+    KbDocumentDrawer: typeof import('./components/KbDocumentDrawer.vue')['default']
+    KbScanTag: typeof import('./components/KbScanTag.vue')['default']
     MfaEnrollPanel: typeof import('./components/MfaEnrollPanel.vue')['default']
     MfaQrCode: typeof import('./components/MfaQrCode.vue')['default']
     RoleCreateDialog: typeof import('./components/RoleCreateDialog.vue')['default']

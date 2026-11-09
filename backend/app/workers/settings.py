@@ -17,6 +17,7 @@ from arq.worker import Function
 from app.config import Settings, get_settings
 from app.kb.build_task import build_kb_version, retry_stale_build_jobs
 from app.kb.scan_task import retry_pending_kb_scans, scan_kb_version
+from app.kb.test_task import run_kb_test
 from app.org.import_task import fail_stale_import_jobs, run_import_job
 from app.workers.tasks import cleanup_refresh_tokens, echo
 
@@ -81,11 +82,18 @@ class WorkerSettings:
     # B2（审查）：arq worker 默认 job_timeout=300s 会腰斩合法长解析（MinerU 上限
     # 600s、冷启动 248s 实证）——构建任务显式给 30 分钟；取消未捕获会滞留 BUILDING 假 STALE。
     build_timeout_s = 1800
+    # 测试运行任务的超时（KB-05B 补注册时定）：与 build 的显式超时同理由，覆盖大测试集的
+    # 嵌入 + 逐条 Qdrant 检索；上限同 build 取整（arq 默认 300s 对 200 条用例不够）。
+    test_timeout_s = 600
     functions: Sequence[WorkerCoroutine | Function] = [
         cast(WorkerCoroutine, echo),
         run_import_job,
         scan_kb_version,
         Function("build_kb_version", build_kb_version, timeout_s=build_timeout_s, keep_result_s=None, keep_result_forever=None, max_tries=None),
+        # KB-04A 测试运行任务（KB-05B 全栈 E2E 发现的漏注册修复）：真实部署里测试运行
+        # 经队列执行；不注册则 worker 报 function not found、运行永远停在 TESTING。
+        # 显式 timeout 与 build 同型：200 条用例 × 逐条嵌入 + 检索在 CPU TEI 上可超 arq 默认 300s。
+        Function("run_kb_test", run_kb_test, timeout_s=test_timeout_s, keep_result_s=None, keep_result_forever=None, max_tries=None),
     ]
     # 每天 03:30（UTC）清理过期/已撤销刷新令牌（TD-067）
     cron_jobs: Sequence[CronJob] | None = [

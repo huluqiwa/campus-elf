@@ -1,4 +1,4 @@
-/** 知识库域 API（M3 KB-01A 接口的前端消费：批量上传 + 文档列表/详情/版本）。 */
+/** 知识库域 API（M3 KB-01A 接口的前端消费：批量上传 + 文档列表/详情/版本；KB-05B 增发布/回滚/下线/删除）。 */
 
 import { buildQuery, type AuthSessionRequest, type Page } from "./org";
 
@@ -39,6 +39,33 @@ export interface KbUploadResult {
   documents: KbDocumentView[];
 }
 
+/**
+ * 发布/回滚结果（后端 `KbPublishResponse`，`school_kb.py:815-825`）。
+ * 回滚时 path id = 目标版本（D2-A），响应里的 `version_id` 是切换后的活跃版本。
+ */
+export interface KbPublishResult {
+  document_id: string;
+  version_id: string;
+  version_no: number;
+  status: string;
+  alias: string;
+  collection: string;
+  previous_version_id: string | null;
+  published_at: string;
+  /** 同一活跃版本重放发布（alias 恢复路径）时为 true。 */
+  replayed: boolean;
+  alias_synced: boolean;
+}
+
+/** 下线/删除结果（后端 `KbVersionStateResponse`，`school_kb.py:828-835`）。 */
+export interface KbVersionStateResult {
+  document_id: string;
+  version_id: string;
+  status: string;
+  /** 该版本在操作时是否为活跃发布（活跃发布被撤除时 UI 据此提示影响）。 */
+  was_active: boolean;
+}
+
 /** 单文件可选元数据；未提供时后端按文件名派生标题。 */
 export interface KbFileMetadataInput {
   title?: string;
@@ -63,6 +90,14 @@ export interface KbApi {
     documentId: string,
     query?: { limit?: number; cursor?: string },
   ): Promise<Page<KbVersionView>>;
+  /** 发布版本（门禁 TEST_PASSED 由后端执行；同一活跃版本重放 = 重建 alias，`replayed=true`）。 */
+  publishVersion(versionId: string): Promise<KbPublishResult>;
+  /** 回滚到任意 PUBLISHED 目标版本（path id = 目标；D2-A 蓝绿共存语义）。 */
+  rollbackVersion(targetVersionId: string): Promise<KbPublishResult>;
+  /** 下线版本（PUBLISHED → OFFLINE 终态；collection 保留）。 */
+  offlineVersion(versionId: string): Promise<KbVersionStateResult>;
+  /** 软删版本（PUBLISHED → DELETED 终态；审计；collection 保留至 M6 清理）。 */
+  deleteVersion(versionId: string): Promise<KbVersionStateResult>;
 }
 
 export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
@@ -97,6 +132,26 @@ export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
           cursor: query.cursor,
         })}`,
       );
+    },
+    async publishVersion(versionId) {
+      return request<KbPublishResult>(`/api/v1/school/kb/versions/${versionId}/publish`, {
+        method: "POST",
+      });
+    },
+    async rollbackVersion(targetVersionId) {
+      return request<KbPublishResult>(`/api/v1/school/kb/versions/${targetVersionId}/rollback`, {
+        method: "POST",
+      });
+    },
+    async offlineVersion(versionId) {
+      return request<KbVersionStateResult>(`/api/v1/school/kb/versions/${versionId}/offline`, {
+        method: "POST",
+      });
+    },
+    async deleteVersion(versionId) {
+      return request<KbVersionStateResult>(`/api/v1/school/kb/versions/${versionId}`, {
+        method: "DELETE",
+      });
     },
   };
 }
