@@ -44,6 +44,109 @@ def collection_name(tenant_id: UUID, version_id: UUID) -> str:
     return f"tenant_{tenant_hash(tenant_id)}_kb_v{version_id}"
 
 
+def document_hash(document_id: UUID) -> str:
+    """文档 id 的短哈希（alias 名内不出现明文文档 id，与租户哈希同款口径）。"""
+
+    return hashlib.sha256(str(document_id).encode("utf-8")).hexdigest()[:12]
+
+
+def alias_name(tenant_id: UUID, document_id: UUID) -> str:
+    """`tenant_{tenant_hash}_kb_d{document_hash}_active`（design §7.4 修订：alias 每文档一个）。
+
+    design §7.4 原文的租户单 alias 名物理上不成立（Qdrant alias 指向单 collection，
+    而 collection 是每版本一个、租户多文档必有多个活跃 collection）；
+    KB-05 简报 D1-A 已确认按文档粒度修订，合入时回写 design。
+    """
+
+    return f"tenant_{tenant_hash(tenant_id)}_kb_d{document_hash(document_id)}_active"
+
+
+def alias_switch_ops(
+    alias: str, current_collection: str | None, target_collection: str
+) -> list[qmodels.CreateAliasOperation | qmodels.DeleteAliasOperation]:
+    """构造一次 `update_collection_aliases` 的原子操作序列（纯函数，单测覆盖）。
+
+    - `current_collection=None`：alias 不存在（首次发布/重建）→ 单 Create；
+    - 相同：无操作（幂等重放的已同步态）→ 空列表；
+    - 不同：`[Delete, Create]` 同一次调用内原子完成（蓝绿切换，发布/回滚窗口零空档）。
+    """
+
+    if current_collection is None:
+        return [
+            qmodels.CreateAliasOperation(
+                create_alias=qmodels.CreateAlias(
+                    collection_name=target_collection, alias_name=alias
+                )
+            )
+        ]
+    if current_collection == target_collection:
+        return []
+    return [
+        qmodels.DeleteAliasOperation(delete_alias=qmodels.DeleteAlias(alias_name=alias)),
+        qmodels.CreateAliasOperation(
+            create_alias=qmodels.CreateAlias(
+                collection_name=target_collection, alias_name=alias
+            )
+        ),
+    ]
+
+
+async def resolve_alias_collection(client: AsyncQdrantClient, alias: str) -> str | None:
+    """查 alias 当前指向的 collection（不存在返回 None；幂等重放判定用）。"""
+
+    try:
+        response = await client.get_aliases()
+    except Exception as exc:
+        logger.warning("Qdrant get_aliases 失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise IndexError_("ALIAS_LOOKUP_FAILED", "向量别名查询失败") from exc
+    for entry in response.aliases:
+        if entry.alias_name == alias:
+            return entry.collection_name
+    return None
+
+
+async def switch_alias(
+    client: AsyncQdrantClient, *, alias: str, current_collection: str | None, target_collection: str
+) -> None:
+    """原子切换 alias（或首次创建）；无操作时跳过。"""
+
+    ops = alias_switch_ops(alias, current_collection, target_collection)
+    if not ops:
+        return
+    try:
+        await client.update_collection_aliases(change_aliases_operations=ops)
+    except Exception as exc:
+        logger.warning("Qdrant alias 切换失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise IndexError_("ALIAS_SWITCH_FAILED", "向量别名切换失败") from exc
+
+
+async def mark_published_payload(
+    client: AsyncQdrantClient, *, collection: str, version_id: UUID
+) -> None:
+    """发布侧翻转 payload `is_published=true`（indexer 模块注释的 KB-03A 预留）。
+
+    payload 的 `version_id` 是字符串（`build_payload`），filter 用字符串匹配；
+    检索（M4）主键是 `tenant_id_hash`+`version_id`，本标记为信息位。
+    """
+
+    try:
+        await client.set_payload(
+            collection_name=collection,
+            payload={"is_published": True},
+            points=qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="version_id", match=qmodels.MatchValue(value=str(version_id))
+                    )
+                ]
+            ),
+            wait=True,
+        )
+    except Exception as exc:
+        logger.warning("Qdrant set_payload 失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise IndexError_("PAYLOAD_UPDATE_FAILED", "发布标记写入失败") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class IndexPoint:
     """一个待索引点（chunk 行 + 已算好的双向量）。"""

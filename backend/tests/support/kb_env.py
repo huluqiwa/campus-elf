@@ -39,6 +39,8 @@ B_BUILDER = "kb-b-builder"
 KB_APPROVER = "kb-approver"
 KB_BUILDER = "kb-builder"
 KB_SELF_APPROVER = "kb-self-approver"
+KB_PUBLISHER = "kb-publisher"
+KB_B_PUBLISHER = "kb-b-publisher"
 
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 MD = "# \u6821\u89c4\n\n\u6309\u65f6\u5230\u6821\u3002\n".encode()
@@ -135,6 +137,23 @@ async def _seed_data(engine: AsyncEngine) -> tuple[UUID, UUID]:
         login_id=KB_BUILDER,
         password=PASSWORD,
         permissions=("school.kb.build", "school.kb.view"),
+        scope_types=("school",),
+    )
+    # KB-05：发布人（发布/回滚/下线/删除）与租户 B 发布人（跨租 404 探测）
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_PUBLISHER,
+        password=PASSWORD,
+        permissions=("school.kb.publish", "school.kb.delete", "school.kb.view"),
+        scope_types=("school",),
+    )
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_B,
+        login_id=KB_B_PUBLISHER,
+        password=PASSWORD,
+        permissions=("school.kb.publish", "school.kb.delete", "school.kb.view"),
         scope_types=("school",),
     )
     await seed_tenant_user(

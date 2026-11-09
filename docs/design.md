@@ -226,7 +226,7 @@ LLM-05-CampusCompanionElf/
 | `kb_chunk_edits` | id, tenant_id, source_version_id, chunk_id, before_hash, after_hash, new_content, edited_by, reason, status(draft/submitted/confirmed/discarded), derived_version_id, created_at | 块编辑记录（K5） |
 | `kb_embedding_cache` | tenant_id, model, chunk_hash, dense_object_key, sparse_object_key, created_at | 向量复用缓存（K5）；派生重建只对改动块重新推理 |
 | `kb_index_versions` | id, tenant_id, kb_id/document_version_id, qdrant_collection, status, published_at, retired_at | 版本化索引 |
-| `kb_publish_aliases` | tenant_id, kb_id, alias, collection, version_id, updated_at | alias 指针 |
+| `kb_publish_aliases` | tenant_id, **document_id**, alias, collection, version_id, updated_at | alias 指针（KB-05 落地修订：`kb_id` 落为 `document_id` 复合外键；唯一 `(tenant_id, document_id)` 兜底并发首发布恰一行） |
 | `kb_test_sets` | id, tenant_id, document_version_id, name, file_object_key, status, created_by | 测试集 |
 | `kb_test_cases` | id, test_set_id, question, expected_answer, expected_points, expected_chunk_ids, category, is_adversarial, row_no | 测试用例 |
 | `kb_test_runs` | id, tenant_id, test_set_id, document_version_id, status, metrics_json, report_object_key, started_at, finished_at | 测试报告 |
@@ -932,7 +932,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 
 ### 7.4 Qdrant
 
-- 命名：`tenant_{tenant_hash}_kb_v{version_id}`；alias `tenant_{tenant_hash}_kb_active`。
+- 命名：`tenant_{tenant_hash}_kb_v{version_id}`；alias（KB-05 修订，简报 D1-A）**每文档一个**：`tenant_{tenant_hash}_kb_d{document_hash}_active`——原「租户单 alias 名」物理上不成立（Qdrant alias 指向单 collection，而 collection 是每版本一个）；`kb_publish_aliases` 行是事实来源（M4 检索解析读库行），同名 Qdrant named alias 是派生可观测视图（切换失败可经幂等重放发布重建）。
 - Payload：`tenant_id_hash`、`kb_id`、`document_id`、`version_id`、`chunk_id`、`parent_id`、`doc_title`、`section_path`、`page_start/end`、`chunk_type`、`text_hash`、`is_published`。
 - Named vectors：`dense`（BGE-M3）、`sparse`（BM25）。
 - 发布：新 version collection 构建完成 → 测试通过 → alias 原子切换；旧 collection 保留至会话结束/7 天。

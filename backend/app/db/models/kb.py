@@ -44,6 +44,12 @@ KB_STATUSES = (
     "BUILDING",
     "READY",
     "FAILED",
+    "TESTING",
+    "TEST_PASSED",
+    "TEST_FAILED",
+    "PUBLISHED",
+    "OFFLINE",
+    "DELETED",
 )
 _STATUS_SQL = ", ".join(f"'{status}'" for status in KB_STATUSES)
 
@@ -382,6 +388,47 @@ class KbIndexVersion(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Bas
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="building")
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class KbPublishAlias(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """发布别名指针（M3 KB-05；design §4.3 `kb_publish_aliases`，D1-A 每文档一行）。
+
+    `collection`/`version_id` 是当前活跃发布的事实来源（M4 检索解析用）；同名 Qdrant
+    named alias 是派生的可观测视图（切换失败可经幂等重放重建）。唯一
+    `(tenant_id, document_id)` 兜底并发首发布恰一行。
+    """
+
+    __tablename__ = "kb_publish_aliases"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "document_id", name="uq_kb_publish_aliases_tenant_document"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_kb_publish_aliases_tenant_id_tenants",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["document_id", "tenant_id"],
+            ["kb_documents.id", "kb_documents.tenant_id"],
+            name="fk_kb_publish_aliases_document_id_kb_documents",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["version_id", "tenant_id"],
+            ["kb_document_versions.id", "kb_document_versions.tenant_id"],
+            name="fk_kb_publish_aliases_version_id_kb_document_versions",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_kb_publish_aliases_id_tenant_id"),
+        Index("ix_kb_publish_aliases_tenant_id", "tenant_id"),
+    )
+
+    document_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    alias: Mapped[str] = mapped_column(String(200), nullable=False)
+    collection: Mapped[str] = mapped_column(String(200), nullable=False)
+    version_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
 
 
 TEST_SET_FORMATS = ("csv", "xlsx", "json")

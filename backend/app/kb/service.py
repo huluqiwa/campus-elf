@@ -29,6 +29,7 @@ from typing import Annotated, Any, NoReturn, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,26 +46,46 @@ from app.core.metrics import record_audit_write_failure
 from app.db.models.approval import APPROVAL_TYPE_KB_DOCUMENT, ApprovalRequest, ApprovalType
 from app.db.models.kb import (
     KbBuildJob,
+    KbChunk,
     KbDocument,
     KbDocumentVersion,
+    KbIndexVersion,
+    KbPublishAlias,
     KbUploadBatch,
 )
 from app.db.models.kb_events import KbBuildEvent
 from app.db.repository import CursorError, ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
+from app.kb.chunker import CHUNK_TYPE_CHILD
+from app.kb.indexer import (
+    alias_name,
+    count_points,
+    mark_published_payload,
+    resolve_alias_collection,
+    switch_alias,
+)
 from app.kb.status import (
     KB_STATUS_APPROVED,
+    KB_STATUS_DELETED,
     KB_STATUS_FAILED,
+    KB_STATUS_OFFLINE,
     KB_STATUS_PENDING_APPROVAL,
+    KB_STATUS_PUBLISHED,
     KB_STATUS_REJECTED,
     KB_STATUS_SCAN_FAILED,
     KB_STATUS_UPLOADED,
     InvalidStatusTransition,
     NotBuildableError,
+    NotPublishableError,
+    NotPublishedError,
     NotRetriableError,
     NotSubmittableError,
     assert_build_allowed,
+    assert_deletable,
+    assert_offline_allowed,
+    assert_publishable,
     assert_retriable,
+    assert_rollback_target,
     assert_submittable,
     assert_transition,
 )
@@ -2179,3 +2200,722 @@ def _validate_metadata_fields(
                 raise KbError("METADATA_INVALID", "每个标签长度必须为 1–32 字", 422)
     if description is not None and len(description) > 1000:
         raise KbError("METADATA_INVALID", "描述长度不能超过 1000 字", 422)
+
+
+# ---------------------------------------------------------------------------
+# KB-05：发布 / 回滚 / 下线 / 删除（docs/design-briefs/M3-KB-05.md，已确认
+# D1-A 每文档 alias、D2-A 任意 PUBLISHED 目标回滚、D4-A ACL 门禁归 KB-09、
+# D5+D6-A 缓存失效归 M4 / retired 清理归 M6 / 纯后端先行）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PublishView:
+    """发布/回滚结果（alias 行是事实来源；alias_synced=False 时可幂等重放重建）。"""
+
+    document_id: UUID
+    version_id: UUID
+    version_no: int
+    status: str
+    alias: str
+    collection: str
+    previous_version_id: UUID | None
+    published_at: datetime
+    replayed: bool = False
+    alias_synced: bool = True
+
+
+@dataclass(frozen=True)
+class VersionStateView:
+    """下线/删除结果（was_active=该版本是否是操作时的活跃发布）。"""
+
+    document_id: UUID
+    version_id: UUID
+    status: str
+    was_active: bool
+
+
+async def _publish_alias_row(
+    session: AsyncSession, *, tenant_id: UUID, document_id: UUID
+) -> KbPublishAlias | None:
+    """取文档的发布指针行（FOR UPDATE，同文档发布/回滚串行化）。"""
+
+    result = await session.execute(
+        select(KbPublishAlias)
+        .where(
+            KbPublishAlias.tenant_id == tenant_id,
+            KbPublishAlias.document_id == document_id,
+        )
+        .with_for_update()
+    )
+    return result.scalar_one_or_none()
+
+
+async def active_publish(
+    *, tenant_id: UUID, document_id: UUID
+) -> tuple[UUID, str] | None:
+    """解析文档当前活跃发布（M4 检索的数据基础；库行是事实来源）。
+
+    返回 `(version_id, collection)`；无活跃发布（未发布/已下线/已删除）返回 None
+    （fail-closed：调用方不得回退到别的 collection）。
+    """
+
+    async with db_session(tenant_id=tenant_id) as session:
+        result = await session.execute(
+            select(KbPublishAlias.version_id, KbPublishAlias.collection).where(
+                KbPublishAlias.tenant_id == tenant_id,
+                KbPublishAlias.document_id == document_id,
+            )
+        )
+        row = result.first()
+        if row is None:
+            return None
+        return UUID(str(row[0])), str(row[1])
+
+
+async def _version_locked(
+    session: AsyncSession,
+    repository: TenantScopedRepository[KbDocumentVersion],
+    *,
+    version_id: UUID,
+) -> KbDocumentVersion | None:
+    """范围过滤 + FOR UPDATE 取版本行（第二个事务里的重校验锁读）。"""
+
+    result = await session.execute(
+        repository.base_query()
+        .where(KbDocumentVersion.id == version_id)
+        .with_for_update()
+    )
+    return cast("KbDocumentVersion | None", result.scalar_one_or_none())
+
+
+async def _index_version_of(
+    session: AsyncSession, *, tenant_id: UUID, version_id: UUID
+) -> KbIndexVersion | None:
+    """版本的索引记录行（构建成功时由 worker 落 `ready`）。"""
+
+    result = await session.execute(
+        select(KbIndexVersion).where(
+            KbIndexVersion.tenant_id == tenant_id,
+            KbIndexVersion.document_version_id == version_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _child_chunk_count(session: AsyncSession, *, tenant_id: UUID, version_id: UUID) -> int:
+    """子块数（发布前与 Qdrant 点数对账；KB-03A 起只索引子块）。"""
+
+    result = await session.execute(
+        select(func.count())
+        .select_from(KbChunk)
+        .where(
+            KbChunk.tenant_id == tenant_id,
+            KbChunk.document_version_id == version_id,
+            KbChunk.chunk_type == CHUNK_TYPE_CHILD,
+        )
+    )
+    return int(result.scalar_one())
+
+
+async def _verify_index_ready(
+    *, tenant_id: UUID, collection: str, expected_points: int
+) -> None:
+    """发布前复核 collection 存在且点数与子块数一致（KB-03A VALIDATING 之后的第二道对账）。"""
+
+    from qdrant_client import AsyncQdrantClient
+
+    settings = get_settings()
+    if not settings.qdrant_url:
+        raise KbError("KB_INDEX_UNAVAILABLE", "向量索引未配置（QDRANT_URL 缺失）", 503)
+    client = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        try:
+            exists = await client.collection_exists(collection)
+            indexed = await count_points(client, collection=collection) if exists else 0
+        except Exception as exc:
+            raise KbError("KB_INDEX_UNAVAILABLE", "向量索引不可用（Qdrant 访问失败）", 503) from exc
+    finally:
+        await client.close()
+    if not exists:
+        raise KbError("KB_INDEX_NOT_READY", "该版本的向量索引不存在（请先构建）", 409)
+    if indexed != expected_points:
+        raise KbError(
+            "KB_INDEX_INCOMPLETE",
+            f"向量索引不完整（索引 {indexed} / 子块 {expected_points}），请重新构建",
+            409,
+        )
+
+
+async def _sync_publish_qdrant(
+    *,
+    tenant_id: UUID,
+    document_id: UUID,
+    version_id: UUID,
+    target_collection: str,
+) -> bool:
+    """提交后切换 Qdrant named alias 并翻转 payload `is_published`（best-effort）。
+
+    库行（kb_publish_aliases）是事实来源；本函数失败不影响已提交的发布状态，
+    返回 False 由调用方标注 `alias_synced=false`，幂等重放（再次发布同一活跃版本）
+    可重建 alias。切换前一律实时解析 alias 现状（一次 get_aliases；管理端点低频）——
+    库行的 collection 可能从未在 Qdrant 侧落地（上次同步失败），按库行构造的
+    [Delete, Create] 会对不存在的 alias 报错，实时解析覆盖该路径。
+    """
+
+    from qdrant_client import AsyncQdrantClient
+
+    settings = get_settings()
+    if not settings.qdrant_url:
+        logger.warning("KB-05 发布同步跳过：QDRANT_URL 未配置")
+        return False
+    client = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        current = await resolve_alias_collection(client, alias_name(tenant_id, document_id))
+        await switch_alias(
+            client,
+            alias=alias_name(tenant_id, document_id),
+            current_collection=current,
+            target_collection=target_collection,
+        )
+        await mark_published_payload(
+            client, collection=target_collection, version_id=version_id
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "KB-05 发布后 Qdrant 同步失败（可重放发布重建）：%s.%s",
+            type(exc).__module__,
+            type(exc).__name__,
+        )
+        return False
+    finally:
+        await client.close()
+
+
+async def publish_version(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> PublishView:
+    """发布版本（403/409 拒绝在独立事务写 `school.kb.publish.denied`；404 探测不审计）。"""
+
+    try:
+        return await _publish_version(
+            tenant_id=tenant_id,
+            scope=scope,
+            version_id=version_id,
+            user_id=user_id,
+            request_id=request_id,
+        )
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.publish.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"version_id": str(version_id)},
+            )
+        raise
+
+
+async def _publish_version(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> PublishView:
+    """发布版本（门禁：TEST_PASSED；alias 行 + Qdrant named alias 原子切换）。
+
+    幂等重放：版本已 `PUBLISHED` 且仍是活跃发布时再次发布 = 重建 alias/payload
+    （恢复路径）；已 `PUBLISHED` 但**不是**活跃发布的版本走 rollback 端点切换。
+    """
+
+    # ---- 事务 1：读版本/索引行/子块数（Qdrant 复核在事务外） ----
+    async with db_session(tenant_id=tenant_id) as session:
+        version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+            session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+        )
+        version = await version_repository.get(version_id)
+        if version is None:
+            raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+        replay = version.status == KB_STATUS_PUBLISHED
+        if not replay:
+            try:
+                assert_publishable(version.status)
+            except NotPublishableError as exc:
+                raise KbError("KB_NOT_TEST_PASSED", str(exc), 409) from exc
+        index_row = await _index_version_of(session, tenant_id=tenant_id, version_id=version.id)
+        if index_row is None:
+            raise KbError("KB_INDEX_NOT_READY", "该版本的向量索引记录不存在（请先构建）", 409)
+        collection = index_row.qdrant_collection
+        expected = await _child_chunk_count(session, tenant_id=tenant_id, version_id=version.id)
+        document_id = version.document_id
+        version_no = version.version_no
+
+    await _verify_index_ready(tenant_id=tenant_id, collection=collection, expected_points=expected)
+
+    # ---- 事务 2：锁版本 + 指针行 upsert + 状态迁移 + 审计 ----
+    async with db_session(tenant_id=tenant_id) as session:
+        version_repository = TenantScopedRepository(
+            session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+        )
+        version = await _version_locked(session, version_repository, version_id=version_id)
+        if version is None:
+            raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+        replay = version.status == KB_STATUS_PUBLISHED
+        if not replay:
+            try:
+                assert_publishable(version.status)
+            except NotPublishableError as exc:
+                raise KbError("KB_NOT_TEST_PASSED", str(exc), 409) from exc
+
+        row = await _publish_alias_row(
+            session, tenant_id=tenant_id, document_id=version.document_id
+        )
+        if replay:
+            if row is None:
+                raise KbError(
+                    "KB_PUBLISHED_NOT_ACTIVE",
+                    "版本已发布但活跃发布指针已撤除（活跃版本被下线或删除），不可重放发布",
+                    409,
+                )
+            if row.version_id != version.id:
+                raise KbError(
+                    "KB_PUBLISHED_NOT_ACTIVE",
+                    "版本已发布但不是活跃发布，请使用回滚端点切换",
+                    409,
+                )
+            previous_version_id: UUID | None = None
+        else:
+            if row is None:
+                row = KbPublishAlias(
+                    tenant_id=tenant_id,
+                    document_id=version.document_id,
+                    alias=alias_name(tenant_id, version.document_id),
+                    collection=collection,
+                    version_id=version.id,
+                )
+                try:
+                    async with session.begin_nested():
+                        session.add(row)
+                        await session.flush()
+                except IntegrityError as exc:
+                    # 并发首发布：唯一 (tenant_id, document_id) 兜底，落回更新路径。
+                    if _integrity_constraint_name(exc) != "uq_kb_publish_aliases_tenant_document":
+                        raise
+                    row = await _publish_alias_row(
+                        session, tenant_id=tenant_id, document_id=version.document_id
+                    )
+                    if row is None:  # pragma: no cover - SAVEPOINT 回滚后必然可读
+                        raise KbError(
+                            "KB_PUBLISH_CONFLICT", "发布指针创建冲突，请重试", 409
+                        ) from exc
+            if row.version_id != version.id:
+                previous = await _index_version_of(
+                    session, tenant_id=tenant_id, version_id=row.version_id
+                )
+                if previous is not None:
+                    previous.status = "retired"
+                    previous.retired_at = datetime.now(UTC)
+            previous_version_id = row.version_id if row.version_id != version.id else None
+            row.alias = alias_name(tenant_id, version.document_id)
+            row.collection = collection
+            row.version_id = version.id
+
+        index_row = await _index_version_of(session, tenant_id=tenant_id, version_id=version.id)
+        if index_row is None:  # pragma: no cover - 事务 1 已核验，防御并发删除
+            raise KbError("KB_INDEX_NOT_READY", "该版本的向量索引记录不存在（请先构建）", 409)
+        index_row.published_at = index_row.published_at or datetime.now(UTC)
+        index_row.status = "published"
+
+        if not replay:
+            assert_transition(version.status, KB_STATUS_PUBLISHED)
+            version.status = KB_STATUS_PUBLISHED
+        document_repository: TenantScopedRepository[KbDocument] = TenantScopedRepository(
+            session, KbDocument, tenant_id, scope=scope, owner_attr="created_by"
+        )
+        document = (
+            await session.execute(
+                document_repository.base_query()
+                .where(KbDocument.id == version.document_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if document is None:
+            raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+        document.status = KB_STATUS_PUBLISHED
+        document.current_version_id = version.id
+
+        await append_audit(
+            session,
+            action="school.kb.published",
+            resource_type="kb_document_version",
+            resource_id=str(version.id),
+            actor_realm="tenant",
+            actor_id=user_id,
+            tenant_id=tenant_id,
+            result="success",
+            metadata={
+                "document_id": str(version.document_id),
+                "version_no": version.version_no,
+                "collection": collection,
+                "alias": alias_name(tenant_id, version.document_id),
+                "previous_version_id": str(previous_version_id) if previous_version_id else None,
+                "replayed": replay,
+            },
+            request_id=request_id,
+        )
+        published_at = index_row.published_at
+        previous_for_view = previous_version_id
+        replayed = replay
+
+    alias_synced = await _sync_publish_qdrant(
+        tenant_id=tenant_id,
+        document_id=document_id,
+        version_id=version_id,
+        target_collection=collection,
+    )
+    return PublishView(
+        document_id=document_id,
+        version_id=version_id,
+        version_no=version_no,
+        status=KB_STATUS_PUBLISHED,
+        alias=alias_name(tenant_id, document_id),
+        collection=collection,
+        previous_version_id=previous_for_view,
+        published_at=published_at,
+        replayed=replayed,
+        alias_synced=alias_synced,
+    )
+
+
+async def rollback_version(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    target_version_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> PublishView:
+    """回滚：把活跃发布切到任意 `PUBLISHED` 目标版本（D2-A；只切 alias 不改分块）。
+
+    当前活跃版本保持 `PUBLISHED`（蓝绿共存）；目标集合在 Qdrant 侧复核存在且
+    点数与子块数一致后才切换。403/409 拒绝审计 `school.kb.rollback.denied`。
+    """
+
+    try:
+        # ---- 事务 1：读目标版本/索引行/子块数 ----
+        async with db_session(tenant_id=tenant_id) as session:
+            target_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+                session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            target = await target_repository.get(target_version_id)
+            if target is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            try:
+                assert_rollback_target(target.status)
+            except NotPublishedError as exc:
+                raise KbError("KB_NOT_PUBLISHED", str(exc), 409) from exc
+            index_row = await _index_version_of(
+                session, tenant_id=tenant_id, version_id=target.id
+            )
+            if index_row is None:
+                raise KbError("KB_INDEX_NOT_READY", "目标版本的向量索引记录不存在", 409)
+            collection = index_row.qdrant_collection
+            expected = await _child_chunk_count(
+                session, tenant_id=tenant_id, version_id=target.id
+            )
+            document_id = target.document_id
+            version_no = target.version_no
+
+        await _verify_index_ready(
+            tenant_id=tenant_id, collection=collection, expected_points=expected
+        )
+
+        # ---- 事务 2：锁目标版本 + 锁指针行（与 publish 同序：版本 → 指针）+ 切换 + 审计 ----
+        async with db_session(tenant_id=tenant_id) as session:
+            target_repository = TenantScopedRepository(
+                session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            target = await _version_locked(
+                session, target_repository, version_id=target_version_id
+            )
+            if target is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            try:
+                assert_rollback_target(target.status)
+            except NotPublishedError as exc:
+                raise KbError("KB_NOT_PUBLISHED", str(exc), 409) from exc
+            row = await _publish_alias_row(
+                session, tenant_id=tenant_id, document_id=document_id
+            )
+            if row is None:
+                raise KbError("KB_NO_ACTIVE_PUBLISH", "该文档当前没有活跃发布，无法回滚", 409)
+            if row.version_id == target_version_id:
+                raise KbError(
+                    "KB_ROLLBACK_TARGET_IS_ACTIVE", "目标版本已是当前活跃发布", 409
+                )
+            from_version_id = row.version_id
+            current_index = await _index_version_of(
+                session, tenant_id=tenant_id, version_id=from_version_id
+            )
+            if current_index is not None:
+                current_index.status = "retired"
+                current_index.retired_at = datetime.now(UTC)
+            target_index = await _index_version_of(
+                session, tenant_id=tenant_id, version_id=target.id
+            )
+            if target_index is None:  # pragma: no cover - 事务 1 已核验
+                raise KbError("KB_INDEX_NOT_READY", "目标版本的向量索引记录不存在", 409)
+            target_index.published_at = target_index.published_at or datetime.now(UTC)
+            target_index.status = "published"
+
+            row.alias = alias_name(tenant_id, target.document_id)
+            row.collection = collection
+            row.version_id = target.id
+
+            document_repository: TenantScopedRepository[KbDocument] = TenantScopedRepository(
+                session, KbDocument, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            document = (
+                await session.execute(
+                    document_repository.base_query()
+                    .where(KbDocument.id == target.document_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if document is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            document.status = KB_STATUS_PUBLISHED
+            document.current_version_id = target.id
+
+            await append_audit(
+                session,
+                action="school.kb.rolled_back",
+                resource_type="kb_document_version",
+                resource_id=str(target.id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={
+                    "document_id": str(target.document_id),
+                    "from_version_id": str(from_version_id),
+                    "to_version_id": str(target.id),
+                    "collection": collection,
+                    "alias": alias_name(tenant_id, target.document_id),
+                },
+                request_id=request_id,
+            )
+            published_at = target_index.published_at
+
+        alias_synced = await _sync_publish_qdrant(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            version_id=target_version_id,
+            target_collection=collection,
+        )
+        return PublishView(
+            document_id=document_id,
+            version_id=target_version_id,
+            version_no=version_no,
+            status=KB_STATUS_PUBLISHED,
+            alias=alias_name(tenant_id, document_id),
+            collection=collection,
+            previous_version_id=from_version_id,
+            published_at=published_at,
+            replayed=False,
+            alias_synced=alias_synced,
+        )
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.rollback.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"version_id": str(target_version_id)},
+            )
+        raise
+
+
+async def _retire_or_take_active(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    version: KbDocumentVersion,
+) -> bool:
+    """下线/删除共用：索引行退役；若版本是活跃发布则撤指针并返回 True。"""
+
+    index_row = await _index_version_of(session, tenant_id=tenant_id, version_id=version.id)
+    if index_row is not None:
+        index_row.status = "retired"
+        index_row.retired_at = datetime.now(UTC)
+    row = await _publish_alias_row(session, tenant_id=tenant_id, document_id=version.document_id)
+    if row is not None and row.version_id == version.id:
+        await session.delete(row)
+        return True
+    return False
+
+
+async def offline_version(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> VersionStateView:
+    """下线版本（PUBLISHED → OFFLINE 终态；活跃发布撤指针，collection 保留至 M6 清理）。"""
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+                session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            version = await _version_locked(session, version_repository, version_id=version_id)
+            if version is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            try:
+                assert_offline_allowed(version.status)
+            except NotPublishedError as exc:
+                raise KbError("KB_NOT_PUBLISHED", str(exc), 409) from exc
+            document_id = version.document_id
+            was_active = await _retire_or_take_active(
+                session, tenant_id=tenant_id, version=version
+            )
+            assert_transition(version.status, KB_STATUS_OFFLINE)
+            version.status = KB_STATUS_OFFLINE
+            if was_active:
+                document_repository: TenantScopedRepository[KbDocument] = TenantScopedRepository(
+                    session, KbDocument, tenant_id, scope=scope, owner_attr="created_by"
+                )
+                document = (
+                    await session.execute(
+                        document_repository.base_query()
+                        .where(KbDocument.id == document_id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if document is None:
+                    # 与 publish/rollback 对齐：范围外文档行一律 404，不留状态镜像漂移。
+                    raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+                document.status = KB_STATUS_OFFLINE
+            await append_audit(
+                session,
+                action="school.kb.offlined",
+                resource_type="kb_document_version",
+                resource_id=str(version.id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={
+                    "document_id": str(document_id),
+                    "was_active": was_active,
+                },
+                request_id=request_id,
+            )
+            return VersionStateView(
+                document_id=document_id,
+                version_id=version_id,
+                status=KB_STATUS_OFFLINE,
+                was_active=was_active,
+            )
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.offline.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"version_id": str(version_id)},
+            )
+        raise
+
+
+async def delete_version(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> VersionStateView:
+    """软删版本（PUBLISHED → DELETED 终态；状态机唯一删除出边；collection 保留至 M6）。"""
+
+    try:
+        async with db_session(tenant_id=tenant_id) as session:
+            version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+                session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+            )
+            version = await _version_locked(session, version_repository, version_id=version_id)
+            if version is None:
+                raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+            try:
+                assert_deletable(version.status)
+            except NotPublishedError as exc:
+                raise KbError("KB_NOT_PUBLISHED", str(exc), 409) from exc
+            document_id = version.document_id
+            was_active = await _retire_or_take_active(
+                session, tenant_id=tenant_id, version=version
+            )
+            assert_transition(version.status, KB_STATUS_DELETED)
+            version.status = KB_STATUS_DELETED
+            if was_active:
+                document_repository: TenantScopedRepository[KbDocument] = TenantScopedRepository(
+                    session, KbDocument, tenant_id, scope=scope, owner_attr="created_by"
+                )
+                document = (
+                    await session.execute(
+                        document_repository.base_query()
+                        .where(KbDocument.id == document_id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if document is None:
+                    # 与 publish/rollback 对齐：范围外文档行一律 404，不留状态镜像漂移。
+                    raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+                document.status = KB_STATUS_DELETED
+            await append_audit(
+                session,
+                action="school.kb.deleted",
+                resource_type="kb_document_version",
+                resource_id=str(version.id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={
+                    "document_id": str(document_id),
+                    "was_active": was_active,
+                },
+                request_id=request_id,
+            )
+            return VersionStateView(
+                document_id=document_id,
+                version_id=version_id,
+                status=KB_STATUS_DELETED,
+                was_active=was_active,
+            )
+    except KbError as exc:
+        if exc.http_status in (403, 409):
+            await _action_denied(
+                action="school.kb.delete.denied",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+                code=exc.code,
+                context={"version_id": str(version_id)},
+            )
+        raise

@@ -11,9 +11,11 @@
   未审批 409 `KB_NOT_APPROVED` + 审计；本点只落 `BUILD_QUEUED`，进度随 KB-03）；
 - `PUT /school/kb/documents/{document_id}`：标题/标签/描述编辑（免审但审计前后值）。
 
-权限：上传/提交/元数据 `school.kb.upload`；查询 `school.kb.view`；构建 `school.kb.build`。
-拒绝审计：提交/构建的 403/409 写 `school.kb.approval.denied` / `school.kb.build.denied`
-（服务层独立事务；404 探测不审计）。
+权限：上传/提交/元数据 `school.kb.upload`；查询 `school.kb.view`；构建 `school.kb.build`；
+发布/回滚/下线 `school.kb.publish`（KB-05）；删除 `school.kb.delete`（KB-05）。
+拒绝审计：提交/构建的 403/409 写 `school.kb.approval.denied` / `school.kb.build.denied`，
+KB-05 发布/回滚/下线/删除的 403/409 写 `school.kb.publish.denied` / `school.kb.rollback.denied`
+/ `school.kb.offline.denied` / `school.kb.delete.denied`（服务层独立事务；404 探测不审计）。
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -34,9 +36,11 @@ from app.kb.service import (
     DocumentView,
     IncomingFile,
     KbError,
+    PublishView,
     VersionView,
     create_build,
     create_test_set,
+    delete_version,
     get_build_job,
     get_document,
     get_test_run,
@@ -44,7 +48,10 @@ from app.kb.service import (
     list_documents,
     list_version_approvals,
     list_versions,
+    offline_version,
+    publish_version,
     retry_build,
+    rollback_version,
     start_test_run,
     submit_version_approval,
     update_document_metadata,
@@ -57,6 +64,8 @@ router = APIRouter(prefix="/school/kb", tags=["school-kb"])
 UploaderDep = require_permission("school.kb.upload", realm="tenant")
 ViewerDep = require_permission("school.kb.view", realm="tenant")
 BuilderDep = require_permission("school.kb.build", realm="tenant")
+PublisherDep = require_permission("school.kb.publish", realm="tenant")
+DeleterDep = require_permission("school.kb.delete", realm="tenant")
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -795,4 +804,149 @@ async def get_kb_test_run(
         metrics_json=result["metrics_json"],
         started_at=result["started_at"],
         finished_at=result["finished_at"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# KB-05：发布 / 回滚 / 下线 / 删除（docs/design-briefs/M3-KB-05.md，D1-A/D2-A/D4-A/D5+D6-A）
+# ---------------------------------------------------------------------------
+
+
+class KbPublishResponse(BaseModel):
+    """发布/回滚结果；`alias_synced=false` 时可对同一活跃版本重放发布重建。"""
+
+    document_id: UUID
+    version_id: UUID
+    version_no: int
+    status: str
+    alias: str
+    collection: str
+    previous_version_id: UUID | None = None
+    published_at: datetime
+    replayed: bool = False
+    alias_synced: bool = True
+
+
+class KbVersionStateResponse(BaseModel):
+    """下线/删除结果（was_active=该版本是否是操作时的活跃发布）。"""
+
+    document_id: UUID
+    version_id: UUID
+    status: str
+    was_active: bool
+
+
+def _publish_response(view: PublishView) -> KbPublishResponse:
+    return KbPublishResponse(
+        document_id=view.document_id,
+        version_id=view.version_id,
+        version_no=view.version_no,
+        status=view.status,
+        alias=view.alias,
+        collection=view.collection,
+        previous_version_id=view.previous_version_id,
+        published_at=view.published_at,
+        replayed=view.replayed,
+        alias_synced=view.alias_synced,
+    )
+
+
+@router.post("/versions/{version_id}/publish", response_model=KbPublishResponse)
+async def publish_kb_document_version(
+    version_id: UUID,
+    publisher: Annotated[Principal, PublisherDep],
+    request: Request,
+) -> KbPublishResponse:
+    """发布版本（门禁：TEST_PASSED；alias 行 + Qdrant named alias 原子切换）。
+
+    幂等重放：同一活跃版本再次发布 = 重建 alias/payload（`replayed=true`）。
+    """
+
+    tenant_id = _tenant_or_403(publisher)
+    try:
+        view = await publish_version(
+            tenant_id=tenant_id,
+            scope=publisher.scope_context,
+            version_id=version_id,
+            user_id=publisher.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _publish_response(view)
+
+
+@router.post("/versions/{version_id}/rollback", response_model=KbPublishResponse)
+async def rollback_kb_document_version(
+    version_id: UUID,
+    publisher: Annotated[Principal, PublisherDep],
+    request: Request,
+) -> KbPublishResponse:
+    """回滚：切到任意 `PUBLISHED` 目标版本（path version_id = 目标；D2-A）。"""
+
+    tenant_id = _tenant_or_403(publisher)
+    try:
+        view = await rollback_version(
+            tenant_id=tenant_id,
+            scope=publisher.scope_context,
+            target_version_id=version_id,
+            user_id=publisher.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _publish_response(view)
+
+
+@router.post("/versions/{version_id}/offline", response_model=KbVersionStateResponse)
+async def offline_kb_document_version(
+    version_id: UUID,
+    publisher: Annotated[Principal, PublisherDep],
+    request: Request,
+) -> KbVersionStateResponse:
+    """下线版本（PUBLISHED → OFFLINE 终态；活跃发布撤指针，collection 保留）。"""
+
+    tenant_id = _tenant_or_403(publisher)
+    try:
+        view = await offline_version(
+            tenant_id=tenant_id,
+            scope=publisher.scope_context,
+            version_id=version_id,
+            user_id=publisher.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbVersionStateResponse(
+        document_id=view.document_id,
+        version_id=view.version_id,
+        status=view.status,
+        was_active=view.was_active,
+    )
+
+
+@router.delete("/versions/{version_id}", response_model=KbVersionStateResponse)
+async def delete_kb_document_version(
+    version_id: UUID,
+    deleter: Annotated[Principal, DeleterDep],
+    request: Request,
+) -> KbVersionStateResponse:
+    """软删版本（PUBLISHED → DELETED 终态；审计；collection 保留至 M6 清理）。"""
+
+    tenant_id = _tenant_or_403(deleter)
+    try:
+        view = await delete_version(
+            tenant_id=tenant_id,
+            scope=deleter.scope_context,
+            version_id=version_id,
+            user_id=deleter.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbVersionStateResponse(
+        document_id=view.document_id,
+        version_id=view.version_id,
+        status=view.status,
+        was_active=view.was_active,
     )
