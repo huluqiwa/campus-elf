@@ -153,7 +153,7 @@ PUBLISHED → ROLLBACK(alias → old collection)
 PUBLISHED → OFFLINE
 ```
 
-- alias：`tenant_{tenant_hash}_kb_active`。
+- alias：每文档一个 `tenant_{tenant_hash}_kb_d{document_hash}_active`（KB-05 修订，design §7.4 D1-A；`kb_publish_aliases` 行是事实来源）。
 - 旧 collection 保留至旧会话结束或 7 天。
 - 回滚只切 alias；缓存 Key 含 version。
 - 发布/回滚期间零 5xx；旧会话固定 `pinned_kb_version_id`。
