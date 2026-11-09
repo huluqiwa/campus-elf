@@ -2235,20 +2235,38 @@ class VersionStateView:
     was_active: bool
 
 
+def _publish_alias_repository(session: AsyncSession, tenant_id: UUID) -> TenantScopedRepository[KbPublishAlias]:
+    return TenantScopedRepository(
+        session,
+        KbPublishAlias,
+        tenant_id,
+        scope=ScopeBypass(reason="发布指针：派生状态（无归属列），按文档 id 精确操作"),
+    )
+
+
+def _index_version_repository(
+    session: AsyncSession, tenant_id: UUID
+) -> TenantScopedRepository[KbIndexVersion]:
+    return TenantScopedRepository(
+        session,
+        KbIndexVersion,
+        tenant_id,
+        scope=ScopeBypass(reason="版本索引记录：构建/发布系统状态，按版本 id 精确操作"),
+    )
+
+
 async def _publish_alias_row(
     session: AsyncSession, *, tenant_id: UUID, document_id: UUID
 ) -> KbPublishAlias | None:
     """取文档的发布指针行（FOR UPDATE，同文档发布/回滚串行化）。"""
 
     result = await session.execute(
-        select(KbPublishAlias)
-        .where(
-            KbPublishAlias.tenant_id == tenant_id,
-            KbPublishAlias.document_id == document_id,
-        )
+        _publish_alias_repository(session, tenant_id)
+        .base_query()
+        .where(KbPublishAlias.document_id == document_id)
         .with_for_update()
     )
-    return result.scalar_one_or_none()
+    return cast("KbPublishAlias | None", result.scalar_one_or_none())
 
 
 async def active_publish(
@@ -2261,16 +2279,15 @@ async def active_publish(
     """
 
     async with db_session(tenant_id=tenant_id) as session:
-        result = await session.execute(
-            select(KbPublishAlias.version_id, KbPublishAlias.collection).where(
-                KbPublishAlias.tenant_id == tenant_id,
-                KbPublishAlias.document_id == document_id,
-            )
+        row = await session.execute(
+            _publish_alias_repository(session, tenant_id)
+            .base_query()
+            .where(KbPublishAlias.document_id == document_id)
         )
-        row = result.first()
-        if row is None:
+        record = row.scalar_one_or_none()
+        if record is None:
             return None
-        return UUID(str(row[0])), str(row[1])
+        return UUID(str(record.version_id)), str(record.collection)
 
 
 async def _version_locked(
@@ -2295,26 +2312,31 @@ async def _index_version_of(
     """版本的索引记录行（构建成功时由 worker 落 `ready`）。"""
 
     result = await session.execute(
-        select(KbIndexVersion).where(
-            KbIndexVersion.tenant_id == tenant_id,
-            KbIndexVersion.document_version_id == version_id,
-        )
+        _index_version_repository(session, tenant_id)
+        .base_query()
+        .where(KbIndexVersion.document_version_id == version_id)
     )
-    return result.scalar_one_or_none()
+    return cast("KbIndexVersion | None", result.scalar_one_or_none())
 
 
 async def _child_chunk_count(session: AsyncSession, *, tenant_id: UUID, version_id: UUID) -> int:
     """子块数（发布前与 Qdrant 点数对账；KB-03A 起只索引子块）。"""
 
-    result = await session.execute(
-        select(func.count())
-        .select_from(KbChunk)
+    chunk_repository = TenantScopedRepository(
+        session,
+        KbChunk,
+        tenant_id,
+        scope=ScopeBypass(reason="分块：发布对账只读计数，按版本 id 过滤"),
+    )
+    subquery = (
+        chunk_repository.base_query()
         .where(
-            KbChunk.tenant_id == tenant_id,
             KbChunk.document_version_id == version_id,
             KbChunk.chunk_type == CHUNK_TYPE_CHILD,
         )
+        .subquery()
     )
+    result = await session.execute(select(func.count()).select_from(subquery))
     return int(result.scalar_one())
 
 
