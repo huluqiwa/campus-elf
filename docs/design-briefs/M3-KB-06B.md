@@ -140,3 +140,5 @@
 - 全栈 E2E：25 条（重置种子全量；链③新增分块断言：API 列表非空 + 表格同块 + stats 互证 + UI 详情纯文本保真；读数见 PR 描述回填）。
 
 **独立审查**（第 1 轮，独立只读子智能体审 staged diff 12 文件）：**0 Blocker / 0 Major / 6 Minor**，结论「可以提交」；8 项重点清单逐项实读核验通过（api-client 契约逐字段、竞态主链路、渲染净化 grep 实核零 v-html、mock 判据行为全对齐含 TD-231 拒 bool、既有 publish/rollback/offline/DELETE 分发零破坏、种子/端口机制同源）。Minor 处置：m-1 码点度量 **已修**（偏离 7）；m-2 锚点行号 **已订正**（偏离 8）；m-3 详情代际守卫 **已补**；m-4/m-5 **偏离 4/5/6 登记**；m-6 夹具修正 **已改** + localeCompare 备注登记（偏离 8）。无 Blocker/Major，按 §6.2 不触发复审。
+
+**PR 与合并事实（2026-11-11）**：PR #57（head `72b4daf`）→ rebase 合并 `6949ec3`+`780d62e`，分支已删；合并授权由用户在 CI 全绿后确认。PR CI backend run `42877592475` **1047 passed, 1 skipped（24:52）**、四包覆盖率门槛全过（79.92/82.41/81.25/66.67%，与基线逐包一致）；frontend/e2e run `42877592208`（单测 **262**、Playwright **153 passed / 3m26s**）；security run `42877592330` success（42s）。TD-310/311 随本 PR 登记（`780d62e`）。
