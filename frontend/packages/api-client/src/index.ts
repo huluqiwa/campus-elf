@@ -100,6 +100,12 @@ export {
 export {
   createKbApi,
   type KbApi,
+  type KbChunkDetailView,
+  type KbChunkListQuery,
+  type KbChunkRef,
+  type KbChunkSectionStat,
+  type KbChunkStatsView,
+  type KbChunkView,
   type KbDocumentView,
   type KbFileMetadataInput,
   type KbScanStateView,

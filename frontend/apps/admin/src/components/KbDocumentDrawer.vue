@@ -13,9 +13,22 @@
  * （后端无 active 端点）——本会话内 publish/rollback 成功响应记忆 activeVersionId 用于
  * 回滚目标排除，刷新/重开复位，选到活跃版本吃后端 409 `KB_ROLLBACK_TARGET_IS_ACTIVE`。
  * 写动作成功后重读详情与版本列表（不手改本地状态，187g-C 口径）。
+ *
+ * KB-06B 分块预览（简报 M3-KB-06B 卡 1A/2A/3A/4A）：版本表行「分块」入口 → 抽屉内子视图
+ * （按所选版本定域，spec「切换旧版本看该版本分块」）；q 显式搜索（不做按键即搜）、
+ * 章节下拉来自 stats.sections（精确匹配）、类型下拉；筛选变化即重置回第一页；
+ * 详情子面板纯文本渲染 `text_markdown`（**无 v-html**——文档内容不可信，不渲染即无 XSS 面，
+ * TD-307 登记 markdown/虚拟滚动升级路径）；父/子导航走详情端点引用，跨版本引用不渲染。
  */
 import { ApiError, toUserMessage } from "@campus-elf/api-client";
-import type { KbDocumentView, KbVersionView, KbVersionApprovalView } from "@campus-elf/api-client";
+import type {
+  KbChunkDetailView,
+  KbChunkStatsView,
+  KbChunkView,
+  KbDocumentView,
+  KbVersionApprovalView,
+  KbVersionView,
+} from "@campus-elf/api-client";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, ref, watch } from "vue";
 
@@ -29,13 +42,20 @@ import {
 } from "../approval-logic";
 import {
   KB_PAGE_SIZE,
+  chunkFilterError,
+  chunkTypeLabel,
+  chunksGate,
   deleteGate,
   documentStatusMeta,
+  embeddingStatusMeta,
   formatBytes,
+  formatChunkStats,
   kbPublishActionMessage,
+  normalizeChunkQ,
   offlineGate,
   publishGate,
   rollbackTargets,
+  sectionOptions,
   type KbRollbackTarget,
 } from "../kb-logic";
 import { useAuthStore } from "../stores/auth";
@@ -92,6 +112,24 @@ const offlining = ref(false);
 const deleting = ref(false);
 const rollingBack = ref(false);
 const activeVersionId = ref<string | null>(null);
+
+// KB-06B：分块子视图状态（独立 chunksGeneration：子视图有自己的打开/关闭与筛选重置节奏）。
+const chunksVisible = computed(() => chunksGate(permissions.value));
+const chunksView = ref<{ versionId: string; versionNo: number } | null>(null);
+const chunks = ref<KbChunkView[]>([]);
+const chunksLoading = ref(false);
+const chunksNextCursor = ref<string | null>(null);
+const chunkFilters = ref<{ q: string; sectionPath: string; chunkType: "" | "parent" | "child" }>({
+  q: "",
+  sectionPath: "",
+  chunkType: "",
+});
+const chunksFilterError = ref<string | null>(null);
+const chunksParentFilter = ref<{ id: string; index: number } | null>(null);
+const chunkDetail = ref<KbChunkDetailView | null>(null);
+const chunkDetailLoading = ref(false);
+const chunkStats = ref<KbChunkStatsView | null>(null);
+let chunksGeneration = 0;
 
 const testGate = computed(() =>
   detail.value
@@ -321,6 +359,127 @@ function notifyGone(): void {
   emit("update:modelValue", false);
 }
 
+// ---- KB-06B：分块子视图（按所选版本定域；筛选变化即重置回第一页，卡 3A） ----
+
+function resetChunksList(): void {
+  chunks.value = [];
+  chunksNextCursor.value = null;
+  chunkDetail.value = null;
+}
+
+async function loadChunksPage(generation: number, cursor?: string): Promise<void> {
+  const view = chunksView.value;
+  if (!view) return;
+  chunksLoading.value = true;
+  try {
+    const page = await kbApi.listChunks(view.versionId, {
+      limit: KB_PAGE_SIZE,
+      cursor,
+      q: normalizeChunkQ(chunkFilters.value.q),
+      section_path:
+        chunkFilters.value.sectionPath === "" ? undefined : chunkFilters.value.sectionPath,
+      chunk_type: chunkFilters.value.chunkType === "" ? undefined : chunkFilters.value.chunkType,
+      parent_id: chunksParentFilter.value?.id,
+    });
+    if (generation !== chunksGeneration) return;
+    chunks.value = cursor === undefined ? page.items : [...chunks.value, ...page.items];
+    chunksNextCursor.value = page.next_cursor;
+  } catch (error) {
+    if (generation !== chunksGeneration) return;
+    reportError(error, "分块列表加载失败");
+  } finally {
+    if (generation === chunksGeneration) chunksLoading.value = false;
+  }
+}
+
+async function loadChunkStats(generation: number): Promise<void> {
+  const view = chunksView.value;
+  if (!view) return;
+  try {
+    const stats = await kbApi.getChunkStats(view.versionId);
+    if (generation !== chunksGeneration) return;
+    chunkStats.value = stats;
+  } catch (error) {
+    if (generation !== chunksGeneration) return;
+    if (error instanceof ApiError && error.status === 404) {
+      notifyGone();
+      return;
+    }
+    reportError(error, "分块统计加载失败");
+  }
+}
+
+/** 从版本表行进入子视图：重置筛选与列表（spec：按所选版本定域，不混入其他版本）。 */
+function openChunks(row: KbVersionView): void {
+  chunksView.value = { versionId: row.id, versionNo: row.version_no };
+  chunkFilters.value = { q: "", sectionPath: "", chunkType: "" };
+  chunksFilterError.value = null;
+  chunksParentFilter.value = null;
+  chunkStats.value = null;
+  resetChunksList();
+  chunksGeneration += 1;
+  const generation = chunksGeneration;
+  void loadChunksPage(generation);
+  void loadChunkStats(generation);
+}
+
+function closeChunks(): void {
+  chunksView.value = null;
+  chunksGeneration += 1;
+}
+
+/** 筛选应用：任一变化（含「只看子块」/清除）都回第一页——后端筛选在游标推进之前，旧游标跨筛选失效。 */
+function loadMoreChunks(): void {
+  if (chunksNextCursor.value === null) return;
+  void loadChunksPage(chunksGeneration, chunksNextCursor.value);
+}
+
+function applyChunkFilters(): void {
+  const rawQ = chunkFilters.value.q;
+  const error = chunkFilterError(rawQ === "" ? undefined : rawQ);
+  chunksFilterError.value = error;
+  if (error) return;
+  chunksParentFilter.value = null;
+  resetChunksList();
+  chunksGeneration += 1;
+  void loadChunksPage(chunksGeneration);
+}
+
+/** 详情面板「只看该块的子块」：parent_id 直达筛选（后端 parent_id 参数）。 */
+function filterByParent(parentId: string, parentIndex: number): void {
+  chunksFilterError.value = null;
+  chunksParentFilter.value = { id: parentId, index: parentIndex };
+  resetChunksList();
+  chunksGeneration += 1;
+  void loadChunksPage(chunksGeneration);
+}
+
+async function openChunkDetailById(chunkId: string): Promise<void> {
+  // 代际守卫（审查 m-3）：详情在途时筛选/关子视图会使 chunksGeneration 自增，
+  // 迟到响应一律作废（防旧块覆盖新详情、防复位后重现、防「其他版本」噪音 toast）。
+  const generation = chunksGeneration;
+  chunkDetailLoading.value = true;
+  try {
+    const fresh = await kbApi.getChunk(chunkId);
+    if (generation !== chunksGeneration || chunksView.value === null) return;
+    // 详情端点按块自身版本定域；把其他版本的块渲染进当前版本子视图是伪造导航
+    if (fresh.document_version_id !== chunksView.value.versionId) {
+      ElMessage.warning("该分块属于其他版本");
+      return;
+    }
+    chunkDetail.value = fresh;
+  } catch (error) {
+    if (generation !== chunksGeneration || chunksView.value === null) return;
+    if (error instanceof ApiError && error.status === 404) {
+      ElMessage.warning("分块不存在（可能已被删除）");
+      return;
+    }
+    reportError(error, "分块详情加载失败");
+  } finally {
+    if (generation === chunksGeneration) chunkDetailLoading.value = false;
+  }
+}
+
 async function loadDetail(id: string, generation: number): Promise<void> {
   loading.value = true;
   try {
@@ -379,6 +538,16 @@ watch([() => props.modelValue, () => props.documentId], ([open, id]) => {
   testSetName.value = "";
   testFile.value = null;
   testFileError.value = null;
+  // KB-06B：子视图随抽屉打开/切换文档复位
+  chunksView.value = null;
+  chunks.value = [];
+  chunksNextCursor.value = null;
+  chunkDetail.value = null;
+  chunkStats.value = null;
+  chunksFilterError.value = null;
+  chunksParentFilter.value = null;
+  chunkFilters.value = { q: "", sectionPath: "", chunkType: "" };
+  chunksGeneration += 1;
   if (!open || id === null) return;
   // TD-291：加载审批单（最近一单直显状态与驳回理由）
   void loadApprovals(id, generation);
@@ -480,7 +649,207 @@ function currentScan() {
     </template>
 
     <div v-loading="loading" class="drawer-body">
-      <template v-if="detail">
+      <!-- KB-06B 分块子视图（卡 1A：版本行入口；纯文本渲染无 v-html，TD-307 登记升级路径）。 -->
+      <template v-if="detail && chunksView">
+        <section data-testid="kb-chunks-view">
+          <div class="chunks-head">
+            <el-button link data-testid="kb-chunks-back" @click="closeChunks">← 返回文档</el-button>
+            <span class="chunks-title">
+              v{{ chunksView.versionNo }} 分块预览
+              <el-tag
+                v-if="chunksParentFilter"
+                size="small"
+                closable
+                data-testid="kb-chunks-parent-filter"
+                @close="applyChunkFilters"
+              >
+                只看 #{{ chunksParentFilter.index }} 的子块
+              </el-tag>
+            </span>
+          </div>
+          <p v-if="chunkStats" class="muted" data-testid="kb-chunks-stats">
+            {{ formatChunkStats(chunkStats) }}
+          </p>
+          <div class="chunks-filters">
+            <el-input
+              v-model="chunkFilters.q"
+              size="small"
+              placeholder="搜索块内容（≤200 字符）"
+              clearable
+              class="chunks-q-input"
+              data-testid="kb-chunks-q"
+              @keyup.enter="applyChunkFilters"
+              @clear="applyChunkFilters"
+            />
+            <el-select
+              v-model="chunkFilters.sectionPath"
+              size="small"
+              clearable
+              placeholder="章节"
+              class="chunks-select"
+              data-testid="kb-chunks-section"
+              @change="applyChunkFilters"
+            >
+              <el-option
+                v-for="opt in sectionOptions(chunkStats?.sections ?? [])"
+                :key="opt.value"
+                :label="opt.label"
+                :value="opt.value"
+              />
+            </el-select>
+            <el-select
+              v-model="chunkFilters.chunkType"
+              size="small"
+              clearable
+              placeholder="类型"
+              class="chunks-select chunks-select-type"
+              data-testid="kb-chunks-type"
+              @change="applyChunkFilters"
+            >
+              <el-option label="父块" value="parent" />
+              <el-option label="子块" value="child" />
+            </el-select>
+            <el-button
+              size="small"
+              type="primary"
+              data-testid="kb-chunks-search"
+              @click="applyChunkFilters"
+            >
+              搜索
+            </el-button>
+          </div>
+          <p v-if="chunksFilterError" class="test-error" data-testid="kb-chunks-filter-error">
+            {{ chunksFilterError }}
+          </p>
+          <el-table
+            v-loading="chunksLoading"
+            :data="chunks"
+            size="small"
+            data-testid="kb-chunks-table"
+          >
+            <el-table-column prop="chunk_index" label="#" width="52" />
+            <el-table-column label="类型" width="80">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.chunk_type === 'parent' ? 'warning' : 'info'">
+                  {{ chunkTypeLabel(row.chunk_type) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="章节" min-width="150">
+              <template #default="{ row }">
+                <span class="chunk-section">{{ row.section_path ?? "—" }}</span>
+              </template>
+            </el-table-column>
+            <!-- 内容预览（单行截断，DOM 含全文）：不渲染 markdown（无 v-html），只作行辨识。 -->
+            <el-table-column label="内容" min-width="180">
+              <template #default="{ row }">
+                <span class="chunk-preview">{{ row.text }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="字符" width="64">
+              <template #default="{ row }">{{ row.char_count }}</template>
+            </el-table-column>
+            <el-table-column label="嵌入" width="88">
+              <template #default="{ row }">
+                <el-tag size="small" :type="embeddingStatusMeta(row.embedding_status).tone">
+                  {{ embeddingStatusMeta(row.embedding_status).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="" width="56">
+              <template #default="{ row }">
+                <el-button
+                  link
+                  size="small"
+                  type="primary"
+                  data-testid="kb-chunk-detail-open"
+                  @click="openChunkDetailById(row.id)"
+                >
+                  详情
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-button
+            v-if="chunksNextCursor !== null"
+            class="load-more"
+            size="small"
+            :loading="chunksLoading"
+            data-testid="kb-chunks-more"
+            @click="loadMoreChunks"
+            >加载更多</el-button
+          >
+          <p
+            v-else-if="chunks.length === 0 && !chunksLoading"
+            class="muted"
+            data-testid="kb-chunks-empty"
+          >
+            没有匹配的分块。
+          </p>
+
+          <!-- 详情子面板（卡 2A）：text_markdown 纯文本；父/子导航走详情端点引用。 -->
+          <div
+            v-if="chunkDetail"
+            v-loading="chunkDetailLoading"
+            class="chunk-detail"
+            data-testid="kb-chunk-detail"
+          >
+            <div class="chunk-detail-head">
+              <el-button
+                link
+                size="small"
+                data-testid="kb-chunk-detail-close"
+                @click="chunkDetail = null"
+              >
+                ← 返回列表
+              </el-button>
+              <span>
+                #{{ chunkDetail.chunk_index }} · {{ chunkTypeLabel(chunkDetail.chunk_type) }}
+              </span>
+              <span class="muted">{{ chunkDetail.section_path ?? "" }}</span>
+            </div>
+            <p v-if="chunkDetail.parent" class="chunk-nav">
+              父块：
+              <el-button
+                link
+                size="small"
+                type="primary"
+                data-testid="kb-chunk-parent-link"
+                @click="openChunkDetailById(chunkDetail.parent.id)"
+              >
+                #{{ chunkDetail.parent.chunk_index }}
+              </el-button>
+            </p>
+            <p v-if="chunkDetail.children.length > 0" class="chunk-nav">
+              子块：
+              <el-button
+                v-for="child in chunkDetail.children"
+                :key="child.id"
+                link
+                size="small"
+                type="primary"
+                data-testid="kb-chunk-child-link"
+                @click="openChunkDetailById(child.id)"
+              >
+                #{{ child.chunk_index }}
+              </el-button>
+              <el-button
+                link
+                size="small"
+                type="primary"
+                data-testid="kb-chunk-children-filter"
+                @click="filterByParent(chunkDetail.id, chunkDetail.chunk_index)"
+              >
+                只看该块的子块
+              </el-button>
+            </p>
+            <pre class="chunk-text" data-testid="kb-chunk-text">{{
+              chunkDetail.text_markdown
+            }}</pre>
+          </div>
+        </section>
+      </template>
+      <template v-else-if="detail">
         <el-descriptions :column="1" border size="small">
           <el-descriptions-item label="文档 ID">
             <span class="mono">{{ detail.id }}</span>
@@ -731,6 +1100,20 @@ function currentScan() {
           <el-table-column label="创建时间" min-width="160">
             <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
           </el-table-column>
+          <!-- KB-06B：分块入口列（卡 1A）；无 view_chunks 的主体整列不出现。 -->
+          <el-table-column v-if="chunksVisible" label="分块" width="76">
+            <template #default="{ row }">
+              <el-button
+                link
+                size="small"
+                type="primary"
+                data-testid="kb-chunks-open"
+                @click="openChunks(row as KbVersionView)"
+              >
+                查看
+              </el-button>
+            </template>
+          </el-table-column>
         </el-table>
         <el-button
           v-if="nextCursor !== null"
@@ -811,5 +1194,79 @@ function currentScan() {
 }
 .reject-guidance {
   margin-bottom: 4px;
+}
+/* KB-06B 分块子视图 */
+.chunks-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chunks-title {
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.chunks-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.chunks-q-input {
+  flex: 1;
+  min-width: 120px;
+}
+.chunks-select {
+  width: 130px;
+}
+.chunks-select-type {
+  width: 96px;
+}
+.chunk-section {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.chunk-preview {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.chunk-detail {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+.chunk-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.chunk-nav {
+  margin: 4px 0;
+  font-size: 12px;
+}
+.chunk-text {
+  margin: 8px 0 0;
+  padding: 10px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
 }
 </style>

@@ -354,6 +354,8 @@ async def main() -> None:
                 "school.kb.test",
                 "school.kb.publish",
                 "school.kb.delete",
+                # KB-06B：分块预览（全栈链③断言列表/统计与表格保真；构建方角色本就属 KB √ 列）
+                "school.kb.view_chunks",
             ),
             scope_types=("school",),
         )

@@ -53,6 +53,20 @@ pg_host_port() {
   echo "${port:-55432}"
 }
 
+smtp_host_port() {
+  # 默认 51025；MailHog SMTP 同受 Hyper-V 保留段影响，覆盖机制与 PG 相同（KB-06B 期实测踩中）。
+  local port
+  port="$(read_env_value TEST_SMTP_HOST_PORT)"
+  echo "${port:-51025}"
+}
+
+mailhog_api_host_port() {
+  # 默认 58025；与 smtp_host_port 同机制。
+  local port
+  port="$(read_env_value TEST_MAILHOG_API_HOST_PORT)"
+  echo "${port:-58025}"
+}
+
 compose() {
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
 }
@@ -171,8 +185,8 @@ export TEST_MINIO_ENDPOINT="http://127.0.0.1:59000"
 export TEST_APP_DATABASE_URL="postgresql+asyncpg://campus_elf_test_tenant:${app_pw}@127.0.0.1:${pg_port}/${pg_db}"
 export TEST_PLATFORM_DATABASE_URL="postgresql+asyncpg://campus_elf_test_platform:${platform_pw}@127.0.0.1:${pg_port}/${pg_db}"
 export TEST_SMTP_HOST="127.0.0.1"
-export TEST_SMTP_PORT="51025"
-export TEST_MAILHOG_API="http://127.0.0.1:58025"
+export TEST_SMTP_PORT="$(smtp_host_port)"
+export TEST_MAILHOG_API="http://127.0.0.1:$(mailhog_api_host_port)"
 export TEST_OBJECT_STORE_DIR="${REPO_ROOT}/.zcode/tmp/objects-test"
 EOF
 }
@@ -198,8 +212,8 @@ TEST_MINIO_ENDPOINT=http://127.0.0.1:59000
 TEST_APP_DATABASE_URL=postgresql+asyncpg://campus_elf_test_tenant:${app_pw}@127.0.0.1:${pg_port}/${pg_db}
 TEST_PLATFORM_DATABASE_URL=postgresql+asyncpg://campus_elf_test_platform:${platform_pw}@127.0.0.1:${pg_port}/${pg_db}
 TEST_SMTP_HOST=127.0.0.1
-TEST_SMTP_PORT=51025
-TEST_MAILHOG_API=http://127.0.0.1:58025
+TEST_SMTP_PORT=$(smtp_host_port)
+TEST_MAILHOG_API=http://127.0.0.1:$(mailhog_api_host_port)
 TEST_OBJECT_STORE_DIR=${REPO_ROOT}/.zcode/tmp/objects-test
 EOF
 }

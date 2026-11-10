@@ -1,4 +1,4 @@
-/** 知识库域 API（M3 KB-01A 接口的前端消费：批量上传 + 文档列表/详情/版本；KB-05B 增发布/回滚/下线/删除）。 */
+/** 知识库域 API（M3 KB-01A 上传/文档读 + KB-05B 发布四动作 + KB-06B 分块预览三读）。 */
 
 import { buildQuery, type AuthSessionRequest, type Page } from "./org";
 
@@ -73,6 +73,67 @@ export interface KbFileMetadataInput {
   description?: string;
 }
 
+/**
+ * 分块列表行（后端 `KbChunkResponse`，`school_kb.py:973-989`；路由 :1064-1096）。
+ * `text_markdown` 是保真渲染源（表格竖线/代码围栏原样），`text` 是后端搜索匹配列。
+ */
+export interface KbChunkView {
+  id: string;
+  chunk_type: string;
+  chunk_index: number;
+  parent_id: string | null;
+  text: string;
+  text_markdown: string;
+  section_path: string | null;
+  page_start: number | null;
+  page_end: number | null;
+  token_count: number;
+  char_count: number;
+  embedding_status: string;
+  created_at: string;
+}
+
+/** 父/子块引用（详情家族导航）。 */
+export interface KbChunkRef {
+  id: string;
+  chunk_index: number;
+}
+
+/** 分块详情（后端 `KbChunkDetailResponse` = 列表字段 + 版本归属 + 父/子引用）。 */
+export interface KbChunkDetailView extends KbChunkView {
+  document_version_id: string;
+  parent: KbChunkRef | null;
+  children: KbChunkRef[];
+}
+
+/** 章节统计行（chunk_count 降序、路径升序）。 */
+export interface KbChunkSectionStat {
+  section_path: string;
+  chunk_count: number;
+}
+
+/** 版本分块统计（后端 `KbChunkStatsResponse`；per-version 固定口径，不随筛选变化）。 */
+export interface KbChunkStatsView {
+  total_chunks: number;
+  parent_count: number;
+  child_count: number;
+  embedding_status: Record<string, number>;
+  total_tokens: number;
+  total_chars: number;
+  section_count: number;
+  sections: KbChunkSectionStat[];
+}
+
+/** 分块列表查询（四筛选 + 分页；后端语义：筛选在游标推进之前，`chunk_read.py:231-253`）。 */
+export interface KbChunkListQuery {
+  limit?: number;
+  cursor?: string;
+  q?: string;
+  section_path?: string;
+  chunk_type?: "parent" | "child";
+  parent_id?: string;
+}
+
 export interface KbUploadInput {
   files: File[];
   /** 8–128 位 `[A-Za-z0-9._:-]`；调用方按提交签名决定复用或换新。 */
@@ -98,6 +159,12 @@ export interface KbApi {
   offlineVersion(versionId: string): Promise<KbVersionStateResult>;
   /** 软删版本（PUBLISHED → DELETED 终态；审计；collection 保留至 M6 清理）。 */
   deleteVersion(versionId: string): Promise<KbVersionStateResult>;
+  /** 按版本列出分块（游标分页 + q/章节/类型/父块筛选；404 `VERSION_NOT_FOUND`）。 */
+  listChunks(versionId: string, query?: KbChunkListQuery): Promise<Page<KbChunkView>>;
+  /** 分块详情（父/子引用；不存在/跨租/范围外一律 404 `CHUNK_NOT_FOUND`，不泄露存在性）。 */
+  getChunk(chunkId: string): Promise<KbChunkDetailView>;
+  /** 版本分块统计（per-version 固定口径；404 `VERSION_NOT_FOUND`）。 */
+  getChunkStats(versionId: string): Promise<KbChunkStatsView>;
 }
 
 export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
@@ -152,6 +219,24 @@ export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
       return request<KbVersionStateResult>(`/api/v1/school/kb/versions/${versionId}`, {
         method: "DELETE",
       });
+    },
+    async listChunks(versionId, query = {}) {
+      return request<Page<KbChunkView>>(
+        `/api/v1/school/kb/versions/${versionId}/chunks${buildQuery({
+          limit: query.limit,
+          cursor: query.cursor,
+          q: query.q,
+          section_path: query.section_path,
+          chunk_type: query.chunk_type,
+          parent_id: query.parent_id,
+        })}`,
+      );
+    },
+    async getChunk(chunkId) {
+      return request<KbChunkDetailView>(`/api/v1/school/kb/chunks/${chunkId}`);
+    },
+    async getChunkStats(versionId) {
+      return request<KbChunkStatsView>(`/api/v1/school/kb/versions/${versionId}/chunks/stats`);
     },
   };
 }

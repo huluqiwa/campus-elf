@@ -35,6 +35,23 @@ export interface KbVersionFixture {
   created_at: string;
 }
 
+/** 分块夹具（KB-06B；字段与后端 `KbChunkResponse`（school_kb.py:1064-1096）一致，KB-10 三列不出现）。 */
+export interface KbChunkFixture {
+  id: string;
+  chunk_type: "parent" | "child";
+  chunk_index: number;
+  parent_id: string | null;
+  text: string;
+  text_markdown: string;
+  section_path: string | null;
+  page_start: number | null;
+  page_end: number | null;
+  token_count: number;
+  char_count: number;
+  embedding_status: string;
+  created_at: string;
+}
+
 export interface KbDocumentFixture {
   id: string;
   title: string;
@@ -66,6 +83,8 @@ export interface KbMockCaptures {
   detailIds: string[];
   versionUrls: string[];
   versionActions: KbVersionActionCapture[];
+  /** KB-06B：分块详情请求路径（列表/统计走 versions 路由，进 versionActions）。 */
+  chunkUrls: string[];
 }
 
 export interface KbMockOptions {
@@ -91,11 +110,17 @@ export interface KbMockOptions {
   detailError?: { status: number; body: unknown };
   /** KB-05B：初始活跃发布（docId → versionId），模拟库里的 alias 行；缺省 = 无活跃发布。 */
   activePublishByDocument?: Record<string, string>;
+  /** KB-06B：分块夹具（versionId → 该版本全量块）；缺省 = 无分块（打开子视图为空集）。 */
+  chunksByVersion?: Record<string, KbChunkFixture[]>;
 }
 
 export interface KbMock {
   captures: KbMockCaptures;
-  state: { documents: KbDocumentFixture[] };
+  state: {
+    documents: KbDocumentFixture[];
+    /** KB-06B：按 versionId 存取的分块夹具（断言走这里——mockKbApi 克隆了 options 传入值）。 */
+    chunksByVersion: Record<string, KbChunkFixture[]>;
+  };
 }
 
 export function kbScanState(overrides: Partial<KbScanStateFixture> = {}): KbScanStateFixture {
@@ -134,6 +159,25 @@ export function kbDocument(overrides: Partial<KbDocumentFixture> = {}): KbDocume
     current_version: kbVersion(),
     created_at: "2026-10-31T00:00:00Z",
     updated_at: "2026-10-31T00:00:00Z",
+    ...overrides,
+  };
+}
+
+export function kbChunk(overrides: Partial<KbChunkFixture> = {}): KbChunkFixture {
+  return {
+    id: "62000000-0000-0000-0000-000000000001",
+    chunk_type: "child",
+    chunk_index: 0,
+    parent_id: null,
+    text: "默认块文本",
+    text_markdown: "默认块文本",
+    section_path: null,
+    page_start: null,
+    page_end: null,
+    token_count: 10,
+    char_count: 20,
+    embedding_status: "ready",
+    created_at: "2026-11-10T00:00:00Z",
     ...overrides,
   };
 }
@@ -303,12 +347,18 @@ function notFound(route: Route): Promise<void> {
 
 export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promise<KbMock> {
   const documents = (options.documents ?? FIXTURE_KB_DOCUMENTS).map(cloneDocument);
+  // KB-06B：分块夹具按 versionId 克隆存取（断言走 state.chunksByVersion——克隆语义与 documents 相同）
+  const chunksByVersion: Record<string, KbChunkFixture[]> = {};
+  for (const [versionId, chunks] of Object.entries(options.chunksByVersion ?? {})) {
+    chunksByVersion[versionId] = chunks.map((chunk) => ({ ...chunk }));
+  }
   const captures: KbMockCaptures = {
     uploads: [],
     listUrls: [],
     detailIds: [],
     versionUrls: [],
     versionActions: [],
+    chunkUrls: [],
   };
   const replayByKey = new Map<string, { batch_id: string; documents: KbDocumentFixture[] }>();
   /** KB-05B：每文档活跃发布（mock 的 alias 行，含首次发布时间——重放保留原值，service.py:2577）；夹具不预置——「已发布但无指针」的重放拒绝路径因此可测。 */
@@ -340,6 +390,121 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
       );
     }
     return versions;
+  }
+
+  // ---- KB-06B：分块路由判据（逐字锚定 backend/app/kb/chunk_read.py） ----
+
+  /** 稳定次序 chunk_index asc, id asc（chunk_read.py:241 列表排序 + :298 详情子块同键）。 */
+  function byChunkOrder(a: KbChunkFixture, b: KbChunkFixture): number {
+    return a.chunk_index - b.chunk_index || a.id.localeCompare(b.id);
+  }
+
+  function encodeChunkCursor(chunk: KbChunkFixture): string {
+    return Buffer.from(JSON.stringify({ i: chunk.chunk_index, d: chunk.id })).toString("base64url");
+  }
+
+  function decodeChunkCursor(cursor: string): { index: number; id: string } {
+    const payload = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
+      i?: unknown;
+      d?: unknown;
+    };
+    if (typeof payload.i !== "number" || typeof payload.d !== "string" || payload.i < 0) {
+      throw new Error("bad cursor");
+    }
+    return { index: payload.i, id: payload.d };
+  }
+
+  /**
+   * 列表页（chunk_read.py list_chunks）：筛选在游标推进**之前**（:231-241 先筛选、:242-253 游标）；
+   * q = 大小写不敏感 contains（后端 ILIKE :234，通配符转义由后端集成测试背书、mock 夹具不含通配符）；
+   * section_path 精确（:236）；取满 limit 才给游标（:254-257）。
+   */
+  function chunkPageFor(
+    versionId: string,
+    query: URLSearchParams,
+  ): { items: KbChunkFixture[]; next_cursor: string | null } | "BAD_CURSOR" {
+    const all = chunksByVersion[versionId] ?? [];
+    let rows = all;
+    const q = query.get("q");
+    if (q !== null && q.trim() !== "") {
+      const needle = q.trim().toLowerCase();
+      rows = rows.filter((chunk) => chunk.text.toLowerCase().includes(needle));
+    }
+    const sectionPath = query.get("section_path");
+    if (sectionPath !== null) rows = rows.filter((chunk) => chunk.section_path === sectionPath);
+    const chunkType = query.get("chunk_type");
+    if (chunkType !== null) rows = rows.filter((chunk) => chunk.chunk_type === chunkType);
+    const parentId = query.get("parent_id");
+    if (parentId !== null) rows = rows.filter((chunk) => chunk.parent_id === parentId);
+    rows = [...rows].sort(byChunkOrder);
+    const cursor = query.get("cursor");
+    if (cursor !== null) {
+      let marker: { index: number; id: string };
+      try {
+        marker = decodeChunkCursor(cursor);
+      } catch {
+        // chunk_read.py:249 raise → 路由层 INVALID_CURSOR 400（绝不静默回第一页，TD-243 口径）
+        return "BAD_CURSOR";
+      }
+      rows = rows.filter(
+        (chunk) =>
+          chunk.chunk_index > marker.index ||
+          (chunk.chunk_index === marker.index && chunk.id > marker.id),
+      );
+    }
+    const limit = Math.max(1, Number(query.get("limit") ?? "20"));
+    const page = rows.slice(0, limit);
+    return {
+      items: page,
+      next_cursor: page.length === limit ? encodeChunkCursor(page[page.length - 1]!) : null,
+    };
+  }
+
+  /**
+   * 详情（chunk_read.py get_chunk）：不存在与「不在该版本」（跨版本同语义）同码同文 404（:283/:288）；
+   * 父引用须同版本（:296-301 FK 只约束同租）；children 按 chunk_index 升序。
+   */
+  function chunkDetailFor(versionId: string, chunkId: string): KbChunkFixture | null {
+    const all = chunksByVersion[versionId] ?? [];
+    return all.find((chunk) => chunk.id === chunkId) ?? null;
+  }
+
+  function chunkChildrenFor(versionId: string, parentId: string): KbChunkFixture[] {
+    return (chunksByVersion[versionId] ?? []).filter((chunk) => chunk.parent_id === parentId);
+  }
+
+  /** 统计（chunk_read.py chunk_stats）：分组聚合（:368-370）；sections 块数降序、路径升序（:389）；embedding 三态恒有键。 */
+  function chunkStatsFor(versionId: string) {
+    const all = chunksByVersion[versionId] ?? [];
+    const embedding = { pending: 0, ready: 0, failed: 0 };
+    const sections = new Map<string, number>();
+    let parentCount = 0;
+    let totalTokens = 0;
+    let totalChars = 0;
+    for (const chunk of all) {
+      if (chunk.chunk_type === "parent") parentCount += 1;
+      totalTokens += chunk.token_count;
+      totalChars += chunk.char_count;
+      if (chunk.embedding_status in embedding) {
+        embedding[chunk.embedding_status as keyof typeof embedding] += 1;
+      }
+      if (chunk.section_path !== null) {
+        sections.set(chunk.section_path, (sections.get(chunk.section_path) ?? 0) + 1);
+      }
+    }
+    const sectionRows = [...sections.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([section_path, chunk_count]) => ({ section_path, chunk_count }));
+    return {
+      total_chunks: all.length,
+      parent_count: parentCount,
+      child_count: all.length - parentCount,
+      embedding_status: embedding,
+      total_tokens: totalTokens,
+      total_chars: totalChars,
+      section_count: sectionRows.length,
+      sections: sectionRows,
+    };
   }
 
   /** 上传成功后新建的文档：状态 UPLOADED、扫描 pending（`service.py:181-193` 的初始映射）。 */
@@ -549,7 +714,9 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     const path = url.pathname;
     const method = request.method();
     captures.versionActions.push({ method, path });
-    const match = path.match(/\/school\/kb\/versions\/([^/]+)(\/(publish|rollback|offline))?$/);
+    const match = path.match(
+      /\/school\/kb\/versions\/([^/]+)(\/(publish|rollback|offline|chunks)(\/stats)?)?$/,
+    );
     if (!match) return json(route, 404, { detail: "未 mock 的版本路径" });
     const versionId = match[1] ?? "";
     const action = match[3];
@@ -563,6 +730,18 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     const now = new Date().toISOString();
     const active = activePublish.get(document.id) ?? null;
     const activeVersionId = active?.versionId ?? null;
+
+    // KB-06B 分块列表/统计（chunk_read.py list_chunks/chunk_stats；版本 404 探测已由上方 findVersion 同口径处理）
+    if (method === "GET" && action === "chunks") {
+      if (match[4] !== undefined) {
+        return json(route, 200, chunkStatsFor(versionId));
+      }
+      const page = chunkPageFor(versionId, url.searchParams);
+      if (page === "BAD_CURSOR") {
+        return json(route, 400, { detail: { code: "INVALID_CURSOR", message: "分页游标无效" } });
+      }
+      return json(route, 200, page);
+    }
 
     if (method === "POST" && action === "publish") {
       // 幂等重放判定（service.py:2473）：已 PUBLISHED 走恢复路径，不做 TEST_PASSED 断言。
@@ -689,6 +868,34 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     return json(route, 404, { detail: "未 mock 的版本路径" });
   });
 
+  // KB-06B 分块详情（chunk_read.py get_chunk）：按块自身版本定域；不存在/跨租/跨版本同码同文 404。
+  await page.route("**/api/v1/school/kb/chunks/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    captures.chunkUrls.push(path);
+    const chunkId = path.match(/\/school\/kb\/chunks\/([^/]+)$/)?.[1] ?? "";
+    const owner = Object.keys(chunksByVersion).find((versionId) =>
+      (chunksByVersion[versionId] ?? []).some((chunk) => chunk.id === chunkId),
+    );
+    const chunk = owner === undefined ? null : chunkDetailFor(owner, chunkId);
+    if (owner === undefined || chunk === null) {
+      return json(route, 404, { detail: { code: "CHUNK_NOT_FOUND", message: "分块不存在" } });
+    }
+    const children = chunkChildrenFor(owner, chunkId)
+      .sort(byChunkOrder)
+      .map((child) => ({ id: child.id, chunk_index: child.chunk_index }));
+    // 父引用须同版本（chunk_read.py:308-311：FK 只约束同租，跨版本按无父呈现，不伪造引用）
+    const parentRow = chunk.parent_id === null ? null : chunkDetailFor(owner, chunk.parent_id);
+    const parent =
+      parentRow === null ? null : { id: parentRow.id, chunk_index: parentRow.chunk_index };
+    return json(route, 200, {
+      ...chunk,
+      document_version_id: owner,
+      parent,
+      children,
+    });
+  });
+
   await page.route("**/api/v1/school/kb/documents**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -709,5 +916,5 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     return json(route, 404, { detail: "未 mock 的知识库路径" });
   });
 
-  return { captures, state: { documents } };
+  return { captures, state: { documents, chunksByVersion } };
 }
