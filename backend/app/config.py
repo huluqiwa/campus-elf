@@ -178,8 +178,10 @@ class Settings(BaseSettings):
     kb_chunk_size: int = Field(default=500, ge=100, le=2000)
     kb_chunk_overlap_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
     kb_parent_chunk_size: int = Field(default=1000, ge=200, le=5000)
-    # 嵌入批次大小（TEI 批量接口）。
-    kb_embed_batch_size: int = Field(default=16, ge=1, le=128)
+    # 嵌入批次大小（TEI 批量接口）。默认 8 对齐 TEI CPU ONNX 后端的硬上限（服务端
+    # max_batch_requests 被强制为 8，超限请求 422——默认 16 时任何 ≥9 子块的文档构建必
+    # FAILED，KB-06B 全栈链③实测踩中；GPU 部署可用环境变量调高）。
+    kb_embed_batch_size: int = Field(default=8, ge=1, le=128)
     # dense 维度（BGE-M3 = 1024）；EMBEDDING 后与实际比对，漂移即 FAILED（简报 D4）。
     kb_embed_dim: int = Field(default=1024, ge=1, le=4096)
     # 看门狗：BUILDING 心跳超过该秒数 → FAILED/STALE（可重试）。

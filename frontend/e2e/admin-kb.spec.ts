@@ -1,7 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { mockAuth } from "./helpers/auth-mock";
-import { kbDocument, kbVersion, mockKbApi, type KbDocumentFixture } from "./helpers/kb-mock";
+import {
+  kbChunk,
+  kbDocument,
+  kbVersion,
+  mockKbApi,
+  type KbChunkFixture,
+  type KbDocumentFixture,
+} from "./helpers/kb-mock";
 
 // M3 KB-01B 知识库上传/列表（接口 mock）：权限入口、本地预检、整批原子错误、幂等键、
 // 扫描状态轮询与文案、游标分页、详情版本加载、陈旧横幅。
@@ -986,4 +993,275 @@ test("KB-05B 权限分授：有 publish 无 delete 只见下线/回滚；有 del
   await expect(drawerB.getByTestId("kb-offline")).toHaveCount(0);
   await expect(drawerB.getByTestId("kb-rollback")).toHaveCount(0);
   await page2.close();
+});
+
+// ---- M3 KB-06B：分块预览（接口 mock；判据手抄 chunk_read.py，锚点见 kb-mock.ts）----
+
+const CHUNK_PERMS = [...BOTH, "school.kb.view_chunks"];
+
+const CHUNK_VERSION_ID = "61000000-0000-0000-0000-0000000000c1";
+const CHUNK_PARENT_ID = "62000000-0000-0000-0000-0000000000c1";
+
+/** 分块样例文档（READY）：一父两子（第一章）+ 一个表格父块（第二章，未被拆坏样例）。 */
+function chunkedDocument(): KbDocumentFixture {
+  return kbDocument({
+    id: "60000000-0000-0000-0000-0000000000c1",
+    title: "分块样例",
+    status: "READY",
+    current_version: kbVersion({
+      id: CHUNK_VERSION_ID,
+      version_no: 1,
+      filename: "分块样例.pdf",
+      status: "READY",
+    }),
+    versions: [
+      kbVersion({
+        id: CHUNK_VERSION_ID,
+        version_no: 1,
+        filename: "分块样例.pdf",
+        status: "READY",
+      }),
+    ],
+  });
+}
+
+function chunkFixtures(): KbChunkFixture[] {
+  return [
+    kbChunk({
+      id: CHUNK_PARENT_ID,
+      chunk_type: "parent",
+      chunk_index: 0,
+      parent_id: null,
+      text: "第一章 全文拼接 含配置项",
+      text_markdown: "第一章 全文拼接 含配置项",
+      section_path: "手册 > 第一章 安装",
+      token_count: 30,
+      char_count: 60,
+      embedding_status: "pending",
+    }),
+    kbChunk({
+      id: "62000000-0000-0000-0000-0000000000c2",
+      chunk_index: 1,
+      parent_id: CHUNK_PARENT_ID,
+      text: "安装步骤1完成。",
+      text_markdown: "安装步骤1完成。",
+      section_path: "手册 > 第一章 安装",
+      char_count: 10,
+    }),
+    kbChunk({
+      id: "62000000-0000-0000-0000-0000000000c3",
+      chunk_index: 2,
+      parent_id: CHUNK_PARENT_ID,
+      text: "安装步骤2完成。",
+      text_markdown: "安装步骤2完成。",
+      section_path: "手册 > 第一章 安装",
+      char_count: 10,
+    }),
+    kbChunk({
+      id: "62000000-0000-0000-0000-0000000000c4",
+      chunk_index: 3,
+      parent_id: null,
+      chunk_type: "parent",
+      text: "| 参数 | 默认值 |\n| --- | --- |\n| 超时 | 30 |",
+      text_markdown: "| 参数 | 默认值 |\n| --- | --- |\n| 超时 | 30 |",
+      section_path: "手册 > 第二章 配置",
+      embedding_status: "failed",
+    }),
+  ];
+}
+
+async function openChunksView(page: Page, drawer: ReturnType<Page["getByTestId"]>): Promise<void> {
+  await drawer.getByTestId("kb-chunks-open").first().click();
+  await expect(drawer.getByTestId("kb-chunks-view")).toBeVisible();
+}
+
+function chunkRows(drawer: ReturnType<Page["getByTestId"]>): ReturnType<Page["locator"]> {
+  return drawer.getByTestId("kb-chunks-table").locator("tbody tr");
+}
+
+test("KB-06B 分块：版本行入口进子视图，列表/统计/类型标签渲染", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  const mock = await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+
+  await expect(drawer.getByTestId("kb-chunks-back")).toContainText("返回文档");
+  await expect(drawer.getByTestId("kb-chunks-view")).toContainText("v1 分块预览");
+  // 统计摘要（per-version 固定口径；mock 聚合锚定 chunk_read.py chunk_stats）
+  await expect(drawer.getByTestId("kb-chunks-stats")).toContainText("共 4 块（父 2 / 子 2）");
+  await expect(drawer.getByTestId("kb-chunks-stats")).toContainText("嵌入 待1 成2 败1");
+  await expect(chunkRows(drawer)).toHaveCount(4);
+  // 请求级断言：列表 + stats 两次 GET（走 versions 路由捕获）
+  const chunkGets = mock.captures.versionActions.filter(
+    (action) => action.method === "GET" && action.path.includes("/chunks"),
+  );
+  expect(chunkGets).toHaveLength(2);
+});
+
+test("KB-06B 搜索：只返回匹配块；纯空白 q 等价未提供（normalize_q 口径）", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+
+  await drawer.getByTestId("kb-chunks-q").fill("配置项");
+  await drawer.getByTestId("kb-chunks-search").click();
+  // 表格不渲染块文本列：命中块（#0 父块）以「章节列 + 行数」断言（文本保真在详情用例验）
+  await expect(chunkRows(drawer)).toHaveCount(1);
+  await expect(chunkRows(drawer)).toContainText("手册 > 第一章 安装");
+
+  await drawer.getByTestId("kb-chunks-q").fill("   ");
+  await drawer.getByTestId("kb-chunks-search").click();
+  await expect(chunkRows(drawer)).toHaveCount(4);
+});
+
+test("KB-06B 筛选：章节精确匹配 + 类型筛选；筛选变化回到第一页", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+
+  await drawer.getByTestId("kb-chunks-section").click();
+  await page.locator(".el-select-dropdown__item", { hasText: "第二章" }).click();
+  await expect(chunkRows(drawer)).toHaveCount(1);
+  await expect(chunkRows(drawer)).toContainText("手册 > 第二章 配置");
+
+  await drawer.getByTestId("kb-chunks-type").click();
+  await page.locator(".el-select-dropdown__item", { hasText: "父块" }).click();
+  // 章节 + 类型组合：第二章的父块（该节唯一的块就是表格父块）
+  await expect(chunkRows(drawer)).toHaveCount(1);
+  await expect(chunkRows(drawer)).toContainText("父块");
+
+  await drawer.getByTestId("kb-chunks-section").click();
+  await page.locator(".el-select-dropdown__item", { hasText: "第一章" }).first().click();
+  // 类型仍为父块：第一章 ∩ 父块 = 1 行（组合筛选语义，回第一页）
+  await expect(chunkRows(drawer)).toHaveCount(1);
+  await expect(chunkRows(drawer)).toContainText("父块");
+});
+
+test("KB-06B 详情：text_markdown 纯文本保真（表格竖线原样）+ 父/子导航 + 只看子块", async ({
+  page,
+}) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+
+  // 表格父块（第二章唯一行）详情：markdown 源码原样呈现（未被拆坏 + 无二次加工）
+  await chunkRows(drawer)
+    .filter({ hasText: "手册 > 第二章 配置" })
+    .getByTestId("kb-chunk-detail-open")
+    .click();
+  const detail = drawer.getByTestId("kb-chunk-detail");
+  await expect(detail).toBeVisible();
+  const chunkText = drawer.getByTestId("kb-chunk-text");
+  await expect(chunkText).toContainText("| 参数 | 默认值 |");
+  await expect(chunkText).toContainText("| 超时 | 30 |");
+  // 父块无 parent 链接、无子块（独立组）
+  await expect(detail.getByTestId("kb-chunk-parent-link")).toHaveCount(0);
+  await expect(detail.getByTestId("kb-chunk-child-link")).toHaveCount(0);
+
+  // 回列表 → 父块 #0（首行，按 chunk_index 升序）详情 → 子块导航 + 只看该块的子块
+  await drawer.getByTestId("kb-chunk-detail-close").click();
+  await chunkRows(drawer).first().getByTestId("kb-chunk-detail-open").click();
+  await expect(detail.getByTestId("kb-chunk-child-link")).toHaveCount(2);
+  await detail.getByTestId("kb-chunk-child-link").first().click();
+  await expect(detail).toContainText("安装步骤1完成。");
+  await expect(detail.getByTestId("kb-chunk-parent-link")).toContainText("#0");
+
+  // 经父块链接回父块（子块 children 为空，「只看该块的子块」按钮不渲染）
+  await detail.getByTestId("kb-chunk-parent-link").click();
+  await expect(detail.getByTestId("kb-chunk-child-link")).toHaveCount(2);
+  await detail.getByTestId("kb-chunk-children-filter").click();
+  await expect(drawer.getByTestId("kb-chunks-parent-filter")).toContainText("只看 #0 的子块");
+  await expect(chunkRows(drawer)).toHaveCount(2);
+});
+
+test("KB-06B 分页：第一页 20 行 + 加载更多，到底后按钮消失", async ({ page }) => {
+  const manyChunks: KbChunkFixture[] = [
+    kbChunk({ id: CHUNK_PARENT_ID, chunk_index: 0, chunk_type: "parent" }),
+  ];
+  for (let index = 1; index < 25; index += 1) {
+    manyChunks.push(
+      kbChunk({
+        id: `62000000-0000-0000-0000-${String(index).padStart(12, "0")}`,
+        chunk_index: index,
+        parent_id: CHUNK_PARENT_ID,
+        text: `第${index}块`,
+      }),
+    );
+  }
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: manyChunks },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+
+  await expect(chunkRows(drawer)).toHaveCount(20);
+  await drawer.getByTestId("kb-chunks-more").click();
+  await expect(chunkRows(drawer)).toHaveCount(25);
+  await expect(drawer.getByTestId("kb-chunks-more")).toHaveCount(0);
+  await expect(drawer.getByTestId("kb-chunks-stats")).toContainText("共 25 块");
+});
+
+test("KB-06B 权限：无 view_chunks 码不给分块入口列，子视图不可达", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: BOTH } });
+  await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await expect(drawer.getByTestId("kb-chunks-open")).toHaveCount(0);
+  await expect(drawer.getByTestId("kb-chunks-view")).toHaveCount(0);
+});
+
+test("KB-06B 空集：筛选无命中显示空态；切文档/重开抽屉子视图复位", async ({ page }) => {
+  const docA = chunkedDocument();
+  const docB = publishedDocument();
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  await mockKbApi(page, {
+    documents: [docA, docB],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+
+  await drawer.getByTestId("kb-chunks-q").fill("不存在的词");
+  await drawer.getByTestId("kb-chunks-search").click();
+  await expect(drawer.getByTestId("kb-chunks-empty")).toBeVisible();
+
+  // 回文档 → 打开另一文档 → 子视图不残留
+  await drawer.getByTestId("kb-chunks-back").click();
+  await expect(drawer.getByTestId("kb-chunks-view")).toHaveCount(0);
+  await drawer.getByTestId("kb-chunks-open").first().click();
+  await expect(drawer.getByTestId("kb-chunks-view")).toBeVisible();
+  await drawer.getByTestId("kb-chunks-back").click();
+  await page.keyboard.press("Escape");
+  await page
+    .locator(".el-table__row", { hasText: "已发布样例" })
+    .getByRole("button", { name: "查看" })
+    .click();
+  await expect(page.getByTestId("kb-document-drawer")).toBeVisible();
+  await expect(page.getByTestId("kb-chunks-view")).toHaveCount(0);
 });

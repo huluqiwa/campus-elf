@@ -240,7 +240,9 @@ test("发布链①：提交审批 → 构建 409 门禁 → publisher 403 审批
 test("发布链②：测试沙箱 → TEST_PASSED → UI 发布 → 回滚 409 兜底 → 重放恢复 → UI 下线 → 指针已撤 409", async ({
   page,
 }) => {
-  test.setTimeout(300_000);
+  // 600s：全量串行下前面链路的双构建 + TEI CPU 嵌入拖慢本链（隔离跑 35s；KB-05B 期
+  // 300s 在机器空载时够用，全量场景实测两次撞顶）——上限翻倍只容错环境，不改断言。
+  test.setTimeout(600_000);
   const accounts = loadAccounts();
   const admin = accounts.kb_admin;
   const approver = accounts.kb_approver;
@@ -326,9 +328,16 @@ test("发布链②：测试沙箱 → TEST_PASSED → UI 发布 → 回滚 409 �
   await publishDrawer.getByTestId("kb-rollback-trigger").click();
   await expect(page.getByTestId("kb-rollback-menu")).toContainText("无可回滚目标");
   await page.keyboard.press("Escape");
+  // Escape 在关下拉的同时可能冒泡触发 el-drawer 自身的 close-on-press-escape——
+  // 抽屉处于关闭动画时 close-btn 永远点不到（KB-06B 全栈三轮实测：drawer-head 拦截 +
+  // not stable 交替；隔离跑绿是时序竞态）。按终态分支：已关就跳过 close，两种终态
+  // 在下一行「重开抽屉」处汇合，语义等价。
+  if (await publishDrawer.isVisible()) {
+    await page.locator(".el-drawer__close-btn").click();
+  }
 
   // 重开抽屉（活跃记忆复位）：单一 PUBLISHED 版本 = 自身 → 409 KB_ROLLBACK_TARGET_IS_ACTIVE
-  await page.locator(".el-drawer__close-btn").click();
+  await expect(page.getByTestId("kb-document-drawer")).toBeHidden();
   const reopened = await openDrawer(page, title);
   await reopened.getByTestId("kb-rollback-trigger").click();
   await page.getByTestId("kb-rollback-menu").getByTestId("kb-rollback-target").click();
@@ -377,7 +386,8 @@ test("发布链②：测试沙箱 → TEST_PASSED → UI 发布 → 回滚 409 �
 });
 
 test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({ page }) => {
-  test.setTimeout(300_000);
+  // 与链②同口径：全量串行下构建/嵌入负载重，600s 容错（隔离跑 37s）。
+  test.setTimeout(600_000);
   const accounts = loadAccounts();
   const admin = accounts.kb_admin;
   const approver = accounts.kb_approver;
@@ -390,8 +400,10 @@ test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({
   const title = `E2E 发布删除 ${runId}`;
 
   // 接口速通到 TEST_PASSED（链②已验证 UI 侧；这里补发布响应契约 + UI 删除）
+  // 正文附一张 markdown 表格：KB-06B 用真实构建产物断言「表格未被拆坏」（表头与数据行同块）
+  const delBody = `${mdBody("发布删除", runId)}\n| 参数 | 默认值 |\n| --- | --- |\n| 超时 | 30 |\n| 重试 | 3 |\n`;
   const form = new FormData();
-  form.append("files", new Blob([mdBody("发布删除", runId)], { type: "text/markdown" }), mdName);
+  form.append("files", new Blob([delBody], { type: "text/markdown" }), mdName);
   form.append("metadata", JSON.stringify([{ title }]));
   const upload = await fetch(`${accounts.e2e_base_url}${API}/school/kb/documents`, {
     method: "POST",
@@ -445,6 +457,27 @@ test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({
   expect(runStart.status).toBe(201);
   await waitForDocumentStatus(accounts, publisherToken, documentId ?? "", "TEST_PASSED");
 
+  // KB-06B：分块预览 API 断言（真实构建产物——「表格未被拆坏」＝表头与数据行同落一个块）
+  const chunksPage = await apiGet(
+    accounts,
+    `${API}/school/kb/versions/${versionId}/chunks?limit=100`,
+    publisherToken,
+  );
+  expect(chunksPage.status).toBe(200);
+  const chunkItems = (chunksPage.json as KbPage<{ id: string; chunk_index: number; text: string }>)
+    .items;
+  expect(chunkItems.length, "构建 READY 后应有分块").toBeGreaterThan(0);
+  const tableChunk = chunkItems.find((chunk) => chunk.text.includes("| 超时 | 30 |"));
+  expect(tableChunk, "表格数据行应与表头同块（未被拆坏）").toBeTruthy();
+  const chunkStats = await apiGet(
+    accounts,
+    `${API}/school/kb/versions/${versionId}/chunks/stats`,
+    publisherToken,
+  );
+  expect(chunkStats.status).toBe(200);
+  expect((chunkStats.json as { total_chunks: number }).total_chunks).toBe(chunkItems.length);
+  expect((chunkStats.json as { child_count: number }).child_count).toBeGreaterThan(0);
+
   // 发布（API）：响应契约逐字段断言（KB-05 KbPublishResponse，school_kb.py:815-825）
   const publish = await apiPost(
     accounts,
@@ -479,6 +512,23 @@ test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({
   await loginViaUi(page, publisher);
   await page.getByRole("menuitem", { name: "知识库" }).click();
   const drawer = await openDrawer(page, title);
+  // KB-06B UI：版本行分块入口 → 子视图 → 表格块详情纯文本保真（无二次加工）
+  await drawer.getByTestId("kb-chunks-open").first().click();
+  await expect(drawer.getByTestId("kb-chunks-view")).toBeVisible();
+  const chunkTable = drawer.getByTestId("kb-chunks-table");
+  await expect(chunkTable.locator("tbody tr").first()).toBeVisible();
+  // 表格父块（拼接文本）与表格子块都含 "| 超时 | 30 |"——first() 取父块（chunk_index 升序在前）
+  await chunkTable
+    .locator("tbody tr", { hasText: "| 超时 | 30 |" })
+    .first()
+    .getByTestId("kb-chunk-detail-open")
+    .click();
+  await expect(drawer.getByTestId("kb-chunk-text")).toContainText("| 参数 | 默认值 |");
+  await expect(drawer.getByTestId("kb-chunk-text")).toContainText("| 超时 | 30 |");
+  await expect(drawer.getByTestId("kb-chunks-stats")).toContainText("块");
+  await drawer.getByTestId("kb-chunks-back").click();
+  await expect(drawer.getByTestId("kb-chunks-view")).toHaveCount(0);
+
   await drawer.getByTestId("kb-delete").click();
   await page.locator(".el-message-box").getByRole("button", { name: "删除" }).click();
   await expect(page.getByText("v1 已删除，活跃发布已撤除")).toBeVisible();

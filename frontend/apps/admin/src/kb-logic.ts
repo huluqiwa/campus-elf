@@ -1,7 +1,13 @@
 /** 知识库页的纯逻辑（M3 KB-01B）：与后端同口径的本地预检、幂等键决策、状态文案与轮询判据。 */
 
 import { ApiError, toUserMessage } from "@campus-elf/api-client";
-import type { KbDocumentView, KbFileMetadataInput, KbScanStateView } from "@campus-elf/api-client";
+import type {
+  KbChunkSectionStat,
+  KbChunkStatsView,
+  KbDocumentView,
+  KbFileMetadataInput,
+  KbScanStateView,
+} from "@campus-elf/api-client";
 
 import { codePointLength } from "./logic";
 
@@ -472,4 +478,76 @@ export function staleBannerText(lastLoadedAt: Date | null): string {
     lastLoadedAt.getSeconds(),
   )}`;
   return `数据可能不是最新（上次成功 ${clock}）`;
+}
+
+// ---- KB-06B：分块预览的纯函数层（后端契约 app/kb/chunk_read.py + school_kb.py:1064-1119）----
+
+/** 分块预览权限码（与后端 `ChunkViewerDep`（school_kb.py:81）同名；单码不拆分，简报卡 4A）。 */
+export const KB_CHUNKS_CODE = "school.kb.view_chunks";
+
+/** 分块入口门禁：持有 view_chunks 即给入口（服务端仍是唯一门禁；404/400 由后端裁决）。 */
+export function chunksGate(permissions: readonly string[]): boolean {
+  return permissions.includes(KB_CHUNKS_CODE);
+}
+
+/** q 的传输口径：strip 后空 = 未提供（与后端 `normalize_q`（chunk_read.py:41-45）同口径）。 */
+export function normalizeChunkQ(q: string): string | undefined {
+  const stripped = q.trim();
+  return stripped === "" ? undefined : stripped;
+}
+
+/**
+ * 搜索词前端先拦：后端 `Query(max_length=200)`（school_kb.py:1071）按 Unicode **码点**度量 422
+ * （chunk_read.py 审查 Minor 2 口径）；JS `.length` 是 UTF-16 码元数，非 BMP 字符 1 码点 = 2 码元，
+ * 必须用 `codePointLength` 对齐（审查 m-1；否则 emoji 等输入会「前端比后端严」造假门禁边界）。
+ */
+export function chunkFilterError(rawQ: string | undefined): string | null {
+  if (rawQ !== undefined && codePointLength(rawQ) > 200) {
+    return "搜索词最长 200 字符";
+  }
+  return null;
+}
+
+export interface KbChunkFilters {
+  q: string;
+  sectionPath: string;
+  chunkType: "" | "parent" | "child";
+}
+
+/** 块类型文案（未知档位显示原码，不默认成安全态）。 */
+export function chunkTypeLabel(chunkType: string): string {
+  if (chunkType === "parent") return "父块";
+  if (chunkType === "child") return "子块";
+  return `未知类型（${chunkType}）`;
+}
+
+const EMBEDDING_STATUS_META: Record<string, KbStatusMeta> = {
+  pending: { label: "待嵌入", tone: "info" },
+  ready: { label: "已嵌入", tone: "success" },
+  failed: { label: "嵌入失败", tone: "danger" },
+};
+
+/** 嵌入状态文案（后端 embedding_status 三态 `chunk_read.py` stats；未知档位显示原码）。 */
+export function embeddingStatusMeta(status: string): KbStatusMeta {
+  return EMBEDDING_STATUS_META[status] ?? { label: `未知状态（${status}）`, tone: "warning" };
+}
+
+/** 统计摘要行文案（per-version 固定口径；sections 只作章节下拉数据源，不进摘要）。 */
+export function formatChunkStats(stats: KbChunkStatsView): string {
+  const embedding = stats.embedding_status;
+  return (
+    `共 ${stats.total_chunks} 块（父 ${stats.parent_count} / 子 ${stats.child_count}）· ` +
+    `嵌入 待${embedding.pending ?? 0} 成${embedding.ready ?? 0} 败${embedding.failed ?? 0} · ` +
+    `${stats.total_chars} 字符`
+  );
+}
+
+/** 章节下拉选项（stats.sections → 值/标签；标签带块数，精确匹配语义与后端一致）。 */
+export function sectionOptions(
+  sections: readonly KbChunkSectionStat[],
+): Array<{ value: string; label: string }> {
+  return sections.map((section) => ({
+    value: section.section_path,
+    label: `${section.section_path}（${section.chunk_count}）`,
+  }));
 }

@@ -2,7 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "./auth";
 import { createKbApi } from "./kb";
-import type { KbDocumentView, KbPublishResult, KbVersionStateResult, KbVersionView } from "./kb";
+import type {
+  KbChunkDetailView,
+  KbChunkStatsView,
+  KbChunkView,
+  KbDocumentView,
+  KbPublishResult,
+  KbVersionStateResult,
+  KbVersionView,
+} from "./kb";
 
 function sessionStub(
   handler: (path: string, init?: RequestInit) => { status?: number; body?: unknown } | undefined,
@@ -231,5 +239,105 @@ describe("createKbApi 状态变更动作", () => {
       status: 409,
       detail,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// KB-06B：分块预览三读（后端契约 school_kb.py:1064/1098/1119；游标与筛选语义见 chunk_read.py）
+// ---------------------------------------------------------------------------
+
+const CHUNK: KbChunkView = {
+  id: "c-1",
+  chunk_type: "parent",
+  chunk_index: 0,
+  parent_id: null,
+  text: "配置项1已生效。\n\n配置项2已生效。",
+  text_markdown: "配置项1已生效。\n\n配置项2已生效。",
+  section_path: "操作手册 > 第二章 配置",
+  page_start: 1,
+  page_end: 1,
+  token_count: 12,
+  char_count: 24,
+  embedding_status: "ready",
+  created_at: "2026-11-10T00:00:00Z",
+};
+
+const CHUNK_DETAIL: KbChunkDetailView = {
+  ...CHUNK,
+  document_version_id: "v-1",
+  parent: null,
+  children: [{ id: "c-2", chunk_index: 1 }],
+};
+
+const CHUNK_STATS: KbChunkStatsView = {
+  total_chunks: 10,
+  parent_count: 5,
+  child_count: 5,
+  embedding_status: { pending: 5, ready: 5, failed: 0 },
+  total_tokens: 120,
+  total_chars: 240,
+  section_count: 3,
+  sections: [{ section_path: "操作手册 > 第一章 安装", chunk_count: 4 }],
+};
+
+describe("createKbApi 分块预览", () => {
+  it("listChunks GET /versions/{id}/chunks，无 query 时无查询串", async () => {
+    const { session, calls } = sessionStub(() => ({ body: { items: [CHUNK], next_cursor: null } }));
+    const result = await createKbApi(session).listChunks("v-1");
+    expect(calls[0].path).toBe("/api/v1/school/kb/versions/v-1/chunks");
+    expect(calls[0].init?.method).toBeUndefined();
+    expect(result.items[0]?.chunk_type).toBe("parent");
+    expect(result.next_cursor).toBeNull();
+  });
+
+  it("listChunks 序列化四筛选与分页参数（undefined 省略）", async () => {
+    const { session, calls } = sessionStub(() => ({ body: { items: [], next_cursor: "cur" } }));
+    await createKbApi(session).listChunks("v-1", {
+      limit: 50,
+      cursor: "cur-0",
+      q: "配置项",
+      section_path: "操作手册 > 第二章 配置",
+      chunk_type: "child",
+      parent_id: "c-9",
+    });
+    expect(calls[0].path).toBe(
+      "/api/v1/school/kb/versions/v-1/chunks?limit=50&cursor=cur-0&q=%E9%85%8D%E7%BD%AE%E9%A1%B9" +
+        "&section_path=%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8C+%3E+%E7%AC%AC%E4%BA%8C%E7%AB%A0+%E9%85%8D%E7%BD%AE" +
+        "&chunk_type=child&parent_id=c-9",
+    );
+  });
+
+  it("getChunk GET /chunks/{id}", async () => {
+    const { session, calls } = sessionStub(() => ({ body: CHUNK_DETAIL }));
+    const detail = await createKbApi(session).getChunk("c-1");
+    expect(calls[0].path).toBe("/api/v1/school/kb/chunks/c-1");
+    expect(detail.document_version_id).toBe("v-1");
+    expect(detail.children).toEqual([{ id: "c-2", chunk_index: 1 }]);
+  });
+
+  it("getChunkStats GET /versions/{id}/chunks/stats", async () => {
+    const { session, calls } = sessionStub(() => ({ body: CHUNK_STATS }));
+    const stats = await createKbApi(session).getChunkStats("v-1");
+    expect(calls[0].path).toBe("/api/v1/school/kb/versions/v-1/chunks/stats");
+    expect(stats.total_chunks).toBe(10);
+    expect(stats.embedding_status).toEqual({ pending: 5, ready: 5, failed: 0 });
+    expect(stats.sections[0]?.chunk_count).toBe(4);
+  });
+
+  it("chunks 404 CHUNK_NOT_FOUND 原样抛出", async () => {
+    const detail = { code: "CHUNK_NOT_FOUND", message: "分块不存在" };
+    const { session } = sessionStub(() => ({ status: 404, body: detail }));
+    await expect(createKbApi(session).getChunk("c-x")).rejects.toMatchObject({
+      status: 404,
+      detail,
+    });
+  });
+
+  it("chunks 400 INVALID_CURSOR 原样抛出", async () => {
+    const detail = { code: "INVALID_CURSOR", message: "分页游标无效" };
+    const { session } = sessionStub(() => ({ status: 400, body: detail }));
+    await expect(
+      createKbApi(session).listChunks("v-1", { cursor: "garbage" }),
+    ).rejects.toMatchObject({ status: 400, detail });
   });
 });

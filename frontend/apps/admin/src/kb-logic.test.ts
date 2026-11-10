@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiError } from "@campus-elf/api-client";
-import type { KbDocumentView, KbVersionView } from "@campus-elf/api-client";
+import type { KbChunkStatsView, KbDocumentView, KbVersionView } from "@campus-elf/api-client";
 
 import {
+  chunkFilterError,
+  chunkTypeLabel,
+  chunksGate,
+  embeddingStatusMeta,
+  formatChunkStats,
+  KB_CHUNKS_CODE,
   KB_DELETE_CODE,
   KB_MAX_BATCH_BYTES,
   KB_MAX_FILE_BYTES,
   KB_PUBLISH_CODE,
+  normalizeChunkQ,
   SCAN_POLL_WINDOW_MS,
   batchPreflightError,
   buildMetadata,
@@ -27,6 +34,7 @@ import {
   scanEngineLabel,
   scanStateMeta,
   scanTone,
+  sectionOptions,
   shouldPollScan,
   staleBannerText,
   uploadAttemptFor,
@@ -448,5 +456,89 @@ describe("发布动作 409 文案（服务端 message 是主文案，码是兜�
     // 非 ApiError 交给 toUserMessage：有 message 显示 message，无 message 退 fallback
     expect(kbPublishActionMessage(new Error("网络错误"), "操作失败")).toBe("网络错误");
     expect(kbPublishActionMessage(new Error(""), "操作失败")).toBe("操作失败");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// KB-06B：分块预览纯函数（后端契约 app/kb/chunk_read.py + school_kb.py:1064-1119）
+// ---------------------------------------------------------------------------
+
+describe("KB-06B chunksGate（backend app/kb/chunk_read.py 单码门禁）", () => {
+  it("持有 school.kb.view_chunks 即给入口；缺码/空权限不给", () => {
+    expect(chunksGate([KB_CHUNKS_CODE])).toBe(true);
+    expect(chunksGate(["school.kb.view", KB_CHUNKS_CODE])).toBe(true);
+    expect(chunksGate(["school.kb.view"])).toBe(false);
+    expect(chunksGate([])).toBe(false);
+  });
+
+  it("KB_CHUNKS_CODE 与后端 ChunkViewerDep 同码", () => {
+    expect(KB_CHUNKS_CODE).toBe("school.kb.view_chunks");
+  });
+});
+
+describe("KB-06B 搜索词口径（chunk_read.py normalize_q + max_length=200）", () => {
+  it("normalizeChunkQ：strip 后空 = 未提供（undefined 不进查询串）；词内空格保留", () => {
+    expect(normalizeChunkQ("  配置项  ")).toBe("配置项");
+    expect(normalizeChunkQ("表格 冻结")).toBe("表格 冻结");
+    expect(normalizeChunkQ("   ")).toBeUndefined();
+    expect(normalizeChunkQ("")).toBeUndefined();
+  });
+
+  it("chunkFilterError：raw 长度 >200 拦（含空白填充——后端按 raw 度量，审查 Minor 2 口径逐字一致）", () => {
+    expect(chunkFilterError("字".repeat(201))).toBe("搜索词最长 200 字符");
+    expect(chunkFilterError(`${"字".repeat(160)}${" ".repeat(41)}`)).toBe("搜索词最长 200 字符");
+    expect(chunkFilterError("字".repeat(200))).toBeNull();
+    expect(chunkFilterError("配置项")).toBeNull();
+    expect(chunkFilterError(undefined)).toBeNull();
+  });
+
+  it("chunkFilterError 按码点度量（审查 m-1）：101 个 emoji（202 UTF-16 码元 / 101 码点）放行", () => {
+    // JS .length 是 UTF-16 码元数：若按码元度量会把后端接受的 101 码点 emoji 拦下（假门禁）
+    expect(chunkFilterError("🜁".repeat(101))).toBeNull();
+    expect(chunkFilterError("🜁".repeat(201))).toBe("搜索词最长 200 字符");
+  });
+});
+
+describe("KB-06B 文案与统计摘要", () => {
+  it("chunkTypeLabel：父/子两档；未知档位显示原码", () => {
+    expect(chunkTypeLabel("parent")).toBe("父块");
+    expect(chunkTypeLabel("child")).toBe("子块");
+    expect(chunkTypeLabel("weird")).toBe("未知类型（weird）");
+  });
+
+  it("embeddingStatusMeta：三态映射；未知档位显示原码", () => {
+    expect(embeddingStatusMeta("pending")).toEqual({ label: "待嵌入", tone: "info" });
+    expect(embeddingStatusMeta("ready")).toEqual({ label: "已嵌入", tone: "success" });
+    expect(embeddingStatusMeta("failed")).toEqual({ label: "嵌入失败", tone: "danger" });
+    expect(embeddingStatusMeta("weird").label).toBe("未知状态（weird）");
+  });
+
+  it("formatChunkStats：总数/父子/嵌入三态/字符齐全；缺失键按 0 兜底", () => {
+    const stats: KbChunkStatsView = {
+      total_chunks: 10,
+      parent_count: 4,
+      child_count: 6,
+      embedding_status: { pending: 2, ready: 8, failed: 0 },
+      total_tokens: 120,
+      total_chars: 2400,
+      section_count: 3,
+      sections: [],
+    };
+    expect(formatChunkStats(stats)).toBe("共 10 块（父 4 / 子 6）· 嵌入 待2 成8 败0 · 2400 字符");
+    const missing: KbChunkStatsView = { ...stats, embedding_status: {} };
+    expect(formatChunkStats(missing)).toContain("待0 成0 败0");
+  });
+
+  it("sectionOptions：值=section_path（精确匹配语义），标签带块数", () => {
+    expect(
+      sectionOptions([
+        { section_path: "操作手册 > 第一章 安装", chunk_count: 4 },
+        { section_path: "操作手册 > 第二章 配置", chunk_count: 9 },
+      ]),
+    ).toEqual([
+      { value: "操作手册 > 第一章 安装", label: "操作手册 > 第一章 安装（4）" },
+      { value: "操作手册 > 第二章 配置", label: "操作手册 > 第二章 配置（9）" },
+    ]);
+    expect(sectionOptions([])).toEqual([]);
   });
 });
