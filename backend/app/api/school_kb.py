@@ -12,10 +12,12 @@
 - `PUT /school/kb/documents/{document_id}`：标题/标签/描述编辑（免审但审计前后值）；
 - `GET /school/kb/versions/{version_id}/chunks`：分块列表（游标分页 + q/章节/类型/父块筛选，KB-06A）；
 - `GET /school/kb/chunks/{chunk_id}`：分块详情（父/子引用，KB-06A）；
-- `GET /school/kb/versions/{version_id}/chunks/stats`：版本分块统计（KB-06A）。
+- `GET /school/kb/versions/{version_id}/chunks/stats`：版本分块统计（KB-06A）；
+- `POST /school/kb/versions/{version_id}/retrieval-test`：单 query 检索测试
+  （dense/sparse/RRF/rerank 分数 + 最终引用，KB-07A；重排失败降级不 5xx）。
 
 权限：上传/提交/元数据 `school.kb.upload`；查询 `school.kb.view`；构建 `school.kb.build`；
-分块预览 `school.kb.view_chunks`（KB-06A）；
+分块预览与检索测试 `school.kb.view_chunks`（KB-06A/07A）；
 发布/回滚/下线 `school.kb.publish`（KB-05）；删除 `school.kb.delete`（KB-05）。
 拒绝审计：提交/构建的 403/409 写 `school.kb.approval.denied` / `school.kb.build.denied`，
 KB-05 发布/回滚/下线/删除的 403/409 写 `school.kb.publish.denied` / `school.kb.rollback.denied`
@@ -41,6 +43,13 @@ from app.kb.chunk_read import (
     chunk_stats,
     get_chunk,
     list_chunks,
+)
+from app.kb.retrieval_test import (
+    RerankStatus,
+    RetrievalRow,
+    RetrievalTestResult,
+    run_retrieval_test,
+    text_preview,
 )
 from app.kb.service import (
     ApprovalOutcome,
@@ -1130,3 +1139,127 @@ async def get_kb_chunk_stats(
     except KbError as exc:
         raise _http_error(exc) from exc
     return _chunk_stats_response(stats)
+
+
+# ---------------------------------------------------------------------------
+# KB-07A：检索测试（docs/design-briefs/M3-KB-07.md；单 query 诊断面，只读不落库）
+# ---------------------------------------------------------------------------
+
+
+class KbRetrievalTestRouteHit(BaseModel):
+    """单路（dense/sparse）命中：分数 + 该路 1-based 排名（None = 该路 pool×2 内未召回）。"""
+
+    score: float
+    rank: int
+
+
+class KbRetrievalTestResultRow(BaseModel):
+    """检索测试结果行（「为什么召回」逐路可解释 + 最终引用标记）。"""
+
+    chunk_id: UUID
+    chunk_index: int
+    chunk_type: str
+    section_path: str | None
+    page_start: int | None
+    page_end: int | None
+    text_preview: str
+    rrf_score: float
+    dense: KbRetrievalTestRouteHit | None
+    sparse: KbRetrievalTestRouteHit | None
+    rerank_score: float | None
+    final_rank: int
+    is_final_reference: bool
+
+
+class KbRetrievalTestResponse(BaseModel):
+    """检索测试响应（pool_size = len(results)；results 按 final_rank 升序）。"""
+
+    version_id: UUID
+    query: str
+    top_k: int
+    with_rerank: bool
+    rerank_status: RerankStatus
+    latency_ms: float
+    pool_size: int
+    results: list[KbRetrievalTestResultRow]
+
+
+class KbRetrievalTestRequest(BaseModel):
+    """检索测试请求（ACL 视角三参数为 KB-09 契约预留，设值即 422，见路由守卫）。"""
+
+    query: str = Field(min_length=1, max_length=300, description="raw 码点 ≤300；strip 后非空")
+    top_k: int = Field(default=10, ge=1, le=20)
+    with_rerank: bool = False
+    as_user_id: UUID | None = None
+    as_audiences: list[str] | None = None
+    ignore_acl: bool = False
+
+
+def _retrieval_test_response(result: RetrievalTestResult) -> KbRetrievalTestResponse:
+    return KbRetrievalTestResponse(
+        version_id=result.version_id,
+        query=result.query,
+        top_k=result.top_k,
+        with_rerank=result.with_rerank,
+        rerank_status=result.rerank_status,
+        latency_ms=result.latency_ms,
+        pool_size=len(result.results),
+        results=[_retrieval_row_response(row, result.top_k) for row in result.results],
+    )
+
+
+def _retrieval_row_response(row: RetrievalRow, top_k: int) -> KbRetrievalTestResultRow:
+    return KbRetrievalTestResultRow(
+        chunk_id=row.chunk_id,
+        chunk_index=row.chunk_index,
+        chunk_type=row.chunk_type,
+        section_path=row.section_path,
+        page_start=row.page_start,
+        page_end=row.page_end,
+        text_preview=text_preview(row.text),
+        rrf_score=row.rrf_score,
+        dense=(
+            KbRetrievalTestRouteHit(score=row.dense.score, rank=row.dense.rank)
+            if row.dense is not None
+            else None
+        ),
+        sparse=(
+            KbRetrievalTestRouteHit(score=row.sparse.score, rank=row.sparse.rank)
+            if row.sparse is not None
+            else None
+        ),
+        rerank_score=row.rerank_score,
+        final_rank=row.final_rank,
+        is_final_reference=row.final_rank <= top_k,
+    )
+
+
+@router.post("/versions/{version_id}/retrieval-test", response_model=KbRetrievalTestResponse)
+async def run_kb_retrieval_test(
+    version_id: UUID,
+    request: KbRetrievalTestRequest,
+    viewer: Annotated[Principal, ChunkViewerDep],
+) -> KbRetrievalTestResponse:
+    """单 query 检索测试（dense/sparse/RRF/rerank 分数与最终引用；跨租/范围外 404）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    # KB-09 契约预留：任何 ACL 视角参数都显式拒绝（fail-closed），绝不静默忽略
+    if request.as_user_id is not None or request.as_audiences is not None or request.ignore_acl:
+        raise _http_error(
+            KbError("RETRIEVAL_TEST_ACL_UNAVAILABLE", "ACL 视角检索未开放：随 KB-09 交付", 422)
+        )
+    query = request.query.strip()
+    if not query:
+        raise _http_error(KbError("RETRIEVAL_TEST_QUERY_REQUIRED", "检索词不能为空", 422))
+    try:
+        result = await run_retrieval_test(
+            tenant_id=tenant_id,
+            scope=viewer.scope_context,
+            version_id=version_id,
+            query=query,
+            top_k=request.top_k,
+            with_rerank=request.with_rerank,
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _retrieval_test_response(result)
