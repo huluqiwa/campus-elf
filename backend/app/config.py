@@ -186,6 +186,13 @@ class Settings(BaseSettings):
     kb_embed_dim: int = Field(default=1024, ge=1, le=4096)
     # 看门狗：BUILDING 心跳超过该秒数 → FAILED/STALE（可重试）。
     kb_build_heartbeat_timeout_seconds: int = Field(default=600, ge=60, le=7200)
+    # TEI rerank（bge-reranker-v2-m3；KB-07A 检索测试 opt-in 消费。M0 实测 CPU
+    # 8 候选 p50≈11.7s（TD-056），chat 快路径在 M4 前不重排）。
+    tei_rerank_url: str = "http://127.0.0.1:8082"
+    tei_rerank_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    # 检索测试 rerank 候选池：with_rerank=true 时融合查询扩量到 pool 再重排，
+    # 最终引用 = 重排后前 top_k（简报 `docs/design-briefs/M3-KB-07.md` 卡 2）。
+    kb_retrieval_test_rerank_pool: int = Field(default=20, ge=1, le=50)
 
     def kb_parser_tiers(self) -> list[str]:
         """解析档位列表（逗号分隔配置 → 有序列表；空串非法由 Field 约束外的校验兜底）。"""

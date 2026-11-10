@@ -8,6 +8,7 @@
 """
 
 import uuid as uuid_module
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -87,6 +88,7 @@ async def seed_test_passed_version(
     version_no: int = 1,
     title: str = "发布用文档",
     markdown: str = MARKDOWN,
+    embedder: Any | None = None,
 ) -> tuple[UUID, UUID]:
     """直接落文档/版本（APPROVED）→ 真实构建到 READY → 置 TEST_PASSED。
 
@@ -95,9 +97,15 @@ async def seed_test_passed_version(
     「内容修改 → 新版本走一遍管线」的真实流转。TEST_PASSED 由本脚手架直接落库
     （模拟 KB-04A 沙箱通过的可达终态；沙箱判分链路由 KB-04A 用例覆盖）。
     markdown 可传自定义内容（KB-06 分块预览用多章节/表格/代码结构）。
+    embedder 可注入构建侧嵌入实现（KB-07 检索测试用词袋确定性向量，默认
+    FakeEmbedder 哈希向量向后兼容；patch_ports 之后再 setattr，覆盖生效）。
     """
 
     patch_ports(monkeypatch, FakeParser(ParsedDocument(markdown=markdown)))
+    if embedder is not None:
+        from app.kb import build_task
+
+        monkeypatch.setattr(build_task, "_build_embedder", lambda settings: embedder)
     new_doc = doc_id is None
     doc = doc_id or uuid4()
     version_id = uuid4()

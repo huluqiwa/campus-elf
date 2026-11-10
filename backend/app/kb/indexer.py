@@ -303,3 +303,55 @@ async def search_points(
             }
         )
     return results
+
+
+def _points_to_hits(response: Any) -> list[dict[str, Any]]:
+    """查询响应 → `[{"chunk_id", "score"}]`（保持 Qdrant 的降序）。"""
+
+    return [{"chunk_id": str(point.id), "score": float(point.score)} for point in response.points]
+
+
+async def search_dense(
+    client: AsyncQdrantClient,
+    *,
+    collection: str,
+    dense: list[float],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """单路 dense 检索（KB-07 逐路分数旁路；与融合查询同 collection 定域）。
+
+    返回 `[{"chunk_id": str, "score": float}]`，按分数降序；不带 payload
+    （归位只按 id，元数据由 PG 回查）。
+    """
+
+    try:
+        response = await client.query_points(
+            collection, query=dense, using="dense", limit=limit, with_payload=False
+        )
+    except Exception as exc:
+        logger.warning("Qdrant dense 检索失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise IndexError_("SEARCH_FAILED", "向量检索失败") from exc
+    return _points_to_hits(response)
+
+
+async def search_sparse(
+    client: AsyncQdrantClient,
+    *,
+    collection: str,
+    sparse: SparseVector,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """单路 sparse（BM25）检索（KB-07 逐路分数旁路）；返回形状同 `search_dense`。"""
+
+    try:
+        response = await client.query_points(
+            collection,
+            query=qmodels.SparseVector(indices=sparse.indices, values=sparse.values),
+            using="sparse",
+            limit=limit,
+            with_payload=False,
+        )
+    except Exception as exc:
+        logger.warning("Qdrant sparse 检索失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise IndexError_("SEARCH_FAILED", "向量检索失败") from exc
+    return _points_to_hits(response)
