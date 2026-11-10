@@ -211,7 +211,14 @@ async def test_full_chain_publish_rollback_and_active_resolution(
 async def test_200_concurrent_reads_during_rollback_window(
     env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
 ) -> None:
-    """发布/回滚窗口 200 并发解析：零异常、结果恒 ∈ {v1, v2} 且版本-collection 配对。"""
+    """发布/回滚窗口并发解析：零异常、结果恒 ∈ {v1, v2} 且版本-collection 配对。
+
+    TD-309 加固（2026-11-11 用户拍板本 PR 顺带修；原实现 20 次切换与 1000 次
+    读取同时起跑，「两种解析结果都出现过」依赖调度时序，CI 负载下 2/2 flake）：
+    先各完成一次真实切换 + 一次读取（v1/v2 各得一次**确定性**观察），其余
+    18 次切换与 1000 次读取并发跑窗口——核心不变量断言（配对/非空/零异常/
+    两种版本都被观察到）一条不降，只把时序依赖换成确定性交错。
+    """
 
     from app.kb.indexer import collection_name
 
@@ -222,9 +229,20 @@ async def test_200_concurrent_reads_during_rollback_window(
         (str(v2), collection_name(env.tenant_a, v2)),
     }
 
+    # 确定性前奏：v1、v2 各完成一次真实切换 + 各一次读取（串行，无竞态）
+    manual_reads: list[tuple[str, str]] = []
+    for target in (v1, v2):
+        response = await client.post(
+            f"/api/v1/school/kb/versions/{target}/rollback", headers=headers
+        )
+        assert response.status_code == 200, response.text
+        resolved = await active_publish(tenant_id=env.tenant_a, document_id=doc_id)
+        assert resolved is not None, "切换窗口内解析不得为空（fail-closed 只对未发布态）"
+        manual_reads.append((str(resolved[0]), resolved[1]))
+
     async def switcher() -> int:
         switched = 0
-        for target in (v1, v2) * 10:
+        for target in (v1, v2) * 9:
             response = await client.post(
                 f"/api/v1/school/kb/versions/{target}/rollback", headers=headers
             )
@@ -242,13 +260,19 @@ async def test_200_concurrent_reads_during_rollback_window(
 
     switch_task = asyncio.create_task(switcher())
     reader_tasks = [asyncio.create_task(reader()) for _ in range(200)]
-    switched = await switch_task
-    reads = [item for sub in await asyncio.gather(*reader_tasks) for item in sub]
+    switched_rest = await switch_task
+    reads = manual_reads + [
+        item for sub in await asyncio.gather(*reader_tasks) for item in sub
+    ]
 
-    assert switched == 20
-    assert len(reads) == 1000
+    assert manual_reads == [
+        (str(v1), collection_name(env.tenant_a, v1)),
+        (str(v2), collection_name(env.tenant_a, v2)),
+    ]
+    assert switched_rest + 2 == 20
+    assert len(reads) == 1002
     assert all(pair in pairs for pair in reads)
-    # 切换真实发生了：两种解析结果都出现过
+    # 切换真实发生了：两种解析结果都出现过（前奏确定性保证；并发段只增配对合法行）
     assert {version for version, _ in reads} == {str(v1), str(v2)}
 
 
