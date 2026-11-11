@@ -8,6 +8,7 @@ import type {
   KbChunkView,
   KbDocumentView,
   KbPublishResult,
+  KbRetrievalTestResult,
   KbVersionStateResult,
   KbVersionView,
 } from "./kb";
@@ -339,5 +340,108 @@ describe("createKbApi 分块预览", () => {
     await expect(
       createKbApi(session).listChunks("v-1", { cursor: "garbage" }),
     ).rejects.toMatchObject({ status: 400, detail });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// KB-07B：检索测试（后端契约 school_kb.py POST /versions/{id}/retrieval-test；编排 retrieval_test.py）
+// ---------------------------------------------------------------------------
+
+const RETRIEVAL_RESULT: KbRetrievalTestResult = {
+  version_id: "v-1",
+  query: "配置项",
+  top_k: 10,
+  with_rerank: false,
+  rerank_status: "disabled",
+  latency_ms: 12.3,
+  pool_size: 2,
+  results: [
+    {
+      chunk_id: "c-1",
+      chunk_index: 0,
+      chunk_type: "child",
+      section_path: "操作手册 > 第二章 配置",
+      page_start: 1,
+      page_end: 1,
+      text_preview: "配置项1已生效。",
+      rrf_score: 0.0325,
+      dense: { score: 0.9786, rank: 1 },
+      sparse: { score: 3.2, rank: 1 },
+      rerank_score: null,
+      final_rank: 1,
+      is_final_reference: true,
+    },
+    {
+      chunk_id: "c-2",
+      chunk_index: 1,
+      chunk_type: "child",
+      section_path: null,
+      page_start: null,
+      page_end: null,
+      text_preview: "无关内容",
+      rrf_score: 0.0163,
+      dense: null,
+      sparse: null,
+      rerank_score: null,
+      final_rank: 2,
+      is_final_reference: true,
+    },
+  ],
+};
+
+describe("createKbApi.retrievalTest", () => {
+  it("POST /versions/{id}/retrieval-test，JSON body 按输入序列化（缺省 top_k/with_rerank 省略）", async () => {
+    const { session, calls } = sessionStub(() => ({ body: RETRIEVAL_RESULT }));
+    const result = await createKbApi(session).retrievalTest("v-1", { query: "配置项" });
+    expect(calls[0].path).toBe("/api/v1/school/kb/versions/v-1/retrieval-test");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.headers).toMatchObject({ "Content-Type": "application/json" });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ query: "配置项" });
+    expect(result.rerank_status).toBe("disabled");
+    expect(result.results[0]?.dense?.rank).toBe(1);
+  });
+
+  it("top_k/with_rerank 提供时并入 body", async () => {
+    const { session, calls } = sessionStub(() => ({
+      body: { ...RETRIEVAL_RESULT, with_rerank: true, rerank_status: "applied", top_k: 5 },
+    }));
+    const result = await createKbApi(session).retrievalTest("v-1", {
+      query: "奖学金条件",
+      top_k: 5,
+      with_rerank: true,
+    });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      query: "奖学金条件",
+      top_k: 5,
+      with_rerank: true,
+    });
+    expect(result.rerank_status).toBe("applied");
+  });
+
+  it("404 VERSION_NOT_FOUND 原样抛出", async () => {
+    const detail = { code: "VERSION_NOT_FOUND", message: "文档版本不存在" };
+    const { session } = sessionStub(() => ({ status: 404, body: detail }));
+    await expect(createKbApi(session).retrievalTest("v-x", { query: "q" })).rejects.toMatchObject({
+      status: 404,
+      detail,
+    });
+  });
+
+  it("422（如 ACL 预留参数被后端 fail-closed 拒绝）原样抛出", async () => {
+    const detail = { code: "RETRIEVAL_TEST_ACL_UNAVAILABLE", message: "ACL 视角检索未开放" };
+    const { session } = sessionStub(() => ({ status: 422, body: detail }));
+    await expect(createKbApi(session).retrievalTest("v-1", { query: "q" })).rejects.toMatchObject({
+      status: 422,
+      detail,
+    });
+  });
+
+  it("502 基础设施故障（SEARCH_FAILED）原样抛出", async () => {
+    const detail = { code: "RETRIEVAL_TEST_SEARCH_FAILED", message: "向量检索失败" };
+    const { session } = sessionStub(() => ({ status: 502, body: detail }));
+    await expect(createKbApi(session).retrievalTest("v-1", { query: "q" })).rejects.toMatchObject({
+      status: 502,
+      detail,
+    });
   });
 });

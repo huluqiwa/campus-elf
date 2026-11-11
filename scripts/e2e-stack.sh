@@ -142,20 +142,23 @@ wait_worker_running() {
 wait_tei_healthy() {
   # KB-05B（TD-292）：构建 embedding 与测试运行依赖 tei-embed；模型加载要几分钟，
   # 不等 healthy 会让第一个构建任务在 TEI 未就绪时失败（E2E 稳定性）。
+  # KB-07B：检索测试的 rerank 断言依赖 tei-rerank（bge-reranker-v2-m3），同机制。
   # 上限 700s > healthcheck 的 start_period 600s（review m-6）：脚本放弃时间必须晚于
   # 容器自己判死的时间，否则「脚本报错但容器稍后 healthy」的自造 flake。
+  local service="${1:?用法: wait_tei_healthy <service> <model-label>}"
+  local model="${2:?用法: wait_tei_healthy <service> <model-label>}"
   local status="" i
-  echo "[e2e-stack] 等待 tei-embed healthy（首次启动需加载 BGE-M3，可达数分钟）…"
+  echo "[e2e-stack] 等待 ${service} healthy（首次启动需加载 ${model}，可达数分钟）…"
   for i in $(seq 1 140); do
-    status="$(e2e_compose ps --format '{{.Health}}' tei-embed 2>/dev/null | head -1 || true)"
+    status="$(e2e_compose ps --format '{{.Health}}' "${service}" 2>/dev/null | head -1 || true)"
     if [[ "${status}" == "healthy" ]]; then
-      echo "[e2e-stack] tei-embed healthy"
+      echo "[e2e-stack] ${service} healthy"
       return 0
     fi
     sleep 5
   done
-  echo "[e2e-stack] 错误：tei-embed 未在 700s 内 healthy（最后状态：${status:-unknown}）。" >&2
-  e2e_compose logs --tail 50 tei-embed >&2 || true
+  echo "[e2e-stack] 错误：${service} 未在 700s 内 healthy（最后状态：${status:-unknown}）。" >&2
+  e2e_compose logs --tail 50 "${service}" >&2 || true
   exit 1
 }
 
@@ -191,7 +194,8 @@ cmd_up() {
   e2e_compose up -d --build
   wait_backend_healthy
   wait_worker_running
-  wait_tei_healthy
+  wait_tei_healthy tei-embed "BGE-M3"
+  wait_tei_healthy tei-rerank "bge-reranker-v2-m3"
 
   # 4) seed（真实 HTTP 注册→审核→开通 + 直写平台/租户账号）
   echo "[e2e-stack] 生成种子数据 …"

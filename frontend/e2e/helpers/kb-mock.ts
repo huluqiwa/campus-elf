@@ -507,6 +507,88 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     };
   }
 
+  /**
+   * KB-07B 检索测试（retrieval_test.py run_retrieval_test；确定性伪分数，简报 M3-KB-07B 卡 4A）：
+   * query 字符 bigram 与夹具文本的包含计数决定命中序（同分按 chunk_index 稳定），dense/sparse
+   * 同序（分数按位置递减），RRF 与后端/Qdrant 同公式 k=60；fake 重排按融合位置给升序分数
+   * （与后端集成 FakeReranker 同形）→ 稳定翻转融合序。不模拟 409/502（简报卡 4）。
+   */
+  function retrievalRowsFor(
+    versionId: string,
+    query: string,
+    topK: number,
+    withRerank: boolean,
+  ): {
+    rerank_status: "applied" | "disabled";
+    pool_size: number;
+    latency_ms: number;
+    results: unknown[];
+  } {
+    const all = chunksByVersion[versionId] ?? [];
+    const grams = new Set<string>();
+    const chars = [...query];
+    for (let i = 0; i + 1 < chars.length; i += 1) {
+      grams.add((chars[i] ?? "") + (chars[i + 1] ?? ""));
+    }
+    const hitCount = (text: string): number => {
+      let count = 0;
+      for (let i = 0; i + 1 < text.length; i += 1) {
+        if (grams.has(text.slice(i, i + 2))) count += 1;
+      }
+      return count;
+    };
+    const pool = Math.min(withRerank ? Math.max(20, topK) : topK, all.length);
+    const scored = all
+      .map((chunk) => ({ chunk, hits: hitCount(chunk.text) }))
+      .sort((a, b) => b.hits - a.hits || a.chunk.chunk_index - b.chunk.chunk_index)
+      .slice(0, pool);
+    const poolSize = scored.length;
+    const rowFor = (
+      entry: { chunk: KbChunkFixture },
+      position: number,
+      rerankScore: number | null,
+      finalRank: number,
+    ) => {
+      const rank = position + 1;
+      // 位置递减的路由分数（0.9×10^4 精度）；dense/sparse 同序同分是 mock 的简化
+      const routeScore = Math.round((1 - position / (poolSize + 1)) * 10000) / 10000;
+      return {
+        chunk_id: entry.chunk.id,
+        chunk_index: entry.chunk.chunk_index,
+        chunk_type: entry.chunk.chunk_type,
+        section_path: entry.chunk.section_path,
+        page_start: entry.chunk.page_start,
+        page_end: entry.chunk.page_end,
+        text_preview: entry.chunk.text.slice(0, 200),
+        rrf_score: Number((1 / (60 + rank) + 1 / (60 + rank)).toFixed(6)),
+        dense: { score: routeScore, rank },
+        sparse: { score: routeScore, rank },
+        rerank_score: rerankScore,
+        final_rank: finalRank,
+        is_final_reference: finalRank <= topK,
+      };
+    };
+    if (!withRerank) {
+      return {
+        rerank_status: "disabled",
+        pool_size: poolSize,
+        latency_ms: 1.2,
+        results: scored.map((entry, position) => rowFor(entry, position, null, position + 1)),
+      };
+    }
+    const results = scored
+      .map((entry, position) => ({
+        entry,
+        position,
+        rerankScore: Math.round(((position + 1) / poolSize) * 10000) / 10000,
+      }))
+      .sort((a, b) => b.rerankScore - a.rerankScore)
+      .map((item, finalPosition) =>
+        rowFor(item.entry, item.position, item.rerankScore, finalPosition + 1),
+      );
+    return { rerank_status: "applied", pool_size: poolSize, latency_ms: 1.2, results };
+  }
+
   /** 上传成功后新建的文档：状态 UPLOADED、扫描 pending（`service.py:181-193` 的初始映射）。 */
   function makeUploadedDocument(
     filename: string,
@@ -715,7 +797,7 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     const method = request.method();
     captures.versionActions.push({ method, path });
     const match = path.match(
-      /\/school\/kb\/versions\/([^/]+)(\/(publish|rollback|offline|chunks)(\/stats)?)?$/,
+      /\/school\/kb\/versions\/([^/]+)(\/(publish|rollback|offline|chunks|retrieval-test)(\/stats)?)?$/,
     );
     if (!match) return json(route, 404, { detail: "未 mock 的版本路径" });
     const versionId = match[1] ?? "";
@@ -741,6 +823,32 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
         return json(route, 400, { detail: { code: "INVALID_CURSOR", message: "分页游标无效" } });
       }
       return json(route, 200, page);
+    }
+
+    // KB-07B 检索测试（retrieval_test.py 编排；school_kb.py KbRetrievalTestRequest 校验）。
+    // 空查询的 422 与后端同码（前端有预检，正常 UI 到不了这里——防御镜像）。
+    if (method === "POST" && action === "retrieval-test") {
+      const body = (request.postDataJSON() ?? {}) as {
+        query?: string;
+        top_k?: number;
+        with_rerank?: boolean;
+      };
+      if ((body.query ?? "").trim() === "") {
+        return json(route, 422, {
+          detail: { code: "RETRIEVAL_TEST_QUERY_REQUIRED", message: "检索词不能为空" },
+        });
+      }
+      const topK = body.top_k ?? 10;
+      if (!Number.isInteger(topK) || topK < 1 || topK > 20) {
+        return json(route, 422, {
+          detail: { code: "VALIDATION_ERROR", message: "top_k 需为 1~20 的整数" },
+        });
+      }
+      return json(
+        route,
+        200,
+        retrievalRowsFor(versionId, body.query ?? "", topK, body.with_rerank === true),
+      );
     }
 
     if (method === "POST" && action === "publish") {

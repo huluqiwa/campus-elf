@@ -6,6 +6,8 @@ import type {
   KbChunkStatsView,
   KbDocumentView,
   KbFileMetadataInput,
+  KbRetrievalTestRouteHit,
+  KbRerankStatus,
   KbScanStateView,
 } from "@campus-elf/api-client";
 
@@ -550,4 +552,45 @@ export function sectionOptions(
     value: section.section_path,
     label: `${section.section_path}（${section.chunk_count}）`,
   }));
+}
+
+// ---- KB-07B：检索测试（后端契约 retrieval_test.py / school_kb.py KbRetrievalTestResponse）----
+
+/** rerank 状态文案（KbRerankStatus 闭合 Literal，switch 穷尽；rerank_status 语义见简报 M3-KB-07 §3）。 */
+export function rerankStatusLabel(status: KbRerankStatus): string {
+  switch (status) {
+    case "applied":
+      return "已重排";
+    case "skipped":
+      return "重排超时跳过";
+    case "failed":
+      return "重排失败降级";
+    case "disabled":
+      return "未启用重排";
+  }
+}
+
+/** 分数格式化：4 位小数；null（未启用/未召回）显示「—」。 */
+export function formatScore(score: number | null): string {
+  return score === null ? "—" : score.toFixed(4);
+}
+
+/** 单路分数 + 该路 1-based 名次（「为什么召回」逐路可解释；null = 该路 pool×2 内未召回）。 */
+export function routeScoreText(hit: KbRetrievalTestRouteHit | null): string {
+  return hit === null ? "—" : `${hit.score.toFixed(4)} · #${hit.rank}`;
+}
+
+/** 检索词前端预检（后端：raw 码点 ≤300 + strip 后非空，school_kb.py KbRetrievalTestRequest）。
+ * m-1 教训：非 BMP 字符按码点度量（codePointLength），不能用 UTF-16 .length。 */
+export function retrievalQueryError(rawQuery: string): string | null {
+  const stripped = rawQuery.trim();
+  if (stripped === "") return "请输入检索词";
+  if (codePointLength(rawQuery) > 300) return "检索词不能超过 300 个字符";
+  return null;
+}
+
+/** top_k 前端预检（后端 Field ge=1 le=20）。 */
+export function retrievalTopKError(topK: number): string | null {
+  if (!Number.isInteger(topK) || topK < 1 || topK > 20) return "top-k 需为 1~20 的整数";
+  return null;
 }

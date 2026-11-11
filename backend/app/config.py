@@ -189,7 +189,14 @@ class Settings(BaseSettings):
     # TEI rerank（bge-reranker-v2-m3；KB-07A 检索测试 opt-in 消费。M0 实测 CPU
     # 8 候选 p50≈11.7s（TD-056），chat 快路径在 M4 前不重排）。
     tei_rerank_url: str = "http://127.0.0.1:8082"
-    tei_rerank_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    # 超时按「单批 8 条 × 真实文档块文本长度」的 CPU 实测定（KB-07B 全栈实测 8 条
+    # ≈74s、4 条 ≈35s——M0 基准的 11.7s 是短文本口径），60s 会让 pool>6 的诊断
+    # 恒超时降级；分批后超时按批计。
+    tei_rerank_timeout_seconds: float = Field(default=300.0, gt=0, le=600)
+    # 单次 /rerank 请求的文本条数上限：TEI `--max-client-batch-size` 默认 8
+    # （dev/e2e compose 同值），超限请求被 TEI 拒绝（KB-07B 全栈首跑实测暴露）。
+    # 适配器按此值客户端分批（与 TEIEmbedder 的批次模式同款）；GPU/自定义部署可调。
+    tei_rerank_batch_size: int = Field(default=8, ge=1, le=128)
     # 检索测试 rerank 候选池：with_rerank=true 时融合查询扩量到 pool 再重排，
     # 最终引用 = 重排后前 top_k（简报 `docs/design-briefs/M3-KB-07.md` 卡 2）。
     kb_retrieval_test_rerank_pool: int = Field(default=20, ge=1, le=50)

@@ -9,6 +9,7 @@ import {
   chunksGate,
   embeddingStatusMeta,
   formatChunkStats,
+  formatScore,
   KB_CHUNKS_CODE,
   KB_DELETE_CODE,
   KB_MAX_BATCH_BYTES,
@@ -30,7 +31,11 @@ import {
   parseTags,
   pendingScanDocumentIds,
   publishGate,
+  retrievalQueryError,
+  retrievalTopKError,
+  rerankStatusLabel,
   rollbackTargets,
+  routeScoreText,
   scanEngineLabel,
   scanStateMeta,
   scanTone,
@@ -540,5 +545,49 @@ describe("KB-06B 文案与统计摘要", () => {
       { value: "操作手册 > 第二章 配置", label: "操作手册 > 第二章 配置（9）" },
     ]);
     expect(sectionOptions([])).toEqual([]);
+  });
+});
+
+// ---- KB-07B：检索测试纯函数（后端契约 retrieval_test.py / school_kb.py KbRetrievalTestResponse）----
+
+describe("KB-07B rerankStatusLabel", () => {
+  it("四档文案与 rerank_status 一一对应", () => {
+    expect(rerankStatusLabel("applied")).toBe("已重排");
+    expect(rerankStatusLabel("skipped")).toBe("重排超时跳过");
+    expect(rerankStatusLabel("failed")).toBe("重排失败降级");
+    expect(rerankStatusLabel("disabled")).toBe("未启用重排");
+  });
+});
+
+describe("KB-07B 分数格式化", () => {
+  it("formatScore：数值 4 位小数，null 显示「—」", () => {
+    expect(formatScore(0.9786123)).toBe("0.9786");
+    expect(formatScore(0)).toBe("0.0000");
+    expect(formatScore(null)).toBe("—");
+  });
+
+  it("routeScoreText：分数 + 该路 1-based 名次；null = 该路未召回", () => {
+    expect(routeScoreText({ score: 0.97861, rank: 1 })).toBe("0.9786 · #1");
+    expect(routeScoreText({ score: 0.5, rank: 12 })).toBe("0.5000 · #12");
+    expect(routeScoreText(null)).toBe("—");
+  });
+});
+
+describe("KB-07B 检索词与 top_k 前端预检", () => {
+  it("retrievalQueryError：strip 后空拦、raw 码点 >300 拦、合法通过", () => {
+    expect(retrievalQueryError("")).toBe("请输入检索词");
+    expect(retrievalQueryError("   ")).toBe("请输入检索词");
+    expect(retrievalQueryError("长".repeat(301))).toBe("检索词不能超过 300 个字符");
+    // m-1 教训：非 BMP 字符按码点度量——300 个 emoji（600 UTF-16 单元）是合法的
+    expect(retrievalQueryError("👍".repeat(300))).toBeNull();
+    expect(retrievalQueryError(" 奖学金申请条件 ")).toBeNull();
+  });
+
+  it("retrievalTopKError：1~20 之外的整数拦", () => {
+    expect(retrievalTopKError(0)).toBe("top-k 需为 1~20 的整数");
+    expect(retrievalTopKError(21)).toBe("top-k 需为 1~20 的整数");
+    expect(retrievalTopKError(10)).toBeNull();
+    expect(retrievalTopKError(1)).toBeNull();
+    expect(retrievalTopKError(20)).toBeNull();
   });
 });
