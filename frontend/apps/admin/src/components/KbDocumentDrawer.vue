@@ -527,7 +527,8 @@ async function runRetrievalTest(): Promise<void> {
     return;
   }
   retrievalTestError.value = null;
-  // loading 存活期跟运行序号（审查 M1）；结果作废跟 chunksGeneration（卡 3A）
+  // loading 存活期跟运行序号（审查 M1）；结果作废跟 chunksGeneration（卡 3A）。
+  // 结果渲染也带运行序号门（复审 m-a）：回车并发 + 中途改词时，后到的旧响应不得覆盖新结果
   const runSeq = ++retrievalRunSeq;
   const generation = chunksGeneration;
   retrievalTestLoading.value = true;
@@ -537,9 +538,11 @@ async function runRetrievalTest(): Promise<void> {
       top_k: retrievalTopK.value,
       with_rerank: retrievalWithRerank.value,
     });
+    if (runSeq !== retrievalRunSeq) return;
     if (generation !== chunksGeneration || chunksView.value === null) return;
     retrievalTestResult.value = result;
   } catch (error) {
+    if (runSeq !== retrievalRunSeq) return;
     if (generation !== chunksGeneration || chunksView.value === null) return;
     retrievalTestResult.value = null;
     reportError(error, "检索测试运行失败");
