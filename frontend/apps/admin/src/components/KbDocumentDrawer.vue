@@ -144,13 +144,16 @@ const chunkDetailLoading = ref(false);
 const chunkStats = ref<KbChunkStatsView | null>(null);
 let chunksGeneration = 0;
 
-// KB-07B：检索测试状态（卡 3A——并入 chunksGeneration 代际，切版本/关子视图作废在途响应）。
+// KB-07B：检索测试状态（卡 3A——结果作废并入 chunksGeneration 代际，切版本/关子视图/筛选变更
+// 都会作废在途响应；loading 存活期用独立「运行序号」——审查 M1：筛选变更 bump 代际但
+// 不重置 loading，若 loading 也绑代际会让「运行」按钮永久转圈（Element Plus loading 吞 click）。
 const retrievalQuery = ref("");
 const retrievalTopK = ref<number>(10);
 const retrievalWithRerank = ref(false);
 const retrievalTestLoading = ref(false);
 const retrievalTestError = ref<string | null>(null);
 const retrievalTestResult = ref<KbRetrievalTestResult | null>(null);
+let retrievalRunSeq = 0;
 
 const testGate = computed(() =>
   detail.value
@@ -524,6 +527,8 @@ async function runRetrievalTest(): Promise<void> {
     return;
   }
   retrievalTestError.value = null;
+  // loading 存活期跟运行序号（审查 M1）；结果作废跟 chunksGeneration（卡 3A）
+  const runSeq = ++retrievalRunSeq;
   const generation = chunksGeneration;
   retrievalTestLoading.value = true;
   try {
@@ -539,7 +544,7 @@ async function runRetrievalTest(): Promise<void> {
     retrievalTestResult.value = null;
     reportError(error, "检索测试运行失败");
   } finally {
-    if (generation === chunksGeneration) retrievalTestLoading.value = false;
+    if (runSeq === retrievalRunSeq) retrievalTestLoading.value = false;
   }
 }
 
@@ -762,7 +767,7 @@ function currentScan() {
                 size="small"
                 data-testid="kb-retrieval-rerank"
               />
-              <span class="muted rerank-hint">CPU 重排较慢（可达 1~2 分钟）</span>
+              <span class="muted rerank-hint">重排较慢（分钟级）</span>
               <el-button
                 size="small"
                 type="primary"
@@ -798,8 +803,13 @@ function currentScan() {
                     <span v-else class="muted">—</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="块" width="64">
-                  <template #default="{ row }">#{{ row.chunk_index }}</template>
+                <el-table-column label="块" width="72">
+                  <template #default="{ row }">
+                    <span class="retrieval-chunk-index">#{{ row.chunk_index }}</span>
+                    <el-tag size="small" :type="row.chunk_type === 'parent' ? 'warning' : 'info'">
+                      {{ chunkTypeLabel(row.chunk_type) }}
+                    </el-tag>
+                  </template>
                 </el-table-column>
                 <el-table-column label="章节" min-width="120">
                   <template #default="{ row }">
@@ -1405,6 +1415,8 @@ function currentScan() {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 窄抽屉下防溢出：溢出会挤压 el-input-number 使其失去可操作性（KB-07B 审查修实测） */
+  flex-wrap: wrap;
 }
 .retrieval-title {
   font-weight: 600;
@@ -1419,6 +1431,9 @@ function currentScan() {
 }
 .rerank-hint {
   white-space: nowrap;
+}
+.retrieval-chunk-index {
+  margin-right: 4px;
 }
 .chunk-section {
   display: inline-block;
