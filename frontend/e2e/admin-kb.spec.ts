@@ -1390,3 +1390,33 @@ test("KB-07B 超长 query 前端拦（码点度量，m-1 教训）：内联错�
   );
   expect(retrievalPosts).toHaveLength(0);
 });
+
+test("KB-07B 在途检索时改筛选：loading 收敛（运行序号）、迟响应被丢弃（审查 M1 回归）", async ({
+  page,
+}) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+    retrievalDelayMs: 400,
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+  await expect(drawer.getByTestId("kb-retrieval-empty")).toBeVisible();
+
+  await drawer.getByTestId("kb-retrieval-q").fill("安装步骤1");
+  await drawer.getByTestId("kb-retrieval-run").click();
+  // 在途期间改分块筛选（applyChunkFilters bump chunksGeneration）——迟响应必须被丢弃
+  await drawer.getByTestId("kb-chunks-q").fill("配置项");
+  await drawer.getByTestId("kb-chunks-search").click();
+  await expect(chunkRows(drawer)).toHaveCount(1);
+
+  // 迟到响应到达后：loading 已收敛（按钮可再点，审查 M1 的卡死场景），结果被丢弃（不渲染表）
+  await expect(drawer.getByTestId("kb-retrieval-table")).toHaveCount(0);
+  const runButton = drawer.getByTestId("kb-retrieval-run");
+  await expect(runButton).toBeEnabled();
+  await runButton.click();
+  await expect(drawer.getByTestId("kb-retrieval-table")).toBeVisible();
+  await expect(retrievalRows(drawer)).toHaveCount(4);
+});

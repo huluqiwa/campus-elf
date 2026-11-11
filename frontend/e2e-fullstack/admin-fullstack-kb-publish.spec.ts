@@ -529,7 +529,7 @@ test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({
     accounts,
     `${API}/school/kb/versions/${versionId}/retrieval-test`,
     publisherToken,
-    { query: tableChunk?.text ?? "", top_k: 5, with_rerank: true },
+    { query: tableChunk?.text ?? "", top_k: 4, with_rerank: true },
   );
   expect(reranked.status).toBe(200);
   const rerankedBody = reranked.json as typeof retrievalBody;
@@ -537,7 +537,7 @@ test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({
   expect(rerankedBody.results.length).toBeGreaterThan(0);
   expect(rerankedBody.results.every((row) => row.rerank_score !== null)).toBe(true);
   expect(rerankedBody.results.every((row, index) => row.final_rank === index + 1)).toBe(true);
-  expect(rerankedBody.results.every((row) => row.is_final_reference === row.final_rank <= 5)).toBe(
+  expect(rerankedBody.results.every((row) => row.is_final_reference === row.final_rank <= 4)).toBe(
     true,
   );
 

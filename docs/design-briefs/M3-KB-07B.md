@@ -103,12 +103,17 @@ compose 服务与 dev compose（:202-229）逐字一致（含 `--max-client-batc
 4. **e2e compose 加 `KB_RETRIEVAL_TEST_RERANK_POOL: "4"`**：CPU 重排池配 4（≈35s）——真实栈背书够用，不把套件总时长拖到分钟级。
 5. **链③ top-1 断言修正**：只索子块（KB-03B Minor 3），`chunkItems.find` 找到的表格块是父块（不在索引）——断言改为「top-1 ∈ 表格内容块集合（被索引的父子任一）」。首跑 24/25 红于此（红对了：真实栈证据的价值兑现）。
 6. **链② 一次 600s 超时红为环境负载**（同机并行集成/TEI 探针 + 镜像重建后的重负载轮，总时长 11.5m vs 基线 4m）；干净环境重跑全绿（链② 51s、链③ 1.9m）——KB-06B「先分清环境负载/口令污染/真缺陷」口径的再次应用。
-7. **mock 细化**：`latency_ms` 常量 1.2（mock 无真实计时）；「最终引用」tag 计数断言 scope 到 tbody（表头列名同文，getByText 会把表头算进去——首跑红教训）。
+7. **mock 细化**：`latency_ms` 常量 1.2（mock 无真实计时）；「最终引用」tag 计数断言 scope 到 tbody（表头列名同文，getByText 会把表头算进去——首跑红教训）；**mock 422 分支精简**（审查 m1）：纯空 query 是 pydantic 层（数组 shape，mock 不复刻）、全空白 strip 后空才是路由层 `{code,message}`——mock 只保留后者，top_k 校验分支删除（同属 pydantic 层且 UI 不可达）。
+8. **审查 M1（时序竞态，已修）**：检索在途时改分块筛选 → chunksGeneration bump → 迟响应正确丢弃，但 `retrievalTestLoading` 若也绑代际会**永久卡死「运行」按钮**（Element Plus loading 吞 click，审查员实读 node_modules 源码确认）——loading 存活期改绑独立「运行序号」（`retrievalRunSeq`），结果作废仍跟 chunksGeneration；补 mock E2E 回归（retrievalDelayMs=400 在途 → 改筛选 → 断言按钮恢复可点 + 迟响应未渲染）。连带发现并修复：耗时提示文案加长后 `.retrieval-inputs` flex 溢出挤压 el-input-number 失去可操作性（fill 30s 超时，两次复现）——`flex-wrap: wrap` 结构性修复 + 文案缩短为「重排较慢（分钟级）」。
+9. **审查 M2 处置**：卡 2A 的「块列类型 tag」**已补**（chunkTypeLabel 复用）；卡 3A 措辞修正为「openChunks 重置六个 ref；closeChunks 仅 bump 代际 + 置 null（行为等价：关视图不渲染、重开必经 openChunks）」；§4 计划的 `retrievalRowsPlan` 纯函数**未实现（有意）**——行装配在模板内联（KB-06B 偏离 1 同款死代码纪律：签名函数写完测试后删除，装配逻辑无分支可测），登记于此。
+10. **e2e rerank 调用 top_k 5→4**：与 `KB_RETRIEVAL_TEST_RERANK_POOL=4` 对齐（pool=max(4,4)=4），env 真实生效（审查 m2）。
 
 ## 9. 实现结果（2026-11-12）
 
-**交付清单**（16 文件 +1022/-32）：`packages/api-client`（kb.ts +5 类型/1 方法、index.ts 导出、kb.test.ts +5）、`apps/admin`（kb-logic +5 纯函数、kb-logic.test +5、KbDocumentDrawer 检索测试区）、`e2e`（kb-mock 检索路由 + admin-kb.spec +6）、`e2e-fullstack`（链③两组断言）、编排（compose tei-rerank + env、e2e-stack.sh 参数化等待）、backend 顺带修（rerank.py 分批、retrieval_test.py 留痕、config 2 字段、test_kb_rerank_unit +2）、本简报。
+**交付清单**（16 文件 +1060/-40，含审查修复增量）：`packages/api-client`（kb.ts +5 类型/1 方法、index.ts 导出、kb.test.ts +5）、`apps/admin`（kb-logic +5 纯函数、kb-logic.test +5、KbDocumentDrawer 检索测试区）、`e2e`（kb-mock 检索路由 + admin-kb.spec +7）、`e2e-fullstack`（链③两组断言）、编排（compose tei-rerank + 2 env、e2e-stack.sh 参数化等待）、backend 顺带修（rerank.py 分批、retrieval_test.py 留痕、config 2 字段、test_kb_rerank_unit +2）、本简报。
 
-**本地门禁读数**（2026-11-12，win32 / Node 24 / CPython 3.13）：前端 `typecheck`/`lint`/`format:check`/`build` 全绿（build 后跑 E2E，TD-254）；单测 **272**（api-client 102 + admin 170）；mock E2E **159 passed**（基线 153 + 6）；全栈 E2E **25 passed（4.0m，重置种子全量一次过**，链③含真实 rerank 断言）；backend 受影响回归：rerank/检索单元 **20 passed** + 集成 16 + 业务 2（**18 passed / 188s**）、ruff/mypy（264 文件）全绿、bandit×2 由 CI 复跑。
+**本地门禁读数**（2026-11-12，win32 / Node 24 / CPython 3.13）：前端 `typecheck`/`lint`/`format:check`/`build` 全绿（build 后跑 E2E，TD-254）；单测 **272**（api-client 102 + admin 170）；mock E2E **160 passed**（基线 153 + 7）；全栈 E2E **25 passed（4.0m，重置种子全量一次过**，链③含真实 rerank 断言 applied）；backend 受影响回归：rerank/检索单元 **20 passed** + 集成 16 + 业务 2（**18 passed / 188s**）、ruff/mypy（264 文件）全绿、bandit×2 由 CI 复跑。
+
+**独立审查**（第 1 轮，独立只读子智能体审 commit `43d55d3` diff）：**0 Blocker / 2 Major / 4 Minor**，11 项重点清单逐项实读核验（含按 bigram 手推三条用例全部期望值、Element Plus 2.14.7 源码实读确认 loading 吞 click）。处置：M1 loading 卡死 → **已修**（运行序号）+ flex 溢出连带修复 + 回归用例；M2 未登记偏离 → 类型 tag **已补** + retrievalRowsPlan 内联化**登记**（偏离 9）；m1 mock 422 精简 **已修**（偏离 7）；m2 e2e top_k 对齐 **已修**（偏离 10）；m3/m4 简报精度 **已修**（本段 + 卡 3A）。复审：待第 2 轮确认。
 
 （PR 与合并事实待合并时补录。）

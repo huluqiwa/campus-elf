@@ -112,6 +112,8 @@ export interface KbMockOptions {
   activePublishByDocument?: Record<string, string>;
   /** KB-06B：分块夹具（versionId → 该版本全量块）；缺省 = 无分块（打开子视图为空集）。 */
   chunksByVersion?: Record<string, KbChunkFixture[]>;
+  /** KB-07B：检索测试响应延迟（毫秒），用于验证「在途改筛选 → loading 收敛 + 迟响应丢弃」。 */
+  retrievalDelayMs?: number;
 }
 
 export interface KbMock {
@@ -826,24 +828,24 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     }
 
     // KB-07B 检索测试（retrieval_test.py 编排；school_kb.py KbRetrievalTestRequest 校验）。
-    // 空查询的 422 与后端同码（前端有预检，正常 UI 到不了这里——防御镜像）。
+    // 只镜像路由层可达的 422：纯空 query 被后端 pydantic 先拦（数组 shape，mock 不复刻），
+    // 全空白 strip 后空走路由 KbError（school_kb.py:1251-1253，{code,message} shape）——
+    // 前端预检先拦，正常 UI 到不了这里（防御镜像，审查 m1 口径）。top_k 校验是
+    // pydantic 层（数组 shape），mock 不复刻。
     if (method === "POST" && action === "retrieval-test") {
       const body = (request.postDataJSON() ?? {}) as {
         query?: string;
         top_k?: number;
         with_rerank?: boolean;
       };
-      if ((body.query ?? "").trim() === "") {
+      const delayMs = options.retrievalDelayMs ?? 0;
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (body.query !== undefined && body.query.trim() === "") {
         return json(route, 422, {
           detail: { code: "RETRIEVAL_TEST_QUERY_REQUIRED", message: "检索词不能为空" },
         });
       }
       const topK = body.top_k ?? 10;
-      if (!Number.isInteger(topK) || topK < 1 || topK > 20) {
-        return json(route, 422, {
-          detail: { code: "VALIDATION_ERROR", message: "top_k 需为 1~20 的整数" },
-        });
-      }
       return json(
         route,
         200,
