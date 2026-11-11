@@ -9,10 +9,11 @@
  * REJECTED 的驳回理由不直显（前端没有按 version 查审批单的端点，TD-291），给审批中心指引。
  *
  * KB-05B 发布动作（简报 M3-KB-05B D2-A/D5-A）：发布只对 TEST_PASSED、下线/删除/回滚只对
- * PUBLISHED；门禁纯函数在 kb-logic（服务端仍是唯一门禁）。前端无法感知「当前活跃版本」
- * （后端无 active 端点）——本会话内 publish/rollback 成功响应记忆 activeVersionId 用于
- * 回滚目标排除，刷新/重开复位，选到活跃版本吃后端 409 `KB_ROLLBACK_TARGET_IS_ACTIVE`。
- * 写动作成功后重读详情与版本列表（不手改本地状态，187g-C 口径）。
+ * PUBLISHED；门禁纯函数在 kb-logic（服务端仍是唯一门禁）。活跃版本服真化（KB-08B/TD-305）：
+ * activeVersionId 由详情回包 `active_version_id` 初始化（KB-08A 契约），会话内
+ * publish/rollback/offline/delete 成功响应就地更新（写动作成功后仍重读详情与版本列表，
+ * 不手改本地状态，187g-C 口径）；版本行按 isActiveVersion 挂「当前活跃」tag；刷新/重开
+ * 不再丢失——竞态窗口（真值加载后另一端切换过）选到活跃版本仍吃 409 兜底。
  *
  * KB-06B 分块预览（简报 M3-KB-06B 卡 1A/2A/3A/4A）：版本表行「分块」入口 → 抽屉内子视图
  * （按所选版本定域，spec「切换旧版本看该版本分块」）；q 显式搜索（不做按键即搜）、
@@ -32,7 +33,7 @@ import type {
   KbChunkDetailView,
   KbChunkStatsView,
   KbChunkView,
-  KbDocumentView,
+  KbDocumentDetailView,
   KbRetrievalTestResult,
   KbVersionApprovalView,
   KbVersionView,
@@ -59,6 +60,7 @@ import {
   formatBytes,
   formatChunkStats,
   formatScore,
+  isActiveVersion,
   kbPublishActionMessage,
   normalizeChunkQ,
   offlineGate,
@@ -104,7 +106,7 @@ const testFileError = ref<string | null>(null);
 const uploadingTestSet = ref(false);
 const startingTestRun = ref(false);
 
-const detail = ref<KbDocumentView | null>(null);
+const detail = ref<KbDocumentDetailView | null>(null);
 const loading = ref(false);
 const versions = ref<KbVersionView[]>([]);
 const versionsLoading = ref(false);
@@ -119,7 +121,7 @@ const buildCreatedInSession = ref<Set<string>>(new Set());
 const submitting = ref(false);
 const building = ref(false);
 
-// KB-05B：发布动作状态。activeVersionId 只来自本会话成功响应（后端无 active 查询端点）。
+// KB-05B：发布动作状态。activeVersionId 服真化（KB-08B）：详情回包初始化 + 会话内动作响应就地更新。
 const publishing = ref(false);
 const offlining = ref(false);
 const deleting = ref(false);
@@ -557,6 +559,8 @@ async function loadDetail(id: string, generation: number): Promise<void> {
     const fresh = await kbApi.getDocument(id);
     if (generation !== loadGeneration) return;
     detail.value = fresh;
+    // KB-08B 服真化：活跃指针以服务端真值初始化（动作响应的就地更新在前，重读随后校准）
+    activeVersionId.value = fresh.active_version_id;
   } catch (error) {
     if (generation !== loadGeneration) return;
     if (error instanceof ApiError && error.status === 404) {
@@ -1267,10 +1271,19 @@ function currentScan() {
         <h3>版本列表</h3>
         <el-table :data="versions" size="small" data-testid="kb-version-table">
           <el-table-column prop="version_no" label="版本" width="70" />
-          <el-table-column label="状态" width="130">
+          <el-table-column label="状态" width="160">
             <template #default="{ row }">
               <el-tag :type="documentStatusMeta(row.status).tone" size="small">
                 {{ documentStatusMeta(row.status).label }}
+              </el-tag>
+              <!-- KB-08B 服真化：当前活跃发布标识（判据 isActiveVersion，null 不打标） -->
+              <el-tag
+                v-if="isActiveVersion(row.id as string, activeVersionId)"
+                type="success"
+                size="small"
+                data-testid="kb-active-tag"
+              >
+                当前活跃
               </el-tag>
             </template>
           </el-table-column>

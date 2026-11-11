@@ -849,7 +849,7 @@ test("KB-05B 发布门禁：READY 或缺 publish 码都不给发布按钮（前�
   await expect(drawer.getByTestId("kb-publish-row")).toHaveCount(0);
 });
 
-test("KB-05B 回滚：发布后可回滚到旧 PUBLISHED 版本；重开抽屉后选活跃版本吃 409 兜底", async ({
+test("KB-05B 回滚 + KB-08B 服真化：发布→tag 迁移→回滚→重开抽屉 tag 仍在、下拉仍排除活跃", async ({
   page,
 }) => {
   const doc = blueGreenDocument();
@@ -862,30 +862,100 @@ test("KB-05B 回滚：发布后可回滚到旧 PUBLISHED 版本；重开抽屉�
 
   await page.goto("/kb/documents");
   const drawer = await openDrawer(page, "发布样例");
+  const versionTable = drawer.getByTestId("kb-version-table");
+
+  // KB-08B 服真化初始化：详情回包 active_version_id=v1 → v1 行挂「当前活跃」tag
+  const v1Row = versionTable.locator("tbody tr", { hasText: "发布样例-v1.pdf" });
+  const v2Row = versionTable.locator("tbody tr", { hasText: "发布样例-v2.pdf" });
+  await expect(v1Row.getByTestId("kb-active-tag")).toBeVisible();
+  await expect(v2Row.getByTestId("kb-active-tag")).toHaveCount(0);
+
   await drawer.getByTestId("kb-publish").click();
   await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
   await expect(page.getByText("v2 已发布")).toBeVisible();
 
-  // 发布成功后刷新：回滚下拉排除会话内已知活跃 v2，只列 v1
+  // 发布成功：tag 迁移到 v2（就地更新在 KB-05B 旧口径下也有——真正钉死服真化的是下方
+  // 「重开抽屉 tag 仍在」半段，审查观察项的归属精确化）
+  await expect(v2Row.getByTestId("kb-active-tag")).toBeVisible();
+  await expect(v1Row.getByTestId("kb-active-tag")).toHaveCount(0);
+
+  // 发布成功后刷新：回滚下拉排除活跃 v2，只列 v1（D2-A；KB-08B 起排除基准=服务端真值）
   await drawer.getByTestId("kb-rollback-trigger").click();
   const menu = page.getByTestId("kb-rollback-menu");
   await expect(menu).toBeVisible();
   await expect(menu).toContainText("v1 · 发布样例-v1.pdf");
-  await expect(menu).not.toContainText("v2");
+  await expect(menu).not.toContainText("v2 · 发布样例-v2.pdf");
   await menu.getByTestId("kb-rollback-target").click();
   await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
   await expect(page.getByText("已回滚：v1 成为活跃发布")).toBeVisible();
   expect(mock.captures.versionActions).toHaveLength(2);
 
-  // 重开抽屉：活跃记忆复位，v1/v2 都是 PUBLISHED 全列；选到活跃 v1 → 后端 409 兜底（D2-A）
+  // KB-08B：回滚后 tag 迁回 v1
+  await expect(v1Row.getByTestId("kb-active-tag")).toBeVisible();
+  await expect(v2Row.getByTestId("kb-active-tag")).toHaveCount(0);
+
+  // 重开抽屉：旧口径会话记忆复位 → tag 消失并全列 PUBLISHED 吃 409 兜底；KB-08B 服真化后
+  // 详情回包 active_version_id=v1 → tag 仍在、下拉仍排除活跃 v1。「选到活跃版本 → 409
+  // KB_ROLLBACK_TARGET_IS_ACTIVE」降为竞态窗口可达（mock/全栈不复刻竞态，映射由 kb-logic
+  // 单测承担——简报 §8）
   await page.locator(".el-drawer__close-btn").click();
   const reopened = await openDrawer(page, "发布样例");
+  await expect(
+    reopened
+      .getByTestId("kb-version-table")
+      .locator("tbody tr", { hasText: "发布样例-v1.pdf" })
+      .getByTestId("kb-active-tag"),
+  ).toBeVisible();
   await reopened.getByTestId("kb-rollback-trigger").click();
   const reopenedMenu = page.getByTestId("kb-rollback-menu");
   await expect(reopenedMenu).toContainText("v2 · 发布样例-v2.pdf");
-  await reopenedMenu.getByTestId("kb-rollback-target").first().click();
-  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
-  await expect(page.getByText("目标版本已是当前活跃发布")).toBeVisible();
+  await expect(reopenedMenu).not.toContainText("v1 ·");
+});
+
+test("KB-08B 活跃标识初始化与重开持久：详情回包真值打标，重开抽屉不再丢失", async ({ page }) => {
+  const doc = publishedDocument();
+  await mockAuth(page, { authenticated: true, user: { permissions: PUBLISH_PERMS } });
+  await mockKbApi(page, {
+    documents: [doc],
+    activePublishByDocument: { [doc.id]: "61000000-0000-0000-0000-0000000000e1" },
+  });
+
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "已发布样例");
+  await expect(
+    drawer
+      .getByTestId("kb-version-table")
+      .locator("tbody tr", { hasText: "已发布样例.pdf" })
+      .getByTestId("kb-active-tag"),
+  ).toBeVisible();
+
+  // 重开抽屉：旧口径会话内记忆复位 → tag 消失；服真化后 tag 仍在（TD-305 前端半核心验收）
+  await page.locator(".el-drawer__close-btn").click();
+  const reopened = await openDrawer(page, "已发布样例");
+  await expect(
+    reopened
+      .getByTestId("kb-version-table")
+      .locator("tbody tr", { hasText: "已发布样例.pdf" })
+      .getByTestId("kb-active-tag"),
+  ).toBeVisible();
+  // 唯一 PUBLISHED 即活跃自身 → 回滚下拉无可回滚目标（排除基准=服务端真值）
+  await reopened.getByTestId("kb-rollback-trigger").click();
+  await expect(page.getByTestId("kb-rollback-menu")).toContainText("无可回滚目标");
+});
+
+test("KB-08B 契约边界：列表回包不带 active_version_id（详情专属字段）", async ({ page }) => {
+  const doc = publishedDocument();
+  await mockAuth(page, { authenticated: true, user: { permissions: PUBLISH_PERMS } });
+  await mockKbApi(page, {
+    documents: [doc],
+    activePublishByDocument: { [doc.id]: "61000000-0000-0000-0000-0000000000e1" },
+  });
+
+  const listResponse = page.waitForResponse(/\/school\/kb\/documents\?/);
+  await page.goto("/kb/documents");
+  const body = (await (await listResponse).json()) as { items: Record<string, unknown>[] };
+  expect(body.items.length).toBeGreaterThan(0);
+  expect(body.items.every((item) => !("active_version_id" in item))).toBe(true);
 });
 
 test("KB-05B 回滚门禁：文档无活跃发布（指针已撤）→ 409 KB_NO_ACTIVE_PUBLISH 可执行提示", async ({
@@ -916,6 +986,13 @@ test("KB-05B 下线：PUBLISHED 可下线，活跃发布撤除，终态后动作
 
   await page.goto("/kb/documents");
   const drawer = await openDrawer(page, "已发布样例");
+  // KB-08B：活跃发布在位 → v1 行挂「当前活跃」tag（下线前对照）
+  await expect(
+    drawer
+      .getByTestId("kb-version-table")
+      .locator("tbody tr", { hasText: "已发布样例.pdf" })
+      .getByTestId("kb-active-tag"),
+  ).toBeVisible();
   await drawer.getByTestId("kb-offline").click();
   await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
   await expect(page.getByText("v1 已下线，活跃发布已撤除")).toBeVisible();
@@ -930,6 +1007,13 @@ test("KB-05B 下线：PUBLISHED 可下线，活跃发布撤除，终态后动作
   await expect(drawer.getByTestId("kb-publish-row")).toHaveCount(0);
   // 版本表状态列变为已下线
   await expect(drawer.getByTestId("kb-version-table")).toContainText("已下线");
+  // KB-08B：活跃发布撤除（was_active 就地置 null + 重读详情校准）→ tag 消失
+  await expect(
+    drawer
+      .getByTestId("kb-version-table")
+      .locator("tbody tr", { hasText: "已发布样例.pdf" })
+      .getByTestId("kb-active-tag"),
+  ).toHaveCount(0);
 });
 
 test("KB-05B 删除：PUBLISHED 可软删，确认按钮为「删除」，状态列变已删除", async ({ page }) => {

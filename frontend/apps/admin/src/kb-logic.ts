@@ -301,9 +301,10 @@ export interface KbRollbackTarget {
 
 /**
  * 回滚目标候选：已加载版本里的 PUBLISHED 行（蓝绿共存，D2-A）。
- * `activeVersionId` 来自本会话内 publish/rollback 成功响应的记忆；刷新/首次打开为 null
- * （前端无法感知活跃版本，TD 已登记）——此时全列 PUBLISHED，选到活跃版本吃后端
- * 409 `KB_ROLLBACK_TARGET_IS_ACTIVE`（服务端是唯一门禁）。
+ * `activeVersionId` 服真化（KB-08B/TD-305 前端半）：详情回包 `active_version_id` 初始化 +
+ * 会话内 publish/rollback 成功响应就地更新；null = 无活跃发布（此时全列 PUBLISHED）。
+ * 竞态窗口（详情加载后另一端切换过活跃）选到活跃版本仍吃后端 409
+ * `KB_ROLLBACK_TARGET_IS_ACTIVE`（服务端是唯一门禁）。
  */
 export function rollbackTargets(
   versions: readonly (KbRollbackTarget & { status: string })[],
@@ -312,6 +313,14 @@ export function rollbackTargets(
   return versions
     .filter((version) => version.status === KB_STATUS_PUBLISHED && version.id !== activeVersionId)
     .map(({ id, version_no, filename }) => ({ id, version_no, filename }));
+}
+
+/**
+ * 版本行是否为当前活跃发布（版本表「当前活跃」tag 的判据，KB-08B）。
+ * null = 无活跃发布/真值未加载——任何行都不打标（不误标）。
+ */
+export function isActiveVersion(versionId: string, activeVersionId: string | null): boolean {
+  return activeVersionId !== null && versionId === activeVersionId;
 }
 
 /** 从 ApiError detail 里取机器可读码（`approval-logic.approvalErrorCode` 同型）。 */

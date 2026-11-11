@@ -33,6 +33,16 @@ export interface KbDocumentView {
   updated_at: string;
 }
 
+/**
+ * 文档详情（后端 `KbDocumentDetailResponse`，`school_kb.py:133-140`；KB-08A/TD-305）：
+ * 基模型 + 活跃发布指针。`active_version_id` 与 `active_publish` 同源（kb_publish_aliases
+ * 库行），无活跃发布（未发布/已下线/已软删）为 null（fail-closed，不得回退任选版本）；
+ * 列表/上传回包（`KbDocumentView`）不带该字段——详情专属（KB-08A 契约边界）。
+ */
+export interface KbDocumentDetailView extends KbDocumentView {
+  active_version_id: string | null;
+}
+
 export interface KbUploadResult {
   batch_id: string;
   replayed: boolean;
@@ -198,7 +208,8 @@ export interface KbApi {
   /** multipart 上传；不得手动设置 Content-Type（浏览器需自动带 boundary）。 */
   upload(input: KbUploadInput): Promise<KbUploadResult>;
   listDocuments(query?: { limit?: number; cursor?: string }): Promise<Page<KbDocumentView>>;
-  getDocument(documentId: string): Promise<KbDocumentView>;
+  /** 文档详情（含活跃发布指针 TD-305；跨租/范围外 404 同文不泄露）。 */
+  getDocument(documentId: string): Promise<KbDocumentDetailView>;
   listVersions(
     documentId: string,
     query?: { limit?: number; cursor?: string },
@@ -245,7 +256,7 @@ export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
       );
     },
     async getDocument(documentId) {
-      return request<KbDocumentView>(`/api/v1/school/kb/documents/${documentId}`);
+      return request<KbDocumentDetailView>(`/api/v1/school/kb/documents/${documentId}`);
     },
     async listVersions(documentId, query = {}) {
       return request<Page<KbVersionView>>(
