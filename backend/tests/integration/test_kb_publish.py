@@ -8,7 +8,8 @@
 - 回滚守卫：目标非 PUBLISHED 409、目标是活跃版本 409、无活跃发布 409；
 - 下线：OFFLINE 终态 + 活跃指针撤除（fail-closed）+ collection 保留；
 - 删除：DELETED 软删 + 指针撤除 + collection 保留（M6 清理）；
-- 权限/跨租：无码 403；跨租发布 404（不泄露存在性）。
+- 权限/跨租：无码 403；跨租发布 404（不泄露存在性）；
+- 文档详情 `active_version_id`（KB-08A/TD-305）：发布/回滚/下线三态跟随 + 列表契约边界 + 跨租 404。
 
 说明：TEST_PASSED 状态由共享脚手架直接落库（模拟 KB-04A 沙箱通过的可达终态——
 沙箱自身的判分链路由 KB-04A 用例覆盖，本文件聚焦发布机制）。
@@ -573,3 +574,108 @@ async def test_publish_permission_and_cross_tenant(
     headers = await _publisher_headers(client)
     ok = await _publish(client, headers, version_id)
     assert ok.status_code == 200, ok.text
+
+
+# ---------------------------------------------------------------------------
+# 文档详情 active_version_id（KB-08A/TD-305：版本切换 MVP 的服真化面）
+# ---------------------------------------------------------------------------
+
+
+async def _detail(client: AsyncClient, headers: dict[str, str], document_id: UUID) -> Response:
+    return await client.get(f"/api/v1/school/kb/documents/{document_id}", headers=headers)
+
+
+async def test_detail_active_version_id_null_before_publish(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """未发布文档：详情回包 active_version_id 为 null（fail-closed，不误标）。"""
+
+    doc_id, _version_id = await _seed_test_passed_version(env, monkeypatch)
+    headers = await _publisher_headers(client)
+
+    body = (await _detail(client, headers, doc_id)).json()
+    assert body["active_version_id"] is None
+
+
+async def test_detail_active_version_id_follows_publish(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """发布后详情：active_version_id 与指针行同源（库行是事实来源）。"""
+
+    doc_id, version_id = await _seed_test_passed_version(env, monkeypatch)
+    headers = await _publisher_headers(client)
+    ok = await _publish(client, headers, version_id)
+    assert ok.status_code == 200, ok.text
+
+    body = (await _detail(client, headers, doc_id)).json()
+    assert body["active_version_id"] == str(version_id)
+
+
+async def test_detail_active_version_id_follows_rollback_to_old_version(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """回滚到旧版本后详情：active_version_id = 旧版本（spec §KB-08 :302 前半）。"""
+
+    doc_id, v1, _v2 = await _seed_two_published_versions(env, monkeypatch, client)
+    headers = await _publisher_headers(client)
+
+    rollback = await client.post(f"/api/v1/school/kb/versions/{v1}/rollback", headers=headers)
+    assert rollback.status_code == 200, rollback.text
+
+    body = (await _detail(client, headers, doc_id)).json()
+    assert body["active_version_id"] == str(v1)
+
+
+async def test_detail_active_version_id_null_after_offline(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """下线活跃版本（撤指针）后详情：active_version_id 回到 null（fail-closed）。"""
+
+    doc_id, version_id = await _seed_test_passed_version(env, monkeypatch)
+    headers = await _publisher_headers(client)
+    assert (await _publish(client, headers, version_id)).status_code == 200
+
+    offline = await client.post(
+        f"/api/v1/school/kb/versions/{version_id}/offline", headers=headers
+    )
+    assert offline.status_code == 200, offline.text
+
+    body = (await _detail(client, headers, doc_id)).json()
+    assert body["active_version_id"] is None
+
+
+async def test_document_list_items_lack_active_version_id(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """契约边界：列表回包不携带 active_version_id（详情专属字段）。"""
+
+    from app.api.school_kb import KbDocumentDetailResponse, KbDocumentResponse
+
+    doc_id, _version_id = await _seed_test_passed_version(env, monkeypatch)
+    headers = await _publisher_headers(client)
+
+    response = await client.get("/api/v1/school/kb/documents", headers=headers)
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert any(item["id"] == str(doc_id) for item in items), "种子文档应在 school 范围列表内"
+    assert all("active_version_id" not in item for item in items)
+    # 根锚点：字段只允许存在于 Detail 子类——基模型一旦带上该字段，
+    # 列表/上传/PUT 元数据三处基模型回包契约全部破（审查 M-2）
+    assert "active_version_id" not in KbDocumentResponse.model_fields
+    assert "active_version_id" in KbDocumentDetailResponse.model_fields
+
+
+async def test_detail_cross_tenant_404(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """跨租详情 404 不泄露存在性（同文、无 active 字段可泄露）。"""
+
+    doc_id, _version_id = await _seed_test_passed_version(env, monkeypatch)
+    headers = await _publisher_headers(client)
+    assert (await _detail(client, headers, doc_id)).status_code == 200
+
+    b_headers = await login(client, KB_B_PUBLISHER, SCHOOL_B)
+    cross = await _detail(client, b_headers, doc_id)
+    assert cross.status_code == 404
+    assert cross.json()["detail"]["code"] == "DOCUMENT_NOT_FOUND"
+    assert cross.json()["detail"]["message"] == "文档不存在"

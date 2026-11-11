@@ -184,6 +184,18 @@ class DocumentView:
 
 
 @dataclass(frozen=True)
+class DocumentDetailView:
+    """文档详情视图（含当前活跃发布指针；TD-305）。
+
+    `active_version_id` 取 `kb_publish_aliases` 库行（与 `active_publish` 同源）；
+    无活跃发布（未发布/已下线/已软删）为 None（fail-closed，不得回退任选版本）。
+    """
+
+    document: DocumentView
+    active_version_id: UUID | None
+
+
+@dataclass(frozen=True)
 class UploadOutcome:
     """一次上传的结果（`replayed=True` 表示幂等重放）。"""
 
@@ -542,10 +554,14 @@ async def list_documents(
     )
 
 
-async def get_document(
+async def get_document_detail(
     *, tenant_id: UUID, scope: DataScopeContext, document_id: UUID
-) -> DocumentView:
-    """按 id 取文档（范围外/跨租视为不存在）。
+) -> DocumentDetailView:
+    """按 id 取文档详情（范围外/跨租视为不存在；含活跃发布指针，TD-305）。
+
+    alias 读与文档读同一事务（一次额外主键点查）；READ COMMITTED 下两者之间存在
+    并发发布竞态窗口（单次响应可能「文档字段旧、活跃指针新」），消费侧由
+    409 `KB_ROLLBACK_TARGET_IS_ACTIVE` 兜底承担——简报卡 3A 口径。
 
     异常:
         KbError: 文档不存在（`DOCUMENT_NOT_FOUND`，404）。
@@ -558,7 +574,13 @@ async def get_document(
         versions = await _versions_by_id(
             session, tenant_id, scope, [document.current_version_id]
         )
-    return _document_view(document, _version_of(versions, document))
+        alias_row = await _active_alias_row(
+            session, tenant_id=tenant_id, document_id=document_id
+        )
+    return DocumentDetailView(
+        document=_document_view(document, _version_of(versions, document)),
+        active_version_id=None if alias_row is None else UUID(str(alias_row.version_id)),
+    )
 
 
 async def list_versions(
@@ -2269,6 +2291,19 @@ async def _publish_alias_row(
     return cast("KbPublishAlias | None", result.scalar_one_or_none())
 
 
+async def _active_alias_row(
+    session: AsyncSession, *, tenant_id: UUID, document_id: UUID
+) -> KbPublishAlias | None:
+    """文档的活跃发布指针行（无锁读；kb_publish_aliases 库行是事实来源）。"""
+
+    result = await session.execute(
+        _publish_alias_repository(session, tenant_id)
+        .base_query()
+        .where(KbPublishAlias.document_id == document_id)
+    )
+    return cast("KbPublishAlias | None", result.scalar_one_or_none())
+
+
 async def active_publish(
     *, tenant_id: UUID, document_id: UUID
 ) -> tuple[UUID, str] | None:
@@ -2279,12 +2314,9 @@ async def active_publish(
     """
 
     async with db_session(tenant_id=tenant_id) as session:
-        row = await session.execute(
-            _publish_alias_repository(session, tenant_id)
-            .base_query()
-            .where(KbPublishAlias.document_id == document_id)
+        record = await _active_alias_row(
+            session, tenant_id=tenant_id, document_id=document_id
         )
-        record = row.scalar_one_or_none()
         if record is None:
             return None
         return UUID(str(record.version_id)), str(record.collection)
