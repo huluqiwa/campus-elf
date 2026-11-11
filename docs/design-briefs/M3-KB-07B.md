@@ -46,8 +46,8 @@
 列：`#`（final_rank）、最终引用（`is_final_reference` success tag）、块（`#chunk_index` + 类型 tag）、章节、dense（`0.9786 · #1`，未召回「—」）、sparse（同形）、RRF（4 位小数）、rerank（`rerank_status=applied` 时有值否则「—」）、查看分块（`openChunkDetailById(chunk_id)` 复用既有详情导航——「最终引用定位到分块」闭环）。`formatScore`（4 位小数/None→「—」）与 `routeScoreText`（分数+名次拼装）进 kb-logic 纯函数。
 - B：只显示分数不带名次。缺点：「为什么召回」可解释性弱。不选。
 
-### 卡 3 · 状态管理与竞态 → **A（推荐）：并入 chunksGeneration 代际**
-新 refs `retrievalTestLoading/retrievalTestError/retrievalTestResult`；`runRetrievalTest()` 记录当前代际，响应回来先比对（`chunksView` 已关/版本已切 → 丢弃）；`closeChunks` 与版本切换清空三者。错误：404/409/422/502 一律 `reportError`（服务端 message）**驻留**——检索测试 404 = 版本不可见但文档仍在，与分块列表 404 驻留口径一致（KB-06B 偏离 6 的不对称逻辑同源）；422 的 query 校验错误前端先拦（`retrievalQueryError`：strip 后空 + `codePointLength`>300，m-1 教训用码点度量）。
+### 卡 3 · 状态管理与竞态 → **A（推荐）：结果作废并入 chunksGeneration 代际；loading 绑独立运行序号**
+新 refs `retrievalTestLoading/retrievalTestError/retrievalTestResult`；`runRetrievalTest()` 双轨守卫——**结果作废**跟 `chunksGeneration`（切版本/关子视图/筛选变更都作废在途响应），**loading 存活期**跟独立运行序号（筛选变更 bump 代际但不重置 loading，绑代际会让「运行」按钮永久转圈——审查 M1，§8.8）；`openChunks` 重置全部输入/结果/错误（closeChunks 仅 bump 代际 + 置 null，行为等价：关视图不渲染、重开必经 openChunks）。错误：404/409/422/502 一律 `reportError`（服务端 message）**驻留**——检索测试 404 = 版本不可见但文档仍在，与分块列表 404 驻留口径一致（KB-06B 偏离 6 的不对称逻辑同源）；422 的 query 校验错误前端先拦（`retrievalQueryError`：strip 后空 + `codePointLength`>300，m-1 教训用码点度量）。
 - B：独立 generation。缺点：与 chunks 竞态主链割裂，两套代际互踩。不选。
 
 ### 卡 4 · mock 伪分数策略 → **A（推荐）：确定性词命中**
