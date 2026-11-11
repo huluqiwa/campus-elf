@@ -1265,3 +1265,128 @@ test("KB-06B 空集：筛选无命中显示空态；切文档/重开抽屉子视
   await expect(page.getByTestId("kb-document-drawer")).toBeVisible();
   await expect(page.getByTestId("kb-chunks-view")).toHaveCount(0);
 });
+
+// ---- M3 KB-07B：检索测试（接口 mock；判据手抄 retrieval_test.py，锚点见 kb-mock.ts）----
+
+function retrievalRows(drawer: ReturnType<Page["getByTestId"]>): ReturnType<Page["locator"]> {
+  return drawer.getByTestId("kb-retrieval-table").locator("tbody tr");
+}
+
+/** 打开抽屉 + 分块子视图，等待检索测试区就绪（空态提示可见）。 */
+async function openRetrievalReady(page: Page): Promise<{
+  drawer: ReturnType<Page["getByTestId"]>;
+  mock: Awaited<ReturnType<typeof mockKbApi>>;
+}> {
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  const mock = await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+  await expect(drawer.getByTestId("kb-retrieval-empty")).toBeVisible();
+  return { drawer, mock };
+}
+
+test("KB-07B 检索测试：默认快查渲染结果表（双路分数+名次、RRF、最终引用、状态行）", async ({
+  page,
+}) => {
+  const { drawer } = await openRetrievalReady(page);
+  await drawer.getByTestId("kb-retrieval-q").fill("安装步骤1");
+  await drawer.getByTestId("kb-retrieval-run").click();
+
+  await expect(drawer.getByTestId("kb-retrieval-table")).toBeVisible();
+  await expect(drawer.getByTestId("kb-retrieval-meta")).toContainText("未启用重排 · 4 行 · 1.2ms");
+  await expect(retrievalRows(drawer)).toHaveCount(4);
+  // 命中序：query bigram 与夹具包含计数确定——「安装步骤1完成。」全命中第 1
+  const firstRow = retrievalRows(drawer).first();
+  await expect(firstRow).toContainText("安装步骤1完成。");
+  await expect(firstRow).toContainText("#1");
+  await expect(firstRow).toContainText("1.0000 · #1");
+  // 最终引用：top_k=10 ≥ 行数 → 每行都有标记（4 个 tag；表头列名不算，scope 到 tbody）
+  await expect(
+    drawer.getByTestId("kb-retrieval-table").locator("tbody").getByText("最终引用"),
+  ).toHaveCount(4);
+  // 未启用重排：rerank 列全「—」
+  await expect(drawer.getByTestId("kb-retrieval-table")).toContainText("—");
+});
+
+test("KB-07B 查看分块：结果行打开详情子面板（最终引用定位到分块闭环）", async ({ page }) => {
+  const { drawer } = await openRetrievalReady(page);
+  await drawer.getByTestId("kb-retrieval-q").fill("安装步骤1");
+  await drawer.getByTestId("kb-retrieval-run").click();
+  await expect(retrievalRows(drawer).first()).toContainText("安装步骤1完成。");
+
+  await retrievalRows(drawer).first().getByTestId("kb-retrieval-open-chunk").click();
+  await expect(drawer.getByTestId("kb-chunk-detail")).toBeVisible();
+  await expect(drawer.getByTestId("kb-chunk-detail")).toContainText("#1");
+  await expect(drawer.getByTestId("kb-chunk-detail")).toContainText("安装步骤1完成。");
+});
+
+test("KB-07B rerank 开关：状态行「已重排」+ 分数列有值 + 顺序翻转（路由名次保持融合序）", async ({
+  page,
+}) => {
+  const { drawer } = await openRetrievalReady(page);
+  await drawer.getByTestId("kb-retrieval-q").fill("安装步骤");
+  // 后端语义：rerank 池 = max(config 20, top_k) 与索引内块数取小 → 4 行（不是 top_k 裁剪）；
+  // fake 重排按融合位置给升序分数 → 顺序整体翻转，路由名次保持融合序
+  await drawer.getByTestId("kb-retrieval-rerank").click();
+  await drawer.getByTestId("kb-retrieval-run").click();
+
+  await expect(drawer.getByTestId("kb-retrieval-meta")).toContainText("已重排 · 4 行 · 1.2ms");
+  await expect(retrievalRows(drawer)).toHaveCount(4);
+  // 翻转：融合末位（0 命中、index 3 的表格块）重排到 final_rank 1，其路由名次仍是 #4
+  const firstRow = retrievalRows(drawer).first();
+  await expect(firstRow).toContainText("| 超时 | 30 |");
+  await expect(firstRow).toContainText("0.4000 · #4");
+  await expect(firstRow).toContainText("1.0000");
+  const secondRow = retrievalRows(drawer).nth(1);
+  await expect(secondRow).toContainText("第一章 全文拼接 含配置项");
+  await expect(secondRow).toContainText("0.6000 · #3");
+  await expect(secondRow).toContainText("0.7500");
+  // 最终引用 = final_rank ≤ top_k(10) → 4 行全标（scope tbody，表头列名不算）
+  await expect(
+    drawer.getByTestId("kb-retrieval-table").locator("tbody").getByText("最终引用"),
+  ).toHaveCount(4);
+});
+
+test("KB-07B top_k 输入：裁剪结果行数（pool_size 语义）", async ({ page }) => {
+  const { drawer } = await openRetrievalReady(page);
+  await drawer.getByTestId("kb-retrieval-q").fill("安装步骤");
+  const topkInput = drawer.getByTestId("kb-retrieval-topk").locator("input");
+  await topkInput.fill("2");
+  await drawer.getByTestId("kb-retrieval-run").click();
+
+  await expect(drawer.getByTestId("kb-retrieval-meta")).toContainText("未启用重排 · 2 行 · 1.2ms");
+  await expect(retrievalRows(drawer)).toHaveCount(2);
+  // 最终引用 = final_rank ≤ top_k → 2 行全标（scope tbody，表头列名不算）
+  await expect(
+    drawer.getByTestId("kb-retrieval-table").locator("tbody").getByText("最终引用"),
+  ).toHaveCount(2);
+});
+
+test("KB-07B 空 query 前端拦：内联错误且不发请求", async ({ page }) => {
+  const { drawer, mock } = await openRetrievalReady(page);
+  await drawer.getByTestId("kb-retrieval-run").click();
+
+  await expect(drawer.getByTestId("kb-retrieval-error")).toContainText("请输入检索词");
+  await expect(drawer.getByTestId("kb-retrieval-table")).toHaveCount(0);
+  const retrievalPosts = mock.captures.versionActions.filter(
+    (action) => action.method === "POST" && action.path.includes("/retrieval-test"),
+  );
+  expect(retrievalPosts).toHaveLength(0);
+});
+
+test("KB-07B 超长 query 前端拦（码点度量，m-1 教训）：内联错误且不发请求", async ({ page }) => {
+  const { drawer, mock } = await openRetrievalReady(page);
+  // 301 个非 BMP 字符 = 301 码点（602 UTF-16 单元）——后端码点口径下超限
+  await drawer.getByTestId("kb-retrieval-q").fill("👍".repeat(301));
+  await drawer.getByTestId("kb-retrieval-run").click();
+
+  await expect(drawer.getByTestId("kb-retrieval-error")).toContainText("检索词不能超过 300 个字符");
+  const retrievalPosts = mock.captures.versionActions.filter(
+    (action) => action.method === "POST" && action.path.includes("/retrieval-test"),
+  );
+  expect(retrievalPosts).toHaveLength(0);
+});

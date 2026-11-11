@@ -134,6 +134,58 @@ export interface KbChunkListQuery {
   parent_id?: string;
 }
 
+// ---------------------------------------------------------------------------
+// KB-07B：检索测试（后端契约 school_kb.py POST /versions/{id}/retrieval-test；
+// 编排 retrieval_test.py——三查询旁路 + 可选 CPU rerank，rerank 失败降级不 5xx）
+// ---------------------------------------------------------------------------
+
+/** rerank 状态（applied=已重排；skipped=超时跳过；failed=其他失败；disabled=未启用）。 */
+export type KbRerankStatus = "applied" | "skipped" | "failed" | "disabled";
+
+/** 单路（dense/sparse）命中：分数 + 该路 1-based 排名（null = 该路 pool×2 内未召回）。 */
+export interface KbRetrievalTestRouteHit {
+  score: number;
+  rank: number;
+}
+
+/** 检索测试结果行（「为什么召回」逐路可解释 + 最终引用标记）。 */
+export interface KbRetrievalTestResultRow {
+  chunk_id: string;
+  chunk_index: number;
+  chunk_type: string;
+  section_path: string | null;
+  page_start: number | null;
+  page_end: number | null;
+  /** 全文前 200 码点（完整内容经 getChunk 取）。 */
+  text_preview: string;
+  rrf_score: number;
+  dense: KbRetrievalTestRouteHit | null;
+  sparse: KbRetrievalTestRouteHit | null;
+  rerank_score: number | null;
+  final_rank: number;
+  is_final_reference: boolean;
+}
+
+/** 检索测试响应（pool_size = len(results)；results 按 final_rank 升序）。 */
+export interface KbRetrievalTestResult {
+  version_id: string;
+  query: string;
+  top_k: number;
+  with_rerank: boolean;
+  rerank_status: KbRerankStatus;
+  latency_ms: number;
+  pool_size: number;
+  results: KbRetrievalTestResultRow[];
+}
+
+/** 检索测试输入（query raw 码点 ≤300 strip 后非空；top_k 1-20；with_rerank 默认 false；
+ * ACL 三参数为 KB-09 契约预留——后端设值即 422 `RETRIEVAL_TEST_ACL_UNAVAILABLE`，前端不提供入口）。 */
+export interface KbRetrievalTestInput {
+  query: string;
+  top_k?: number;
+  with_rerank?: boolean;
+}
+
 export interface KbUploadInput {
   files: File[];
   /** 8–128 位 `[A-Za-z0-9._:-]`；调用方按提交签名决定复用或换新。 */
@@ -165,6 +217,9 @@ export interface KbApi {
   getChunk(chunkId: string): Promise<KbChunkDetailView>;
   /** 版本分块统计（per-version 固定口径；404 `VERSION_NOT_FOUND`）。 */
   getChunkStats(versionId: string): Promise<KbChunkStatsView>;
+  /** 单 query 检索测试（dense/sparse/RRF/rerank 分数与最终引用；跨租/范围外 404 `VERSION_NOT_FOUND`，
+   * rerank 失败不报错走 `rerank_status` 降级）。 */
+  retrievalTest(versionId: string, input: KbRetrievalTestInput): Promise<KbRetrievalTestResult>;
 }
 
 export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
@@ -237,6 +292,20 @@ export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
     },
     async getChunkStats(versionId) {
       return request<KbChunkStatsView>(`/api/v1/school/kb/versions/${versionId}/chunks/stats`);
+    },
+    async retrievalTest(versionId, input) {
+      return request<KbRetrievalTestResult>(
+        `/api/v1/school/kb/versions/${versionId}/retrieval-test`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: input.query,
+            ...(input.top_k === undefined ? {} : { top_k: input.top_k }),
+            ...(input.with_rerank === undefined ? {} : { with_rerank: input.with_rerank }),
+          }),
+        },
+      );
     },
   };
 }

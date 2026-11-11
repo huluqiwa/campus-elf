@@ -18,6 +18,7 @@
 - 只读、不落库、无新迁移、日志零 query 明文。
 """
 
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -50,6 +51,8 @@ from app.kb.status import (
     KB_STATUS_TESTING,
 )
 from app.rbac.scopes import DataScopeContext
+
+logger = logging.getLogger(__name__)
 
 # collection 在 INDEXING 创建并保留（发布/回滚/下线/软删均不删，M6 才清理）；
 # FAILED/QUEUED/BUILDING 与审批前状态没有完整索引，检索测试按 409 拒绝。
@@ -212,6 +215,7 @@ def _build_reranker_for_test(settings: Any) -> RerankPort:
     return TEIReranker(
         base_url=settings.tei_rerank_url,
         timeout_seconds=settings.tei_rerank_timeout_seconds,
+        batch_size=settings.tei_rerank_batch_size,
     )
 
 
@@ -328,16 +332,21 @@ async def run_retrieval_test(
 
     rerank_status: RerankStatus = "disabled"
     if with_rerank:
+        # 降级留痕（KB-07B 全栈排障教训：静默降级让 TEI 批量上限问题不可诊断）；
+        # 只记异常类型名，不记 query/文本（零 PII 红线）
         reranker = _build_reranker_for_test(resolved)
         try:
             scores = await reranker.rerank(query=query, texts=[row.text for row in rows])
         except RerankTimeoutError:
+            logger.warning("rerank 降级（skipped）：RerankTimeoutError")
             rerank_status = "skipped"
-        except RerankError:
+        except RerankError as exc:
+            logger.warning("rerank 降级（failed）：%s", type(exc).__name__)
             rerank_status = "failed"
-        except Exception:
+        except Exception as exc:
             # 审查 Major 1：端口实现抛出非 RerankError 异常（如畸形 URL 的
             # httpx.InvalidURL）也必须降级——rerank 失败永不 5xx（卡 2 硬规则）
+            logger.warning("rerank 降级（failed/未归类）：%s", type(exc).__name__)
             rerank_status = "failed"
         else:
             # 复审 Major 1：try/else 的 else 子句不被本语句 except 接住——

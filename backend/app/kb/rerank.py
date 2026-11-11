@@ -40,47 +40,69 @@ class RerankPort(Protocol):
 
 
 class TEIReranker:
-    """TEI `/rerank` 适配器（批量；响应 `[{"index","score"}]` 按 index 归位）。"""
+    """TEI `/rerank` 适配器（响应 `[{"index","score"}]` 按 index 归位）。
+
+    客户端分批：TEI `--max-client-batch-size`（dev/e2e compose 为 8）限制单请求
+    文本条数，超限被拒绝（KB-07B 全栈首跑实测）——按 `batch_size` 逐批请求后
+    按全局下标拼回分数表（与 `TEIEmbedder` 的批次模式同款）。
+    """
 
     def __init__(
         self,
         *,
         base_url: str,
         timeout_seconds: float,
+        batch_size: int,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._batch_size = batch_size
         self._client = client
 
     async def rerank(self, *, query: str, texts: Sequence[str]) -> list[float]:
         if not texts:
             return []
+        scores: list[float | None] = [None] * len(texts)
         client = self._client or httpx.AsyncClient(timeout=self._timeout_seconds)
         try:
-            try:
-                response = await client.post(
-                    f"{self._base_url}/rerank",
-                    json={"query": query, "texts": list(texts), "raw_scores": False},
-                )
-            except httpx.TimeoutException as exc:
-                raise RerankTimeoutError("RERANK_TIMEOUT", "TEI rerank 请求超时") from exc
-            except httpx.HTTPError as exc:
-                raise RerankError(
-                    "RERANK_HTTP_ERROR", f"TEI rerank 网络错误：{type(exc).__name__}"
-                ) from exc
-            if response.status_code != 200:
-                raise RerankError(
-                    "RERANK_HTTP_ERROR", f"TEI rerank 返回 HTTP {response.status_code}"
-                )
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise RerankError("RERANK_HTTP_ERROR", "TEI rerank 返回非 JSON 响应") from exc
-            return _map_scores(payload, len(texts))
+            for start in range(0, len(texts), self._batch_size):
+                batch = list(texts[start : start + self._batch_size])
+                batch_scores = await self._rerank_batch(client, query, batch)
+                scores[start : start + self._batch_size] = batch_scores
         finally:
             if self._client is None:
                 await client.aclose()
+        mapped: list[float] = []
+        for value in scores:
+            if value is None:  # 分批覆盖全部下标；缺项属响应契约破坏，不静默补 0
+                raise RerankError("RERANK_RESPONSE_MALFORMED", "TEI rerank 响应缺少部分文本的分数")
+            mapped.append(value)
+        return mapped
+
+    async def _rerank_batch(
+        self, client: httpx.AsyncClient, query: str, batch: list[str]
+    ) -> list[float]:
+        try:
+            response = await client.post(
+                f"{self._base_url}/rerank",
+                json={"query": query, "texts": batch, "raw_scores": False},
+            )
+        except httpx.TimeoutException as exc:
+            raise RerankTimeoutError("RERANK_TIMEOUT", "TEI rerank 请求超时") from exc
+        except httpx.HTTPError as exc:
+            raise RerankError(
+                "RERANK_HTTP_ERROR", f"TEI rerank 网络错误：{type(exc).__name__}"
+            ) from exc
+        if response.status_code != 200:
+            raise RerankError(
+                "RERANK_HTTP_ERROR", f"TEI rerank 返回 HTTP {response.status_code}"
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RerankError("RERANK_HTTP_ERROR", "TEI rerank 返回非 JSON 响应") from exc
+        return _map_scores(payload, len(batch))
 
 
 def _map_scores(payload: object, count: int) -> list[float]:

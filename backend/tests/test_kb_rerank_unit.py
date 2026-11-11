@@ -18,7 +18,12 @@ def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncCl
 
 
 def _reranker(handler: Callable[[httpx.Request], httpx.Response]) -> TEIReranker:
-    return TEIReranker(base_url="http://tei", timeout_seconds=5, client=_client(handler))
+    return TEIReranker(
+        base_url="http://tei",
+        timeout_seconds=5,
+        batch_size=10,  # 单批装下：除分批专项用例外都不触发分批
+        client=_client(handler),
+    )
 
 
 async def test_rerank_posts_query_and_texts_and_maps_scores_by_index() -> None:
@@ -157,6 +162,50 @@ async def test_rerank_owns_short_lived_client_when_not_injected() -> None:
     reranker = TEIReranker(
         base_url="http://tei",
         timeout_seconds=5,
+        batch_size=10,
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://tei"),
     )
     assert await reranker.rerank(query="q", texts=["a"]) == [0.25]
+
+
+async def test_rerank_batches_requests_and_reassembles_scores() -> None:
+    """客户端分批（TEI --max-client-batch-size 上限，KB-07B 全栈实测）：逐批请求、按全局下标拼回。"""
+    captured_batches: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read().decode("utf-8"))
+        texts = body["texts"]
+        captured_batches.append(texts)
+        # 每批独立返回本批下标的分数（TEI 的 index 是批内下标）
+        return httpx.Response(
+            200,
+            json=[
+                {"index": i, "score": 0.5 + len(captured_batches) + i * 0.1}
+                for i in range(len(texts))
+            ],
+        )
+
+    reranker = TEIReranker(
+        base_url="http://tei", timeout_seconds=5, batch_size=2, client=_client(handler)
+    )
+    scores = await reranker.rerank(query="q", texts=["a", "b", "c", "d", "e"])
+
+    assert captured_batches == [["a", "b"], ["c", "d"], ["e"]]
+    assert scores == [1.5, 1.6, 2.5, 2.6, 3.5]
+
+
+async def test_rerank_batch_failure_raises_rerank_error() -> None:
+    """任一批失败即整体失败（调用方降级为融合序），不返回半截分数表。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read().decode("utf-8"))
+        if body["texts"] == ["c"]:
+            return httpx.Response(503, text="boom")
+        return httpx.Response(200, json=[{"index": 0, "score": 0.5}])
+
+    reranker = TEIReranker(
+        base_url="http://tei", timeout_seconds=5, batch_size=1, client=_client(handler)
+    )
+    with pytest.raises(RerankError) as exc_info:
+        await reranker.rerank(query="q", texts=["a", "b", "c"])
+    assert exc_info.value.code == "RERANK_HTTP_ERROR"

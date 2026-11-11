@@ -19,6 +19,13 @@
  * 章节下拉来自 stats.sections（精确匹配）、类型下拉；筛选变化即重置回第一页；
  * 详情子面板纯文本渲染 `text_markdown`（**无 v-html**——文档内容不可信，不渲染即无 XSS 面，
  * TD-307 登记 markdown/虚拟滚动升级路径）；父/子导航走详情端点引用，跨版本引用不渲染。
+ *
+ * KB-07B 检索测试（简报 M3-KB-07B 卡 1A/2A/3A）：分块子视图内常驻紧凑区（统计摘要与
+ * 筛选行之间）——query/top_k/with_rerank 输入 → 结果表逐行展示 dense/sparse（分数 · 该路
+ * 名次）、RRF、rerank 分数（applied 才有值）、最终引用标记与「查看分块」复用详情导航；
+ * 状态并入 chunksGeneration 代际（切版本/关子视图作废在途响应）；前端只做预检
+ * （码点 ≤300/1~20），服务端是唯一门禁；错误 reportError 驻留（与列表 404 口径同源）；
+ * rerank 失败后端降级不报错（rerank_status 标注）；纯文本渲染无 v-html。
  */
 import { ApiError, toUserMessage } from "@campus-elf/api-client";
 import type {
@@ -26,6 +33,7 @@ import type {
   KbChunkStatsView,
   KbChunkView,
   KbDocumentView,
+  KbRetrievalTestResult,
   KbVersionApprovalView,
   KbVersionView,
 } from "@campus-elf/api-client";
@@ -50,11 +58,16 @@ import {
   embeddingStatusMeta,
   formatBytes,
   formatChunkStats,
+  formatScore,
   kbPublishActionMessage,
   normalizeChunkQ,
   offlineGate,
   publishGate,
+  rerankStatusLabel,
+  retrievalQueryError,
+  retrievalTopKError,
   rollbackTargets,
+  routeScoreText,
   sectionOptions,
   type KbRollbackTarget,
 } from "../kb-logic";
@@ -130,6 +143,14 @@ const chunkDetail = ref<KbChunkDetailView | null>(null);
 const chunkDetailLoading = ref(false);
 const chunkStats = ref<KbChunkStatsView | null>(null);
 let chunksGeneration = 0;
+
+// KB-07B：检索测试状态（卡 3A——并入 chunksGeneration 代际，切版本/关子视图作废在途响应）。
+const retrievalQuery = ref("");
+const retrievalTopK = ref<number>(10);
+const retrievalWithRerank = ref(false);
+const retrievalTestLoading = ref(false);
+const retrievalTestError = ref<string | null>(null);
+const retrievalTestResult = ref<KbRetrievalTestResult | null>(null);
 
 const testGate = computed(() =>
   detail.value
@@ -417,6 +438,13 @@ function openChunks(row: KbVersionView): void {
   chunksParentFilter.value = null;
   chunkStats.value = null;
   resetChunksList();
+  // KB-07B：检索测试区随子视图重置（输入/结果/错误一并复位，卡 3A）
+  retrievalQuery.value = "";
+  retrievalTopK.value = 10;
+  retrievalWithRerank.value = false;
+  retrievalTestLoading.value = false;
+  retrievalTestError.value = null;
+  retrievalTestResult.value = null;
   chunksGeneration += 1;
   const generation = chunksGeneration;
   void loadChunksPage(generation);
@@ -477,6 +505,41 @@ async function openChunkDetailById(chunkId: string): Promise<void> {
     reportError(error, "分块详情加载失败");
   } finally {
     if (generation === chunksGeneration) chunkDetailLoading.value = false;
+  }
+}
+
+/** KB-07B：运行检索测试（卡 3A——前端预检 → 服务端为唯一门禁；错误 reportError 驻留）。 */
+async function runRetrievalTest(): Promise<void> {
+  const view = chunksView.value;
+  if (!view) return;
+  // 预检错误走内联文案（与 chunksFilterError 同形），服务端错误走 reportError
+  const queryError = retrievalQueryError(retrievalQuery.value);
+  if (queryError !== null) {
+    retrievalTestError.value = queryError;
+    return;
+  }
+  const topKError = retrievalTopKError(retrievalTopK.value);
+  if (topKError !== null) {
+    retrievalTestError.value = topKError;
+    return;
+  }
+  retrievalTestError.value = null;
+  const generation = chunksGeneration;
+  retrievalTestLoading.value = true;
+  try {
+    const result = await kbApi.retrievalTest(view.versionId, {
+      query: retrievalQuery.value,
+      top_k: retrievalTopK.value,
+      with_rerank: retrievalWithRerank.value,
+    });
+    if (generation !== chunksGeneration || chunksView.value === null) return;
+    retrievalTestResult.value = result;
+  } catch (error) {
+    if (generation !== chunksGeneration || chunksView.value === null) return;
+    retrievalTestResult.value = null;
+    reportError(error, "检索测试运行失败");
+  } finally {
+    if (generation === chunksGeneration) retrievalTestLoading.value = false;
   }
 }
 
@@ -670,6 +733,114 @@ function currentScan() {
           <p v-if="chunkStats" class="muted" data-testid="kb-chunks-stats">
             {{ formatChunkStats(chunkStats) }}
           </p>
+
+          <!-- KB-07B 检索测试区（卡 1A/2A：常驻紧凑，结果表仅运行后渲染；纯文本无 v-html；
+               分数与名次来自后端逐路旁路查询——「为什么召回」逐路可解释）。 -->
+          <div class="retrieval-test" data-testid="kb-retrieval">
+            <div class="retrieval-inputs">
+              <span class="retrieval-title">检索测试</span>
+              <el-input
+                v-model="retrievalQuery"
+                size="small"
+                placeholder="检索词（≤300 字符）"
+                clearable
+                class="retrieval-q"
+                data-testid="kb-retrieval-q"
+                @keyup.enter="runRetrievalTest"
+              />
+              <el-input-number
+                v-model="retrievalTopK"
+                size="small"
+                :min="1"
+                :max="20"
+                controls-position="right"
+                class="retrieval-topk"
+                data-testid="kb-retrieval-topk"
+              />
+              <el-switch
+                v-model="retrievalWithRerank"
+                size="small"
+                data-testid="kb-retrieval-rerank"
+              />
+              <span class="muted rerank-hint">CPU 重排较慢（可达 1~2 分钟）</span>
+              <el-button
+                size="small"
+                type="primary"
+                :loading="retrievalTestLoading"
+                data-testid="kb-retrieval-run"
+                @click="runRetrievalTest"
+              >
+                运行
+              </el-button>
+            </div>
+            <p v-if="retrievalTestError" class="test-error" data-testid="kb-retrieval-error">
+              {{ retrievalTestError }}
+            </p>
+            <p v-else-if="!retrievalTestResult" class="muted" data-testid="kb-retrieval-empty">
+              输入检索词后运行，查看逐路分数与最终引用。
+            </p>
+            <template v-if="retrievalTestResult">
+              <p class="muted" data-testid="kb-retrieval-meta">
+                {{ rerankStatusLabel(retrievalTestResult.rerank_status) }} ·
+                {{ retrievalTestResult.pool_size }} 行 · {{ retrievalTestResult.latency_ms }}ms
+              </p>
+              <el-table
+                :data="retrievalTestResult.results"
+                size="small"
+                data-testid="kb-retrieval-table"
+              >
+                <el-table-column prop="final_rank" label="#" width="52" />
+                <el-table-column label="最终引用" width="88">
+                  <template #default="{ row }">
+                    <el-tag v-if="row.is_final_reference" size="small" type="success">
+                      最终引用
+                    </el-tag>
+                    <span v-else class="muted">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="块" width="64">
+                  <template #default="{ row }">#{{ row.chunk_index }}</template>
+                </el-table-column>
+                <el-table-column label="章节" min-width="120">
+                  <template #default="{ row }">
+                    <span class="chunk-section">{{ row.section_path ?? "—" }}</span>
+                  </template>
+                </el-table-column>
+                <!-- 内容预览（后端已截 200 码点）：纯文本，不渲染 markdown（无 v-html）。 -->
+                <el-table-column label="内容" min-width="160">
+                  <template #default="{ row }">
+                    <span class="chunk-preview">{{ row.text_preview }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="dense" width="116">
+                  <template #default="{ row }">{{ routeScoreText(row.dense) }}</template>
+                </el-table-column>
+                <el-table-column label="sparse" width="116">
+                  <template #default="{ row }">{{ routeScoreText(row.sparse) }}</template>
+                </el-table-column>
+                <el-table-column label="RRF" width="84">
+                  <template #default="{ row }">{{ formatScore(row.rrf_score) }}</template>
+                </el-table-column>
+                <el-table-column label="rerank" width="84">
+                  <template #default="{ row }">{{ formatScore(row.rerank_score) }}</template>
+                </el-table-column>
+                <el-table-column label="" width="76">
+                  <template #default="{ row }">
+                    <el-button
+                      link
+                      size="small"
+                      type="primary"
+                      data-testid="kb-retrieval-open-chunk"
+                      @click="openChunkDetailById(row.chunk_id)"
+                    >
+                      查看分块
+                    </el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </template>
+          </div>
+
           <div class="chunks-filters">
             <el-input
               v-model="chunkFilters.q"
@@ -1222,6 +1393,32 @@ function currentScan() {
 }
 .chunks-select-type {
   width: 96px;
+}
+/* KB-07B 检索测试区 */
+.retrieval-test {
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+}
+.retrieval-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.retrieval-title {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.retrieval-q {
+  flex: 1;
+  min-width: 120px;
+}
+.retrieval-topk {
+  width: 104px;
+}
+.rerank-hint {
+  white-space: nowrap;
 }
 .chunk-section {
   display: inline-block;

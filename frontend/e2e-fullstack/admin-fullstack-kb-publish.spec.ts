@@ -478,6 +478,69 @@ test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({
   expect((chunkStats.json as { total_chunks: number }).total_chunks).toBe(chunkItems.length);
   expect((chunkStats.json as { child_count: number }).child_count).toBeGreaterThan(0);
 
+  // KB-07B：检索测试 API 断言（真实 TEI 嵌入 + 真实 Qdrant 服务端 RRF）——
+  // query=表格块全文 → 表格块 top-1（与上方 tableChunk 互证）、「为什么召回」逐路分数齐全
+  const retrieval = await apiPost(
+    accounts,
+    `${API}/school/kb/versions/${versionId}/retrieval-test`,
+    publisherToken,
+    { query: tableChunk?.text ?? "", top_k: 10, with_rerank: false },
+  );
+  expect(retrieval.status).toBe(200);
+  const retrievalBody = retrieval.json as {
+    rerank_status: string;
+    pool_size: number;
+    results: Array<{
+      chunk_id: string;
+      dense: { score: number; rank: number } | null;
+      sparse: { score: number; rank: number } | null;
+      rrf_score: number;
+      rerank_score: number | null;
+      final_rank: number;
+      is_final_reference: boolean;
+    }>;
+  };
+  expect(retrievalBody.rerank_status).toBe("disabled");
+  expect(retrievalBody.pool_size).toBeGreaterThan(0);
+  // 只索子块（KB-03B Minor 3）：tableChunk 按序 find 到的是父块（不在索引），
+  // top-1 应是表格内容块的「被索引者」（父/子同内容任一）
+  const tableChunkIds = new Set(
+    chunkItems.filter((chunk) => chunk.text.includes("| 超时 | 30 |")).map((chunk) => chunk.id),
+  );
+  expect(
+    retrievalBody.results[0] !== undefined && tableChunkIds.has(retrievalBody.results[0].chunk_id),
+    "表格块应是检索 top-1（被索引的父子任一）",
+  ).toBe(true);
+  expect(retrievalBody.results[0]?.dense?.rank).toBe(1);
+  expect(retrievalBody.results[0]?.sparse?.rank).toBe(1);
+  expect(retrievalBody.results[0]?.rrf_score).toBeGreaterThan(0);
+  expect(retrievalBody.results[0]?.is_final_reference).toBe(true);
+  // 结构不变量：每行至少一路命中（融合池 ⊆ 旁路并集）；最终引用计数 = min(top_k, 行数)
+  expect(retrievalBody.results.every((row) => row.dense !== null || row.sparse !== null)).toBe(
+    true,
+  );
+  expect(retrievalBody.results.filter((row) => row.is_final_reference).length).toBe(
+    Math.min(10, retrievalBody.results.length),
+  );
+
+  // KB-07B：一次真实 rerank（TEI bge-reranker-v2-m3 CPU，opt-in）——
+  // rerank_status=applied、分数齐全、final_rank 连续（rerank 适配器获真实栈背书）
+  const reranked = await apiPost(
+    accounts,
+    `${API}/school/kb/versions/${versionId}/retrieval-test`,
+    publisherToken,
+    { query: tableChunk?.text ?? "", top_k: 5, with_rerank: true },
+  );
+  expect(reranked.status).toBe(200);
+  const rerankedBody = reranked.json as typeof retrievalBody;
+  expect(rerankedBody.rerank_status).toBe("applied");
+  expect(rerankedBody.results.length).toBeGreaterThan(0);
+  expect(rerankedBody.results.every((row) => row.rerank_score !== null)).toBe(true);
+  expect(rerankedBody.results.every((row, index) => row.final_rank === index + 1)).toBe(true);
+  expect(rerankedBody.results.every((row) => row.is_final_reference === row.final_rank <= 5)).toBe(
+    true,
+  );
+
   // 发布（API）：响应契约逐字段断言（KB-05 KbPublishResponse，school_kb.py:815-825）
   const publish = await apiPost(
     accounts,
