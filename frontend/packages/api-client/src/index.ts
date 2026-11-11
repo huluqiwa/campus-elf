@@ -106,6 +106,7 @@ export {
   type KbChunkSectionStat,
   type KbChunkStatsView,
   type KbChunkView,
+  type KbDocumentDetailView,
   type KbDocumentView,
   type KbFileMetadataInput,
   type KbRetrievalTestInput,

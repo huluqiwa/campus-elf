@@ -712,7 +712,12 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
       };
       document.updated_at = now;
     }
-    return json(route, 200, cloneDocument(document));
+    // KB-08B：详情回包带活跃发布指针（mock 的 alias 行 = activePublish；列表/上传回包不带
+    // 该字段——KB-08A 契约边界在 mock 层同样成立）
+    return json(route, 200, {
+      ...cloneDocument(document),
+      active_version_id: activePublish.get(id)?.versionId ?? null,
+    });
   }
 
   async function handleVersions(route: Route, url: URL, id: string): Promise<void> {

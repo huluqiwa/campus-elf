@@ -24,6 +24,7 @@ import {
   documentStatusMeta,
   filePreflightError,
   formatBytes,
+  isActiveVersion,
   kbErrorInfo,
   kbPublishActionMessage,
   metadataError,
@@ -428,6 +429,29 @@ describe("发布/回滚/下线/删除门禁（镜像后端 school_kb.py:64-68 �
     expect(rollbackTargets(versions, "v-2").map((t) => t.id)).toEqual(["v-1"]);
     // 全被排除时给空数组（下拉显示「无可回滚目标」而不是隐藏按钮——按钮可见性只看权限+状态）
     expect(rollbackTargets([versions[0]], "v-1")).toEqual([]);
+  });
+});
+
+describe("KB-08B 活跃版本判据（isActiveVersion；服真化 TD-305 前端半）", () => {
+  const versions = [
+    { id: "v-1", version_no: 1, filename: "a.md", status: "PUBLISHED" },
+    { id: "v-2", version_no: 2, filename: "b.md", status: "PUBLISHED" },
+  ];
+
+  it("active_version_id 命中的版本行打标", () => {
+    expect(isActiveVersion("v-1", "v-1")).toBe(true);
+    expect(isActiveVersion("v-2", "v-1")).toBe(false);
+  });
+
+  it("null（无活跃发布/真值未加载）时任何行都不打标——不误标", () => {
+    for (const version of versions) {
+      expect(isActiveVersion(version.id, null)).toBe(false);
+    }
+  });
+
+  it("rollbackTargets 以服真 activeVersionId 排除活跃（真值 + 会话更新同接口）", () => {
+    // 详情回包初始化（服务端真值）与会话内动作响应就地更新走同一参数，判据不变
+    expect(rollbackTargets(versions, "v-1").map((t) => t.id)).toEqual(["v-2"]);
   });
 });
 

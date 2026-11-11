@@ -144,12 +144,23 @@ describe("createKbApi 读取接口", () => {
     );
   });
 
-  it("详情按文档 id 取路径", async () => {
-    const { session, calls } = sessionStub(() => ({ body: DOCUMENT }));
+  it("详情按文档 id 取路径，回包含 active_version_id（KB-08A 契约）", async () => {
+    const { session, calls } = sessionStub(() => ({
+      body: { ...DOCUMENT, active_version_id: "v-1" },
+    }));
     const document = await createKbApi(session).getDocument("d-1");
     expect(calls[0].path).toBe("/api/v1/school/kb/documents/d-1");
     expect(calls[0].init).toBeUndefined();
     expect(document.title).toBe("课程大纲");
+    expect(document.active_version_id).toBe("v-1");
+  });
+
+  it("详情无活跃发布时 active_version_id 为 null（fail-closed）", async () => {
+    const { session } = sessionStub(() => ({
+      body: { ...DOCUMENT, active_version_id: null },
+    }));
+    const document = await createKbApi(session).getDocument("d-1");
+    expect(document.active_version_id).toBeNull();
   });
 
   it("版本列表带分页参数", async () => {

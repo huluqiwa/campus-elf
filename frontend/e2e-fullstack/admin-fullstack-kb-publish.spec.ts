@@ -7,9 +7,11 @@ import { apiGet, apiLogin, apiPost, loadAccounts, type E2EAccounts } from "./hel
 //
 // 口径注记（与简报 M3-KB-05B §5 一致）：
 // - 上传恒建新文档且只有 v1（`service.py:890` `version_no=1`，产品面没有「给旧文档加版本」的
-//   接口），因此回滚目标选择在真实产品里只能是「单一 PUBLISHED 版本 = 自身」——UI 走简报
-//   D2-A 的兜底路径（重开抽屉活跃记忆复位 → 选到活跃版本 → 409 `KB_ROLLBACK_TARGET_IS_ACTIVE`）；
-//   多版本间的真实 alias 切换由 KB-05 后端集成/业务场景测试覆盖（test_kb_publish.py 直插多版本）。
+//   接口），因此回滚目标选择在真实产品里只能是「单一 PUBLISHED 版本 = 自身」——KB-05B 期 UI
+//   走 D2-A 兜底（重开抽屉选到活跃版本 → 409 `KB_ROLLBACK_TARGET_IS_ACTIVE`）；KB-08A 详情
+//   契约后改为断服真化（详情回包 active_version_id → 版本行「当前活跃」tag + 下拉排除活跃
+//   自身，409 降为竞态窗口可达），多版本间的真实 alias 切换仍由 KB-05 后端集成/业务场景
+//   测试覆盖（test_kb_publish.py 直插多版本）。
 // - 测试集用无 expected_chunk_ids 的 CSV：`test_task.py:277-278` 无期望 → 默认通过，
 //   TEST_PASSED 可达；带真实 chunk id 的 100% 命中强断言归 KB-04A 集成测试。
 // - 发布重放（alias 恢复路径）与「指针已撤」两个后端恢复分支借 API 复发实测
@@ -35,6 +37,8 @@ interface KbDocument {
   title: string;
   status: string;
   current_version: KbVersion | null;
+  /** KB-08A 详情契约（列表回包不带；上传回包不带——只有 GET 详情端点携带）。 */
+  active_version_id?: string | null;
 }
 
 interface KbPage<T> {
@@ -336,13 +340,30 @@ test("发布链②：测试沙箱 → TEST_PASSED → UI 发布 → 回滚 409 �
     await page.locator(".el-drawer__close-btn").click();
   }
 
-  // 重开抽屉（活跃记忆复位）：单一 PUBLISHED 版本 = 自身 → 409 KB_ROLLBACK_TARGET_IS_ACTIVE
+  // 重开抽屉（KB-08B 服真化，TD-305 前端半）：旧口径=「活跃记忆复位 → 全列 → 选活跃自身
+  // 吃 409 KB_ROLLBACK_TARGET_IS_ACTIVE 兜底」；KB-08A 详情契约后详情回包携带
+  // active_version_id → 版本行挂「当前活跃」tag、回滚下拉排除活跃自身（无可回滚目标）。
+  // 「选到活跃版本 → 409」降为竞态窗口可达（另一端在详情加载后切换过），mock/全栈不
+  // 复刻竞态；映射由 kb-logic 单测承担（KB-08B 简报 §8）。
   await expect(page.getByTestId("kb-document-drawer")).toBeHidden();
   const reopened = await openDrawer(page, title);
+  // 服务端状态断言（不只看 UI）：详情回包活跃指针 = 刚发布的 v1
+  const publishedDetail = await apiGet(
+    accounts,
+    `${API}/school/kb/documents/${documentId}`,
+    publisherToken,
+  );
+  expect((publishedDetail.json as KbDocument).active_version_id).toBe(versionId);
+  // UI：版本行挂「当前活跃」tag + 回滚下拉无可回滚目标（排除基准=服务端真值）
+  const publishedRow = reopened
+    .getByTestId("kb-version-table")
+    .locator("tbody tr", { hasText: mdName });
+  await expect(publishedRow.getByTestId("kb-active-tag")).toBeVisible();
   await reopened.getByTestId("kb-rollback-trigger").click();
-  await page.getByTestId("kb-rollback-menu").getByTestId("kb-rollback-target").click();
-  await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();
-  await expect(page.getByText("目标版本已是当前活跃发布")).toBeVisible();
+  await expect(page.getByTestId("kb-rollback-menu")).toContainText("无可回滚目标");
+  // 收起下拉：popper 可能遮挡下方动作按钮（点击 disabled 项无效果）；Escape 有冒泡关抽屉
+  // 竞态（KB-06B 实测）——点抽屉头部空白只收 popper 不动抽屉
+  await page.locator(".el-drawer__header").click();
 
   // 恢复路径实测（KB-05 审查 m-1 先例）：已发布 + 活跃 → 重放 = 重建 alias（replayed=true）
   const replay = await apiPost(
@@ -362,6 +383,8 @@ test("发布链②：测试沙箱 → TEST_PASSED → UI 发布 → 回滚 409 �
   await expect(page.getByText("v1 已下线，活跃发布已撤除")).toBeVisible();
   await expect(reopened.getByTestId("kb-publish-row")).toHaveCount(0);
   await expect(reopened.getByTestId("kb-version-table")).toContainText("已下线");
+  // KB-08B：活跃发布撤除 → tag 消失（was_active 置 null + 重读详情校准）
+  await expect(publishedRow.getByTestId("kb-active-tag")).toHaveCount(0);
 
   // 下线后重发 → 409 KB_NOT_TEST_PASSED（OFFLINE 不满足发布断言；「PUBLISHED 但指针丢失」
   // 的 KB_PUBLISHED_NOT_ACTIVE 只在 alias 行丢失的恢复场景出现，正常流不可达——
