@@ -63,7 +63,7 @@ from app.kb.service import (
     create_test_set,
     delete_version,
     get_build_job,
-    get_document,
+    get_document_detail,
     get_test_run,
     list_build_events,
     list_documents,
@@ -130,6 +130,16 @@ class KbDocumentResponse(BaseModel):
     updated_at: datetime
 
 
+class KbDocumentDetailResponse(KbDocumentResponse):
+    """文档详情（含当前活跃发布指针；TD-305，版本切换 MVP 的服真化面）。
+
+    `active_version_id` 与 `active_publish` 同源（kb_publish_aliases 库行）；
+    无活跃发布（未发布/已下线/已软删）为 null。列表与上传回包（基模型）不带该字段。
+    """
+
+    active_version_id: UUID | None
+
+
 class KbUploadResponse(BaseModel):
     """批量上传结果（`replayed=true` 表示命中幂等键并返回原批次）。"""
 
@@ -172,6 +182,15 @@ def _document_response(view: DocumentView) -> KbDocumentResponse:
         ),
         created_at=view.created_at,
         updated_at=view.updated_at,
+    )
+
+
+def _document_detail_response(
+    view: DocumentView, active_version_id: UUID | None
+) -> KbDocumentDetailResponse:
+    return KbDocumentDetailResponse(
+        **_document_response(view).model_dump(),
+        active_version_id=active_version_id,
     )
 
 
@@ -263,22 +282,22 @@ async def list_kb_documents(
     )
 
 
-@router.get("/documents/{document_id}", response_model=KbDocumentResponse)
+@router.get("/documents/{document_id}", response_model=KbDocumentDetailResponse)
 async def get_kb_document(
     document_id: UUID, viewer: Annotated[Principal, ViewerDep]
-) -> KbDocumentResponse:
-    """文档详情（范围外/跨租一律 404）。"""
+) -> KbDocumentDetailResponse:
+    """文档详情（范围外/跨租一律 404；含活跃发布指针 TD-305）。"""
 
     tenant_id = _tenant_or_403(viewer)
     try:
-        document = await get_document(
+        detail = await get_document_detail(
             tenant_id=tenant_id,
             scope=viewer.scope_context,
             document_id=document_id,
         )
     except KbError as exc:
         raise _http_error(exc) from exc
-    return _document_response(document)
+    return _document_detail_response(detail.document, detail.active_version_id)
 
 
 @router.get(
