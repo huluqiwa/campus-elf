@@ -110,10 +110,12 @@ compose 服务与 dev compose（:202-229）逐字一致（含 `--max-client-batc
 
 ## 9. 实现结果（2026-11-12）
 
-**交付清单**（16 文件 +1060/-40，含审查修复增量）：`packages/api-client`（kb.ts +5 类型/1 方法、index.ts 导出、kb.test.ts +5）、`apps/admin`（kb-logic +5 纯函数、kb-logic.test +5、KbDocumentDrawer 检索测试区）、`e2e`（kb-mock 检索路由 + admin-kb.spec +7）、`e2e-fullstack`（链③两组断言）、编排（compose tei-rerank + 2 env、e2e-stack.sh 参数化等待）、backend 顺带修（rerank.py 分批、retrieval_test.py 留痕、config 2 字段、test_kb_rerank_unit +2）、本简报。
+**交付清单**（16 files +1092/-32，`git diff --shortstat main...HEAD` 直读；含审查修复增量）：`packages/api-client`（kb.ts +5 类型/1 方法、index.ts 导出、kb.test.ts +5）、`apps/admin`（kb-logic +5 纯函数、kb-logic.test +5、KbDocumentDrawer 检索测试区）、`e2e`（kb-mock 检索路由 + admin-kb.spec +7）、`e2e-fullstack`（链③两组断言）、编排（compose tei-rerank + 2 env、e2e-stack.sh 参数化等待）、backend 顺带修（rerank.py 分批、retrieval_test.py 留痕、config 2 字段、test_kb_rerank_unit +2）、本简报。
 
-**本地门禁读数**（2026-11-12，win32 / Node 24 / CPython 3.13）：前端 `typecheck`/`lint`/`format:check`/`build` 全绿（build 后跑 E2E，TD-254）；单测 **272**（api-client 102 + admin 170）；mock E2E **160 passed**（基线 153 + 7）；全栈 E2E **25 passed（4.0m，重置种子全量一次过**，链③含真实 rerank 断言 applied）；backend 受影响回归：rerank/检索单元 **20 passed** + 集成 16 + 业务 2（**18 passed / 188s**）、ruff/mypy（264 文件）全绿、bandit×2 由 CI 复跑。
+**本地门禁读数**（2026-11-12，win32 / Node 24 / CPython 3.13）：前端 `typecheck`/`lint`/`format:check`/`build` 全绿（build 后跑 E2E，TD-254）；单测 **272**（api-client 102 + admin 170）；mock E2E **160 passed**（基线 153 + 7）；全栈 E2E **25 passed**——最终全绿轮 **2.8m**（重置种子，链③含真实 rerank 断言 applied；此前一轮 4.0m 为 top_k=5 口径）；backend 受影响回归：rerank/检索单元 **20 passed** + 集成 16 + 业务 2（**18 passed / 188s**）、ruff/mypy（264 文件）全绿、bandit×2 由 CI 复跑。
 
-**独立审查**（第 1 轮，独立只读子智能体审 commit `43d55d3` diff）：**0 Blocker / 2 Major / 4 Minor**，11 项重点清单逐项实读核验（含按 bigram 手推三条用例全部期望值、Element Plus 2.14.7 源码实读确认 loading 吞 click）。处置：M1 loading 卡死 → **已修**（运行序号）+ flex 溢出连带修复 + 回归用例；M2 未登记偏离 → 类型 tag **已补** + retrievalRowsPlan 内联化**登记**（偏离 9）；m1 mock 422 精简 **已修**（偏离 7）；m2 e2e top_k 对齐 **已修**（偏离 10）；m3/m4 简报精度 **已修**（本段 + 卡 3A）。复审：待第 2 轮确认。
+**独立审查**（第 1 轮，独立只读子智能体审 commit `43d55d3` diff）：**0 Blocker / 2 Major / 4 Minor**，11 项重点清单逐项实读核验（含按 bigram 手推三条用例全部期望值、Element Plus 2.14.7 源码实读确认 loading 吞 click）。处置：M1 loading 卡死 → **已修**（运行序号）+ flex 溢出连带修复 + 回归用例；M2 未登记偏离 → 类型 tag **已补** + retrievalRowsPlan 内联化**登记**（偏离 9）；m1 mock 422 精简 **已修**（偏离 7）；m2 e2e top_k 对齐 **已修**（偏离 10）；m3/m4 简报精度 **已修**（本段 + 卡 3A）。
+
+**独立复审**（第 2 轮，同一子智能体审修复增量）：**0 Blocker / 0 Major / 2 Minor**——M1 双轨方案经四类场景 trace 无新竞态、回归用例真钉修复；m-a 结果渲染补运行序号门 → **已修**（一行加固，消除「Enter 并发旧响应覆盖新结果」整类）；m-b §9 数字两次写错 → **已修**（改贴 `git diff --shortstat` 直读）。无 Blocker/Major，可提交。
 
 （PR 与合并事实待合并时补录。）
