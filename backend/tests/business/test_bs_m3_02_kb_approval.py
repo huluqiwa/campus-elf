@@ -12,7 +12,7 @@ Then 通过链路：版本与文档 APPROVED、审批单 APPROVED（含版本快
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
@@ -151,7 +151,10 @@ async def test_bs_m3_02_approve_then_build_full_chain(
     assert sibling_build.json()["detail"]["code"] == "KB_NOT_APPROVED"
     assert (await rows("select count(*) as n from kb_build_jobs"))[0]["n"] == 0
 
-    # APPROVED 文档构建 → BUILD_QUEUED
+    # APPROVED 文档构建 → BUILD_QUEUED（K4 门禁接线：卡 4 配 all+确认）
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, UUID(version_a))
     build = await client.post(
         f"/api/v1/school/kb/document-versions/{version_a}/build", headers=builder
     )

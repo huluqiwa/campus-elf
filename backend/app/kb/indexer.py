@@ -147,6 +147,34 @@ async def mark_published_payload(
         raise IndexError_("PAYLOAD_UPDATE_FAILED", "发布标记写入失败") from exc
 
 
+async def sync_acl_payload(
+    client: AsyncQdrantClient, *, collection: str, version_id: UUID, tokens: list[str]
+) -> None:
+    """按 version_id 重写 payload `acl_tokens`（K4 D2-B 单点同步）。
+
+    PUT 置未确认 → `tokens=[]`（恒不召回 fail-closed）；confirm → 新 tokens
+    （spec :309 即时生效）。调用方负责 collection 存在性判断与失败映射
+    （service 层 502 `AUDIENCE_SYNC_FAILED`）；`mark_published_payload` 同形。
+    """
+
+    try:
+        await client.set_payload(
+            collection_name=collection,
+            payload={"acl_tokens": list(tokens)},
+            points=qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="version_id", match=qmodels.MatchValue(value=str(version_id))
+                    )
+                ]
+            ),
+            wait=True,
+        )
+    except Exception as exc:
+        logger.warning("Qdrant ACL 同步失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise IndexError_("ACL_SYNC_FAILED", "人群 token 同步失败") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class IndexPoint:
     """一个待索引点（chunk 行 + 已算好的双向量）。"""
@@ -170,8 +198,14 @@ def build_payload(
     version_id: UUID,
     point: IndexPoint,
     doc_title: str,
+    acl_tokens: list[str],
 ) -> dict[str, Any]:
-    """Qdrant payload（design §7.4 十字段；`tenant_id_hash` 而非明文租户 id）。"""
+    """Qdrant payload（design §7.4 十字段 + K4 `acl_tokens`；`tenant_id_hash` 而非明文租户 id）。
+
+    `acl_tokens`（KB-09A D2-B）：构建期人群 token 快照（`type:<id>` / `all`）——
+    检索期 `MatchAny(用户 tokens)` 过滤的事实源；ACL 变更由 service 层
+    `sync_acl_payload` 即时重写（spec :309 即时生效）。
+    """
 
     return {
         "tenant_id_hash": tenant_hash(tenant_id),
@@ -186,6 +220,7 @@ def build_payload(
         "page_end": point.page_end,
         "chunk_type": point.chunk_type,
         "text_hash": point.text_hash,
+        "acl_tokens": list(acl_tokens),
         "is_published": False,
     }
 
@@ -216,6 +251,7 @@ async def upsert_points(
     version_id: UUID,
     doc_title: str,
     points: Sequence[IndexPoint],
+    acl_tokens: list[str],
 ) -> int:
     """批量 upsert（named vectors + payload）；返回写入点数。"""
 
@@ -236,6 +272,7 @@ async def upsert_points(
                 version_id=version_id,
                 point=point,
                 doc_title=doc_title,
+                acl_tokens=acl_tokens,
             ),
         )
         for point in points

@@ -53,15 +53,18 @@ from app.kb.retrieval_test import (
 )
 from app.kb.service import (
     ApprovalOutcome,
+    AudienceView,
     BuildEventView,
     DocumentView,
     IncomingFile,
     KbError,
     PublishView,
     VersionView,
+    confirm_audiences,
     create_build,
     create_test_set,
     delete_version,
+    get_audiences,
     get_build_job,
     get_document_detail,
     get_test_run,
@@ -71,6 +74,7 @@ from app.kb.service import (
     list_versions,
     offline_version,
     publish_version,
+    replace_audiences,
     retry_build,
     rollback_version,
     start_test_run,
@@ -88,6 +92,8 @@ BuilderDep = require_permission("school.kb.build", realm="tenant")
 PublisherDep = require_permission("school.kb.publish", realm="tenant")
 DeleterDep = require_permission("school.kb.delete", realm="tenant")
 ChunkViewerDep = require_permission("school.kb.view_chunks", realm="tenant")
+# KB-09：人群配置/确认（矩阵 §3：校管△ 可授、超管√；读侧沿 view 先例）
+AclManagerDep = require_permission("school.kb.acl.manage", realm="tenant")
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -440,6 +446,108 @@ async def create_kb_document_version_build(
         attempt=job.attempt,
         created_at=job.created_at,
     )
+
+
+class KbAudienceItem(BaseModel):
+    """一条人群条目（K4；`all` 时 audience_id 为空）。"""
+
+    audience_type: str
+    audience_id: str | None = None
+
+
+class KbAudiencesPayload(BaseModel):
+    """PUT 全量设置人群的请求体（空数组=清空→未确认态）。"""
+
+    audiences: list[KbAudienceItem]
+
+
+class KbAudiencesResponse(BaseModel):
+    """版本人群配置视图（GET/PUT/confirm 统一形态；KB-09A）。"""
+
+    version_id: UUID
+    audiences: list[KbAudienceItem]
+    acl_confirmed: bool
+    acl_confirmed_by: UUID | None = None
+    acl_confirmed_at: datetime | None = None
+
+
+def _audiences_response(view: AudienceView) -> KbAudiencesResponse:
+    return KbAudiencesResponse(
+        version_id=view.version_id,
+        audiences=[
+            KbAudienceItem(audience_type=item.audience_type, audience_id=item.audience_id)
+            for item in view.audiences
+        ],
+        acl_confirmed=view.acl_confirmed,
+        acl_confirmed_by=view.acl_confirmed_by,
+        acl_confirmed_at=view.acl_confirmed_at,
+    )
+
+
+@router.get("/document-versions/{version_id}/audiences", response_model=KbAudiencesResponse)
+async def get_kb_version_audiences(
+    version_id: UUID,
+    viewer: Annotated[Principal, ViewerDep],
+) -> KbAudiencesResponse:
+    """读取版本人群配置（K4；跨租/范围外 404 同文不泄露）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    try:
+        view = await get_audiences(
+            tenant_id=tenant_id, scope=viewer.scope_context, version_id=version_id
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _audiences_response(view)
+
+
+@router.put("/document-versions/{version_id}/audiences", response_model=KbAudiencesResponse)
+async def replace_kb_version_audiences(
+    version_id: UUID,
+    payload: KbAudiencesPayload,
+    manager: Annotated[Principal, AclManagerDep],
+    request: Request,
+) -> KbAudiencesResponse:
+    """全量设置版本人群并置未确认（`school.kb.acl.manage`；审计 + payload 即时同步）。"""
+
+    tenant_id = _tenant_or_403(manager)
+    try:
+        view = await replace_audiences(
+            tenant_id=tenant_id,
+            scope=manager.scope_context,
+            version_id=version_id,
+            user_id=manager.user_id,
+            items=[item.model_dump() for item in payload.audiences],
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _audiences_response(view)
+
+
+@router.post(
+    "/document-versions/{version_id}/audiences/confirm",
+    response_model=KbAudiencesResponse,
+)
+async def confirm_kb_version_audiences(
+    version_id: UUID,
+    manager: Annotated[Principal, AclManagerDep],
+    request: Request,
+) -> KbAudiencesResponse:
+    """确认版本人群（`school.kb.acl.manage`；空集 409、已确认 409；审计 + payload 同步）。"""
+
+    tenant_id = _tenant_or_403(manager)
+    try:
+        view = await confirm_audiences(
+            tenant_id=tenant_id,
+            scope=manager.scope_context,
+            version_id=version_id,
+            user_id=manager.user_id,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return _audiences_response(view)
 
 
 @router.put("/documents/{document_id}", response_model=KbDocumentResponse)

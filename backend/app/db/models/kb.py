@@ -168,6 +168,12 @@ class KbDocumentVersion(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, 
             name="fk_kb_document_versions_created_by_users",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["acl_confirmed_by", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_kb_document_versions_acl_confirmed_by_users",
+            ondelete="SET NULL",
+        ),
     )
 
     document_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
@@ -184,6 +190,62 @@ class KbDocumentVersion(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, 
     # `clamav`（真实扫描）/ `dev-skip`（开发跳过）/ `dev-degraded`（开发放行）
     scan_engine: Mapped[str | None] = mapped_column(String(32))
     scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # K4 人群确认态（KB-09A）：null = 未确认（fail-closed 门禁判据，spec :307）
+    acl_confirmed_by: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    acl_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+
+
+# 版本级查阅人群类型（spec KB-09 :306；`all` 显式选择、audience_id 为空）
+KB_AUDIENCE_TYPES = ("department", "role", "class", "grade", "course", "user", "all")
+_AUDIENCE_TYPE_SQL = ", ".join(f"'{t}'" for t in KB_AUDIENCE_TYPES)
+
+
+class KbDocumentAudience(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """版本级查阅人群（K4；spec :306 多条为并集，`all` 显式选择）。
+
+    `audience_id` VARCHAR 多态引用（无 FK）：UUID 类型存字符串、`grade` 存年级
+    字符串（`classes.grade` 为 String(16)）；存在性与同租校验在服务层。唯一
+    `(version_id, audience_type, audience_id)` 用 NULLS NOT DISTINCT——防止
+    `all` 行（audience_id NULL）重复。
+    """
+
+    __tablename__ = "kb_document_audiences"
+    __table_args__ = (
+        CheckConstraint(f"audience_type IN ({_AUDIENCE_TYPE_SQL})", name="audience_type_valid"),
+        UniqueConstraint(
+            "version_id",
+            "audience_type",
+            "audience_id",
+            name="uq_kb_document_audiences_version_type_audience",
+            postgresql_nulls_not_distinct=True,
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_kb_document_audiences_id_tenant_id"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_kb_document_audiences_tenant_id_tenants",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["version_id", "tenant_id"],
+            ["kb_document_versions.id", "kb_document_versions.tenant_id"],
+            name="fk_kb_document_audiences_version_id_kb_document_versions",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["created_by", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_kb_document_audiences_created_by_users",
+            ondelete="CASCADE",
+        ),
+        Index("ix_kb_document_audiences_version_id", "version_id"),
+        Index("ix_kb_document_audiences_tenant_id", "tenant_id"),
+    )
+
+    version_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    audience_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    audience_id: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
 
 

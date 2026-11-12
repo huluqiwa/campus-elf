@@ -33,6 +33,7 @@ from tests.support.db import upgrade_test_database
 from tests.support.dsn import assert_test_database_dsn
 from tests.support.kb_env import (
     B_BUILDER,
+    B_UPLOADER,
     KB_APPROVER,
     KB_B_PUBLISHER,
     KB_BUILDER,
@@ -124,6 +125,10 @@ async def _chain_to_test_passed(
     )
     assert approved.status_code == 200, approved.text
 
+    # K4 门禁接线（卡 4）：构建前配 all+确认
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, version_id)
     built = await client.post(
         f"/api/v1/school/kb/document-versions/{version_id}/build",
         headers=await login(client, KB_BUILDER),
@@ -445,6 +450,9 @@ async def _seed_b_tenant_version(
         version=str(version_id),
         creator=creator_id,
     )
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_b, version_id, by_login_id=B_UPLOADER)
     result = await build_kb_version({}, str(env.tenant_b), str(version_id))
     assert result["status"] == "ready", result
     await execute(

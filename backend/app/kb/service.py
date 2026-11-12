@@ -48,6 +48,7 @@ from app.db.models.kb import (
     KbBuildJob,
     KbChunk,
     KbDocument,
+    KbDocumentAudience,
     KbDocumentVersion,
     KbIndexVersion,
     KbPublishAlias,
@@ -56,6 +57,13 @@ from app.db.models.kb import (
 from app.db.models.kb_events import KbBuildEvent
 from app.db.repository import CursorError, ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
+from app.kb.audience import (
+    ACL_GATE_ALLOW,
+    AudienceValidationError,
+    acl_gate,
+    audience_tokens,
+    parse_audience_items,
+)
 from app.kb.chunker import CHUNK_TYPE_CHILD
 from app.kb.indexer import (
     alias_name,
@@ -2027,6 +2035,10 @@ async def create_build(
                 assert_build_allowed(version.status)
             except NotBuildableError as exc:
                 raise KbError("KB_NOT_APPROVED", str(exc), 409) from exc
+            # K4 ACL 门禁（KB-09A D1-A）：与执行期同判据；拒绝走既有 build.denied 审计
+            acl_gate_result = await _acl_gate_for_version(session, version)
+            if acl_gate_result is not None:
+                raise KbError(acl_gate_result, "人群 ACL 未配置或未确认（K4 fail-closed）", 409)
 
             job_repository = _build_job_repository(session, tenant_id)
             active = (
@@ -2222,6 +2234,302 @@ def _validate_metadata_fields(
                 raise KbError("METADATA_INVALID", "每个标签长度必须为 1–32 字", 422)
     if description is not None and len(description) > 1000:
         raise KbError("METADATA_INVALID", "描述长度不能超过 1000 字", 422)
+
+
+# ---------------------------------------------------------------------------
+# KB-09A：文档查阅人群 ACL（K4；docs/design-briefs/M3-KB-09.md，已确认
+# D1-A 门禁形态〔构建/发布同形 409 + 执行期二次校验〕、D2-B payload 单一事实源
+# + set_payload 即时同步、422 AUDIENCE_ALL_MIXED / 502 AUDIENCE_SYNC_FAILED）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AudienceItem:
+    """一条人群条目（`all` 时 audience_id 为空）。"""
+
+    audience_type: str
+    audience_id: str | None
+
+
+@dataclass(frozen=True)
+class AudienceView:
+    """版本人群配置视图（GET/PUT/confirm 统一回包形态）。"""
+
+    version_id: UUID
+    audiences: list[AudienceItem]
+    acl_confirmed: bool
+    acl_confirmed_by: UUID | None
+    acl_confirmed_at: datetime | None
+
+
+def _audience_view(version: KbDocumentVersion, rows_: Sequence[KbDocumentAudience]) -> AudienceView:
+    """行集 + 确认态 → 视图（响应序 = (type, id) 字典序，确定性）。"""
+
+    items = sorted(
+        (AudienceItem(audience_type=row.audience_type, audience_id=row.audience_id) for row in rows_),
+        key=lambda item: (item.audience_type, item.audience_id or ""),
+    )
+    return AudienceView(
+        version_id=version.id,
+        audiences=items,
+        acl_confirmed=version.acl_confirmed_at is not None,
+        acl_confirmed_by=version.acl_confirmed_by,
+        acl_confirmed_at=version.acl_confirmed_at,
+    )
+
+
+async def _version_with_audiences(
+    session: AsyncSession, tenant_id: UUID, version_id: UUID, scope: DataScopeContext
+) -> tuple[KbDocumentVersion, Sequence[KbDocumentAudience]]:
+    """取版本（范围过滤 + FOR UPDATE）+ 其人群行集（同事务；跨租/范围外 404 同文不泄露）。
+
+    版本行加锁（`_version_locked` 先例）：PUT 与 confirm 对同一版本行串行化——
+    否则 confirm 读行集与提交之间插入并发 PUT 会产生「DB=新行集+已确认、
+    Qdrant=旧 tokens」的收紧方向 fail-open 窗口（审查 Major 3）。
+    """
+
+    version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
+        session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+    )
+    version = await _version_locked(session, version_repository, version_id=version_id)
+    if version is None:
+        raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
+    audience_repository: TenantScopedRepository[KbDocumentAudience] = TenantScopedRepository(
+        session, KbDocumentAudience, tenant_id, scope=ScopeBypass(reason="人群行随版本范围走")
+    )
+    rows_ = (
+        await session.execute(
+            audience_repository.base_query().where(KbDocumentAudience.version_id == version_id)
+        )
+    ).scalars().all()
+    return version, rows_
+
+
+async def _ensure_audience_target_exists(
+    session: AsyncSession, tenant_id: UUID, audience_type: str, audience_id: str
+) -> None:
+    """同租存在性校验（spec 验收 :319：跨租/不存在 audience_id 拒绝；422 同文）。
+
+    全部走仓储（bare-SQL 守卫：租户谓词在仓储注入，RLS 为第二道防线）。
+    存在性校验不做状态过滤（禁用部门/归档班级仍可配置——「收紧」语义由检索侧
+    人群解析承担，解析器只认活跃关系；删除的对象行不存在即 422）。
+    """
+
+    from app.db.models.identity import User
+    from app.db.models.org import Course, Department, OrgClass
+    from app.db.models.rbac import Role
+
+    # 非 grade 类型按主键 get；UUID 非法视同不存在（422 同文，防 500 泄漏格式差异）
+    target: UUID
+    try:
+        target = UUID(audience_id)
+    except ValueError as exc:
+        raise KbError("AUDIENCE_NOT_FOUND", "人群对象不存在或不属于本租户", 422) from exc
+
+    model_by_type: dict[str, type] = {
+        "department": Department,
+        "role": Role,
+        "class": OrgClass,
+        "course": Course,
+        "user": User,
+    }
+    if audience_type == "grade":
+        # grade：对租户班级现值校验（A30 唯一数据源口径）
+        repository: TenantScopedRepository[OrgClass] = TenantScopedRepository(
+            session, OrgClass, tenant_id, scope=ScopeBypass(reason="人群对象存在性校验：同租即判据")
+        )
+        found = (
+            await session.execute(
+                repository.base_query().where(OrgClass.grade == audience_id).limit(1)
+            )
+        ).first()
+    else:
+        model = model_by_type[audience_type]
+        repository = TenantScopedRepository(
+            session, model, tenant_id, scope=ScopeBypass(reason="人群对象存在性校验：同租即判据")
+        )
+        found = await repository.get(target)
+    if found is None:
+        raise KbError("AUDIENCE_NOT_FOUND", "人群对象不存在或不属于本租户", 422)
+
+
+async def get_audiences(
+    *, tenant_id: UUID, scope: DataScopeContext, version_id: UUID
+) -> AudienceView:
+    """读取版本人群配置（`school.kb.view`；跨租/范围外 404 同文不泄露）。"""
+
+    async with db_session(tenant_id=tenant_id) as session:
+        version, rows_ = await _version_with_audiences(session, tenant_id, version_id, scope)
+    return _audience_view(version, rows_)
+
+
+async def replace_audiences(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    items: list[dict[str, Any]],
+    request_id: str | None = None,
+) -> AudienceView:
+    """全量设置版本人群并置未确认（`school.kb.acl.manage`；spec :309「保存后置为未确认」）。
+
+    结构校验（纯函数 422 族）→ 同租存在性校验（422 `AUDIENCE_NOT_FOUND`）→
+    重写行集 + 清确认列 → 审计 `school.kb.acl.updated`（前后集合）→
+    已构建版本 set_payload 清空 `acl_tokens`（恒不召回，fail-closed）；
+    同步失败 → 502 `AUDIENCE_SYNC_FAILED`（DB 已提交，重试 PUT+confirm 恢复）。
+    """
+
+    try:
+        parsed = parse_audience_items(items)
+    except AudienceValidationError as exc:
+        raise KbError(exc.code, str(exc), 422) from exc
+
+    async with db_session(tenant_id=tenant_id) as session:
+        version, old_rows = await _version_with_audiences(session, tenant_id, version_id, scope)
+        for audience_type, audience_id in parsed:
+            if audience_id is not None:
+                await _ensure_audience_target_exists(
+                    session, tenant_id, audience_type, audience_id
+                )
+        audience_repository: TenantScopedRepository[KbDocumentAudience] = TenantScopedRepository(
+            session, KbDocumentAudience, tenant_id, scope=ScopeBypass(reason="人群行随版本范围走")
+        )
+        for row in old_rows:
+            await audience_repository.delete(row)
+        new_rows: list[KbDocumentAudience] = []
+        for audience_type, audience_id in parsed:
+            new_rows.append(
+                KbDocumentAudience(
+                    tenant_id=tenant_id,
+                    version_id=version.id,
+                    audience_type=audience_type,
+                    audience_id=audience_id,
+                    created_by=user_id,
+                )
+            )
+            await audience_repository.add(new_rows[-1])
+        before = sorted(
+            ([row.audience_type, row.audience_id] for row in old_rows),
+            key=lambda pair: (pair[0], pair[1] or ""),
+        )
+        after = sorted(
+            ([t, i] for t, i in parsed),
+            key=lambda pair: (pair[0], pair[1] or ""),
+        )
+        version.acl_confirmed_by = None
+        version.acl_confirmed_at = None
+        await append_audit(
+            session,
+            action="school.kb.acl.updated",
+            resource_type="kb_document_version",
+            resource_id=str(version.id),
+            actor_realm="tenant",
+            actor_id=user_id,
+            tenant_id=tenant_id,
+            result="success",
+            metadata={"before": before, "after": after},
+            request_id=request_id,
+        )
+        await session.flush()
+    await _sync_acl_if_built(tenant_id, version_id, tokens=[])
+    return _audience_view(version, new_rows)
+
+
+async def confirm_audiences(
+    *,
+    tenant_id: UUID,
+    scope: DataScopeContext,
+    version_id: UUID,
+    user_id: UUID,
+    request_id: str | None = None,
+) -> AudienceView:
+    """确认版本人群（`school.kb.acl.manage`；空集 409 `ACL_REQUIRED`、已确认 409）。"""
+
+    async with db_session(tenant_id=tenant_id) as session:
+        version, rows_ = await _version_with_audiences(session, tenant_id, version_id, scope)
+        if not rows_:
+            raise KbError("ACL_REQUIRED", "人群 ACL 未配置（先设置查阅人群）", 409)
+        if version.acl_confirmed_at is not None:
+            raise KbError("ACL_ALREADY_CONFIRMED", "人群 ACL 已确认", 409)
+        version.acl_confirmed_by = user_id
+        version.acl_confirmed_at = datetime.now(UTC)
+        await append_audit(
+            session,
+            action="school.kb.acl.confirmed",
+            resource_type="kb_document_version",
+            resource_id=str(version.id),
+            actor_realm="tenant",
+            actor_id=user_id,
+            tenant_id=tenant_id,
+            result="success",
+            metadata={"audience_count": len(rows_)},
+            request_id=request_id,
+        )
+        tokens = audience_tokens(
+            [(row.audience_type, row.audience_id) for row in rows_]
+        )
+        await session.flush()
+    await _sync_acl_if_built(tenant_id, version_id, tokens=tokens)
+    return _audience_view(version, rows_)
+
+
+async def _sync_acl_if_built(tenant_id: UUID, version_id: UUID, *, tokens: list[str]) -> None:
+    """已构建版本同步 payload `acl_tokens`（D2-B；未构建跳过；失败 502 人读码）。
+
+    不按 status 过滤：构建落 `ready`、发布推进为 `published`（KB-05）——同步语义
+    只看「该版本已构建」（有索引行即有 collection）；`retired` 属被替换旧版本行，
+    对同一 version_id 不出现（唯一 `(tenant_id, document_version_id)`）。
+    """
+
+    async with db_session(tenant_id=tenant_id) as session:
+        index_row = await _index_version_of(session, tenant_id=tenant_id, version_id=version_id)
+        collection = index_row.qdrant_collection if index_row is not None else None
+    if collection is None:
+        return
+    settings = get_settings()
+    if not settings.qdrant_url:
+        logger.warning("KB-09 ACL 同步跳过：QDRANT_URL 未配置")
+        return
+    from qdrant_client import AsyncQdrantClient
+
+    from app.kb.indexer import sync_acl_payload
+
+    client = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        await sync_acl_payload(client, collection=collection, version_id=version_id, tokens=tokens)
+    except Exception as exc:
+        logger.warning(
+            "KB-09 ACL 同步失败：%s.%s", type(exc).__module__, type(exc).__name__
+        )
+        raise KbError(
+            "AUDIENCE_SYNC_FAILED",
+            "人群 token 同步失败（配置已保存，请重试设置并确认以恢复一致性）",
+            502,
+        ) from exc
+    finally:
+        await client.close()
+
+
+async def _acl_gate_for_version(session: AsyncSession, version: KbDocumentVersion) -> str | None:
+    """构建/发布门禁判据（与执行期同函数口径）：None=放行，否则 409 错误码。"""
+
+    audience_repository: TenantScopedRepository[KbDocumentAudience] = TenantScopedRepository(
+        session, KbDocumentAudience, tenant_id=version.tenant_id,
+        scope=ScopeBypass(reason="门禁计数按版本定域；version 行已范围校验/加锁"),
+    )
+    scoped_rows = audience_repository.base_query().where(
+        KbDocumentAudience.version_id == version.id
+    )
+    audience_count = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(scoped_rows.subquery())
+            )
+        ).scalar_one()
+    )
+    gate = acl_gate(audience_count, version.acl_confirmed_at)
+    return None if gate == ACL_GATE_ALLOW else gate
 
 
 # ---------------------------------------------------------------------------
@@ -2506,6 +2814,12 @@ async def _publish_version(
                 assert_publishable(version.status)
             except NotPublishableError as exc:
                 raise KbError("KB_NOT_TEST_PASSED", str(exc), 409) from exc
+        # K4 ACL 门禁（KB-09A D1-A）：与构建侧同形（TD-302）；**含 replay 路径**
+        # （重放不是新发布，但确认态是「可发布」不变量——未确认重放同样 409；
+        # 拒绝走既有 publish.denied 审计）
+        acl_gate_result = await _acl_gate_for_version(session, version)
+        if acl_gate_result is not None:
+            raise KbError(acl_gate_result, "人群 ACL 未配置或未确认（K4 fail-closed）", 409)
         index_row = await _index_version_of(session, tenant_id=tenant_id, version_id=version.id)
         if index_row is None:
             raise KbError("KB_INDEX_NOT_READY", "该版本的向量索引记录不存在（请先构建）", 409)
@@ -2530,6 +2844,11 @@ async def _publish_version(
                 assert_publishable(version.status)
             except NotPublishableError as exc:
                 raise KbError("KB_NOT_TEST_PASSED", str(exc), 409) from exc
+        # K4 ACL 门禁（KB-09A D1-A）：与构建侧同形（TD-302）；**含 replay 路径**
+        # （锁版本后权威判定；拒绝走既有 publish.denied 审计）
+        acl_gate_result = await _acl_gate_for_version(session, version)
+        if acl_gate_result is not None:
+            raise KbError(acl_gate_result, "人群 ACL 未配置或未确认（K4 fail-closed）", 409)
 
         row = await _publish_alias_row(
             session, tenant_id=tenant_id, document_id=version.document_id
