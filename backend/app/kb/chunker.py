@@ -6,6 +6,8 @@
 - 按 markdown 标题（#..######）切节，`section_path` = 「标题 > 子标题」路径（≤3 层）；
 - 表格（连续 `|` 行）与代码围栏（``` 块）**整体不拆**（§7.2 硬规则）——超过
   `chunk_size` 也保持整块（这是设计语义，不是 bug）；
+- 整行空图片占位符（MinerU 的 `![](data:image/…;base64,…)` 或 dangling 相对路径引用；
+  TD-310 阶段 1）**不进切块**，按空行段界处理——外链/非空 alt 的图片行是用户内容，保留；
 - 普通段落按 `chunk_size`（码点）累积切子块，相邻子块携带 `overlap_ratio` 的重叠
   字符（按码点截取，TD-259 同口径）；
 - 父块 = 同一节内连续子块的聚合（累计 ≤ `parent_size`；表格/代码子块独立成组），
@@ -29,6 +31,21 @@ CHUNK_TYPE_CHILD = "child"
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
 _CODE_FENCE_RE = re.compile(r"^\s*```")
+
+# TD-310 阶段 1：整行空图片占位符。MinerU 4.0.12 实证（2026-11-12 真实栈 standard 档，
+# 见 docs/design-briefs/M3-TD310-phase1-image-placeholder.md §0.2）：图片引用为
+# `![](data:image/jpeg;base64,<payload>)`，alt 恒空、单行、前后空行分隔——现状会按普通
+# 段落进块（base64 整段成为块文本，分词/嵌入/存储全是垃圾）。相对路径形态
+# （`![](images/x.jpg)`）保留兼容。http(s) 外链、非空 alt、非 base64 的 data URI 是
+# 用户内容，不属占位符（fail-safe 方向：最坏留噪音块，绝不丢语义）。
+# base64 字符集不含 `)`，括号闭合判定安全；payload 不允许空白（MinerU 单行输出，
+# 若未来出现换行包裹会漏滤——漏滤方向安全）。
+_EMPTY_IMAGE_LINE_RE = re.compile(
+    r"^\s*!\[\s*\]\(\s*"
+    r"(?:data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+"  # MinerU 实证形态
+    r"|[A-Za-z0-9_@%./+-]+\.[A-Za-z0-9]+"  # 相对路径（ASCII + 扩展名）
+    r")\s*\)\s*$"
+)
 
 # jieba 分词器线程不安全且首次加载慢：进程内只初始化一次（worker 生命周期复用）。
 _jieba_ready = False
@@ -146,6 +163,12 @@ def split_into_blocks(markdown: str) -> list[Block]:
             table_lines.append(line)
             continue
         flush_table()
+        if _EMPTY_IMAGE_LINE_RE.match(line):
+            # TD-310 阶段 1：空图片占位符不进切块——按「空行（段界）」处理：占位符无
+            # 检索语义，丢弃文本但保留前后段落边界，防止跨图内容合并成同一段。
+            if paragraph and paragraph[-1] != "":
+                paragraph.append("")
+            continue
         if line.strip() == "":
             # 空行是段界标记：同节连续段落合并进同一个 Block（由切块窗口统一处理），
             # 避免小段落各自成块导致父块/重叠大量复制

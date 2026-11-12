@@ -42,6 +42,12 @@ from tests.support.kb_env import (
 
 pytestmark = [pytest.mark.integration]
 
+# MinerU 4.0.12 实证形态（TD-310 阶段 1，简报 M3-TD310-phase1-image-placeholder.md §0.2）：
+# 图片引用为 `![](data:image/jpeg;base64,<payload>)`，alt 恒空、整行独占。
+_MINERU_PLACEHOLDER = (
+    "![](data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAg)"
+)
+
 
 class FakeParser:
     """脚本化解析器：按调用序返回成功/失败（记调用次数供降级断言）。
@@ -301,6 +307,44 @@ async def test_build_pipeline_reaches_ready_with_chunks_and_qdrant(
         await client_q.delete_collection(collection)
     finally:
         await client_q.close()
+
+
+async def test_build_pipeline_filters_image_placeholder_lines(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TD-310 阶段 1：携带占位符的 markdown → READY 后 kb_chunks 无占位符文本。
+
+    MinerU 实证形态（data:image base64 整行）与兼容形态（相对路径整行）都不进块；
+    图前/图后文本保留（段界语义，D2-A）。
+    """
+
+    markdown = (
+        "# 手册\n\n"
+        "图前段落，图书馆开放时间。\n\n"
+        f"{_MINERU_PLACEHOLDER}\n\n"
+        "![](images/figure-01.jpg)\n\n"
+        "图后段落，请假需要辅导员审批。\n"
+    )
+    _patch_ports(monkeypatch, FakeParser([ParsedDocument(markdown=markdown)]))
+    job_id, _doc_id, version_id = await _seed_approved_version(env)
+
+    result = await build_kb_version({}, str(env.tenant_a), str(version_id))
+
+    assert result["status"] == "ready", result
+    job = await rows("select status from kb_build_jobs where id = :id", id=str(job_id))
+    assert job[0]["status"] == "READY"
+    chunk_rows = await rows(
+        "select chunk_type, text_markdown from kb_chunks where document_version_id = :id",
+        id=str(version_id),
+    )
+    assert chunk_rows
+    for row in chunk_rows:
+        assert "data:image" not in row["text_markdown"]
+        assert "![" not in row["text_markdown"]
+        assert "images/" not in row["text_markdown"]
+    joined = "\n".join(row["text_markdown"] for row in chunk_rows)
+    assert "图书馆开放时间" in joined
+    assert "请假需要辅导员审批" in joined
 
 
 async def test_tier_degradation_records_fallback_reason(
