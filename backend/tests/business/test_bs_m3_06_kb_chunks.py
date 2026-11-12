@@ -149,6 +149,10 @@ async def _chain_to_ready(
     )
     assert approved.status_code == 200, approved.text
 
+    # K4 门禁接线（卡 4）：构建前配 all+确认
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, version_id)
     built = await client.post(
         f"/api/v1/school/kb/document-versions/{version_id}/build",
         headers=await login(client, KB_BUILDER),

@@ -44,6 +44,8 @@ KB_B_PUBLISHER = "kb-b-publisher"
 KB_CHUNK_VIEWER = "kb-chunk-viewer"
 KB_CHUNK_SELF = "kb-chunk-self"
 KB_B_CHUNK_VIEWER = "kb-b-chunk-viewer"
+# KB-09：人群配置/确认（school.kb.acl.manage；矩阵 §3 校管△ 非默认、超管√）
+KB_ACL_MANAGER = "kb-acl-manager"
 
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 MD = "# \u6821\u89c4\n\n\u6309\u65f6\u5230\u6821\u3002\n".encode()
@@ -195,6 +197,15 @@ async def _seed_data(engine: AsyncEngine) -> tuple[UUID, UUID]:
             "school.approval.todo",
             "school.kb.view",
         ),
+        scope_types=("school",),
+    )
+    # KB-09：人群配置/确认（acl.manage + view；scope school）
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_ACL_MANAGER,
+        password=PASSWORD,
+        permissions=("school.kb.acl.manage", "school.kb.view"),
         scope_types=("school",),
     )
     return tenant_a, tenant_b

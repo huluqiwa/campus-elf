@@ -356,6 +356,8 @@ async def main() -> None:
                 "school.kb.delete",
                 # KB-06B：分块预览（全栈链③断言列表/统计与表格保真；构建方角色本就属 KB √ 列）
                 "school.kb.view_chunks",
+                # KB-09：人群配置/确认（全栈链②③构建前配置+确认 ACL——门禁 fail-closed）
+                "school.kb.acl.manage",
             ),
             scope_types=("school",),
         )

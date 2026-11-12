@@ -220,6 +220,12 @@ async def _seed_approved_version(
         version=str(version_id),
         creator=str(creator),
     )
+    # K4 ACL（KB-09A 卡 4）：直落库种子的执行期门禁需要已确认人群——统一配
+    # ("all", None)（检索侧用户恒注入 all，既有断言零漂移）；门禁语义用例在
+    # test_kb_audiences.py 显式配具体人群或跳过。
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, version_id)
     return job_id, doc_id, version_id
 
 

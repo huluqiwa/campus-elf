@@ -89,6 +89,8 @@ async def seed_test_passed_version(
     title: str = "发布用文档",
     markdown: str = MARKDOWN,
     embedder: Any | None = None,
+    with_audience: bool = True,
+    run_build: bool = True,
 ) -> tuple[UUID, UUID]:
     """直接落文档/版本（APPROVED）→ 真实构建到 READY → 置 TEST_PASSED。
 
@@ -99,6 +101,10 @@ async def seed_test_passed_version(
     markdown 可传自定义内容（KB-06 分块预览用多章节/表格/代码结构）。
     embedder 可注入构建侧嵌入实现（KB-07 检索测试用词袋确定性向量，默认
     FakeEmbedder 哈希向量向后兼容；patch_ports 之后再 setattr，覆盖生效）。
+    with_audience=False 跳过人群配置（KB-09 门禁用例验证 409；默认 True＝
+    卡 4：既有构建链路统一配 `("all", None)` 已确认，构建可达）。
+    run_build=False 跳过任务插入与构建（只落 APPROVED 版本——KB-09 门禁用例
+    自己经 HTTP 创建构建以验证 409 零副作用）。
     """
 
     patch_ports(monkeypatch, FakeParser(ParsedDocument(markdown=markdown)))
@@ -168,6 +174,8 @@ async def seed_test_passed_version(
         await execute(
             "update kb_documents set status = 'APPROVED' where id = :doc", doc=str(doc)
         )
+    if not run_build:
+        return doc, version_id
     job_id = uuid4()
     await execute(
         """
@@ -179,6 +187,10 @@ async def seed_test_passed_version(
         version=str(version_id),
         creator=creator_id,
     )
+    if with_audience:
+        from tests.support.kb_audience_seed import configure_audiences
+
+        await configure_audiences(env.tenant_a, version_id)
     result = await build_kb_version({}, str(env.tenant_a), str(version_id))
     assert result["status"] == "ready", result
     await execute(

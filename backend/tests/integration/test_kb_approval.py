@@ -500,6 +500,11 @@ async def test_build_created_for_approved_and_second_conflicts(
     approver_headers = await login(client, KB_APPROVER)
     assert (await _decide(client, approver_headers, request_id, "approve")).status_code == 200
 
+    # K4 门禁接线（KB-09A 卡 4）：构建前配 all+确认
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, UUID(version_id))
+
     builder_headers = await login(client, KB_BUILDER)
     first = await client.post(
         f"/api/v1/school/kb/document-versions/{version_id}/build", headers=builder_headers
@@ -616,6 +621,11 @@ async def test_concurrent_build_creation_yields_exactly_one_job(
     request_id = (await _submit(client, uploader, version_id)).json()["request_id"]
     approver = await login(client, KB_APPROVER)
     assert (await _decide(client, approver, request_id, "approve")).status_code == 200
+
+    # K4 门禁接线（KB-09A 卡 4）：并发两路同一版本，构建前配 all+确认
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, UUID(version_id))
 
     builder = await login(client, KB_BUILDER)
     first, second = await asyncio.gather(

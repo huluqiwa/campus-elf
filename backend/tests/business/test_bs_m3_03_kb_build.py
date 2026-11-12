@@ -170,6 +170,11 @@ async def test_bs_m3_03_real_engine_build_reaches_ready(
     )
     assert approve.status_code == 200, approve.text
 
+    # K4 门禁接线（卡 4）：构建前配 all+确认
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, UUID(version_id))
+
     # 4) 创建构建（HTTP）→ BUILD_QUEUED → worker 入口执行（测试内直调，arq worker 不在进程内）
     build = await client.post(
         f"/api/v1/school/kb/document-versions/{version_id}/build", headers=builder

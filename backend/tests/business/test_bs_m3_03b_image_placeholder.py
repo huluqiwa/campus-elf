@@ -221,6 +221,10 @@ async def _upload_and_approve(client: AsyncClient, pdf: bytes, run_id: str) -> s
 async def _create_build_job(
     env: KbEnv, client: AsyncClient, version_id: str
 ) -> str:
+    # K4 门禁接线（卡 4）：构建前配 all+确认
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, UUID(version_id))
     builder = await login(client, KB_BUILDER)
     build = await client.post(
         f"/api/v1/school/kb/document-versions/{version_id}/build", headers=builder
@@ -294,6 +298,10 @@ async def test_bs_m3_03b_image_only_pdf_fails_with_chunk_empty(
     """纯图 PDF（无正文）→ 构建显式失败 CHUNK_EMPTY（既有漏斗承接，无新代码）。"""
 
     version_id = await _upload_and_approve(client, _image_pdf(image_only=True), "onlyimg")
+    # K4 门禁接线（卡 4）：构建前配 all+确认（CHUNK_EMPTY 在门禁之后的切块阶段触发）
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, UUID(version_id))
     builder = await login(client, KB_BUILDER)
     build = await client.post(
         f"/api/v1/school/kb/document-versions/{version_id}/build", headers=builder

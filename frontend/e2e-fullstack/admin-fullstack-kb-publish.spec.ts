@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { field } from "../e2e/helpers/locators";
-import { apiGet, apiLogin, apiPost, loadAccounts, type E2EAccounts } from "./helpers/support";
+import { apiGet, apiLogin, apiPost, apiPut, loadAccounts, type E2EAccounts } from "./helpers/support";
 
 // M3 KB-05B + TD-292 全栈 E2E：审批 → 构建 → 测试 → 发布 → 下线 → 删除 真实链路（UI 驱动）。
 //
@@ -83,6 +83,27 @@ async function listDocuments(accounts: E2EAccounts, token: string): Promise<KbDo
   const response = await apiGet(accounts, `${API}/school/kb/documents?limit=100`, token);
   expect(response.status).toBe(200);
   return (response.json as KbPage<KbDocument>).items;
+}
+
+/** KB-09 门禁接线：配置并确认版本人群（all；构建/发布前 fail-closed——publisher 持 acl.manage）。 */
+async function configureAcl(
+  accounts: E2EAccounts,
+  token: string,
+  versionId: string,
+): Promise<void> {
+  const put = await apiPut(
+    accounts,
+    `${API}/school/kb/document-versions/${versionId}/audiences`,
+    token,
+    { audiences: [{ audience_type: "all", audience_id: null }] },
+  );
+  expect(put.status, `配置人群异常：${JSON.stringify(put.json)}`).toBe(200);
+  const confirm = await apiPost(
+    accounts,
+    `${API}/school/kb/document-versions/${versionId}/audiences/confirm`,
+    token,
+  );
+  expect(confirm.status, `确认人群异常：${JSON.stringify(confirm.json)}`).toBe(200);
 }
 
 /** 轮询文档状态到目标值（文档行镜像当前版本状态，design §4.3）。 */
@@ -222,6 +243,9 @@ test("发布链①：提交审批 → 构建 409 门禁 → publisher 403 审批
   expect(afterApprove.status, `详情响应异常：${JSON.stringify(afterApprove.json)}`).toBe(200);
   expect((afterApprove.json as KbDocument).status).toBe("APPROVED");
 
+  // KB-09 门禁接线：构建前配置并确认人群（publisher UI 流同口径）
+  await configureAcl(accounts, publisherToken, versionId ?? "");
+
   // publisher UI：登出换账号 → 创建构建 → 轮询到 READY（TEI embedding + Qdrant 索引真实执行）
   await logoutViaUi(page);
   await loginViaUi(page, publisher);
@@ -291,6 +315,7 @@ test("发布链②：测试沙箱 → TEST_PASSED → UI 发布 → 回滚 409 �
     approverToken,
   );
   expect(approve.status).toBe(200);
+  await configureAcl(accounts, publisherToken, versionId ?? "");
   const build = await apiPost(
     accounts,
     `${API}/school/kb/document-versions/${versionId}/build`,
@@ -448,6 +473,7 @@ test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({
   );
   expect(request, `审批待办里应有 ${title}`).toBeTruthy();
   await apiPost(accounts, `${API}/school/approvals/${request?.id}/approve`, approverToken);
+  await configureAcl(accounts, publisherToken, versionId ?? "");
   const build = await apiPost(
     accounts,
     `${API}/school/kb/document-versions/${versionId}/build`,

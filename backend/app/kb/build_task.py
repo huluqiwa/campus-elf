@@ -31,10 +31,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.writer import append_audit
 from app.config import get_settings
-from app.db.models.kb import KbBuildJob, KbChunk, KbDocument, KbDocumentVersion, KbIndexVersion
+from app.db.models.kb import (
+    KbBuildJob,
+    KbChunk,
+    KbDocument,
+    KbDocumentAudience,
+    KbDocumentVersion,
+    KbIndexVersion,
+)
 from app.db.models.kb_events import KbBuildEvent
 from app.db.repository import ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
+from app.kb.audience import (
+    ACL_GATE_ALLOW,
+    GATE_ACL_REQUIRED,
+    acl_gate,
+    audience_tokens,
+)
 from app.kb.chunker import CHUNK_TYPE_CHILD, CHUNK_TYPE_PARENT, RawChunk, chunk_markdown
 from app.kb.embedding import (
     EmbeddingError,
@@ -163,6 +176,58 @@ def _version_repository(
         tenant_id,
         scope=ScopeBypass(reason="构建任务：按版本 id 精确操作，系统执行者"),
     )
+
+
+def _audience_repository(
+    session: AsyncSession, tenant_id: UUID
+) -> TenantScopedRepository[KbDocumentAudience]:
+    return TenantScopedRepository(
+        session,
+        KbDocumentAudience,
+        tenant_id,
+        scope=ScopeBypass(reason="构建任务：按版本读人群 token，系统执行者"),
+    )
+
+
+async def _acl_gate_for_build(tenant_id: UUID, version_id: UUID) -> str | None:
+    """执行期 ACL 门禁（K4 fail-closed；KB-09A D1-A）：返回 ACL_GATE_ALLOW 或 409 错误码。
+
+    与创建端点同判据（`audience.acl_gate`）：0 条 → `ACL_REQUIRED`、非空未确认 →
+    `ACL_UNCONFIRMED`；不过 → BuildPipelineError 落 job FAILED（可重试语义）。
+    """
+
+    async with db_session(tenant_id=tenant_id) as session:
+        version = await _version_repository(session, tenant_id).get(version_id)
+        if version is None:
+            return GATE_ACL_REQUIRED
+        audience_repository = _audience_repository(session, tenant_id)
+        scoped_rows = audience_repository.base_query().where(
+            KbDocumentAudience.version_id == version_id
+        )
+        audience_count = int(
+            (
+                await session.execute(
+                    sa_select(func.count()).select_from(scoped_rows.subquery())
+                )
+            ).scalar_one()
+        )
+        gate = acl_gate(audience_count, version.acl_confirmed_at)
+        return None if gate == ACL_GATE_ALLOW else gate
+
+
+async def _confirmed_audience_tokens(tenant_id: UUID, version_id: UUID) -> list[str]:
+    """确认人群 → payload token 列表（`type:<id>` / `all`；`audience.audience_tokens`）。"""
+
+    async with db_session(tenant_id=tenant_id) as session:
+        audience_repository = _audience_repository(session, tenant_id)
+        rows_ = (
+            await session.execute(
+                audience_repository.base_query()
+                .where(KbDocumentAudience.version_id == version_id)
+                .with_only_columns(KbDocumentAudience.audience_type, KbDocumentAudience.audience_id)
+            )
+        ).all()
+    return audience_tokens([(row.audience_type, row.audience_id) for row in rows_])
 
 
 def _document_repository(
@@ -614,6 +679,9 @@ async def _run_pipeline(
     )
     collection = collection_name(tenant_id, version_id)
     sparse_vectors_all = version_sparse_weights([chunk.text for chunk in raw_chunks])
+    # K4 payload token 快照（D2-B）：执行期门禁已过，此处读当前确认人群写入每 chunk；
+    # 构建后 ACL 变更由 service 层 `sync_acl_payload` 即时重写（spec :309）。
+    acl_tokens = await _confirmed_audience_tokens(tenant_id, version_id)
     points = [
         IndexPoint(
             chunk_id=chunk_ids[position],
@@ -651,6 +719,7 @@ async def _run_pipeline(
             version_id=version_id,
             doc_title=doc_title,
             points=points,
+            acl_tokens=acl_tokens,
         )
     finally:
         await client.close()
@@ -723,6 +792,12 @@ async def build_kb_version(ctx: dict[str, Any], tenant_id: str, version_id: str)
     claimed_attempt = job.attempt
 
     try:
+        # ---------- ACL 门禁（K4 fail-closed 执行期二次校验；KB-09A 简报 D1-A）----------
+        # 创建端点已过门禁，但「创建后被清确认/直落库种子」在取件时再校验一次；
+        # 不过 → job FAILED `ACL_UNCONFIRMED`（确认后 retry/create 可达，可重试语义）。
+        gate = await _acl_gate_for_build(tid, vid)
+        if gate is not None:
+            raise BuildPipelineError(gate, "人群 ACL 未配置或未确认（fail-closed，K4）")
         store = build_object_store(resolved)
         prepared, collection = await _run_pipeline(
             tid,
