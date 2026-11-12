@@ -1,7 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { field } from "../e2e/helpers/locators";
-import { apiGet, apiLogin, apiPost, apiPut, loadAccounts, type E2EAccounts } from "./helpers/support";
+import {
+  apiGet,
+  apiLogin,
+  apiPost,
+  apiPut,
+  loadAccounts,
+  type E2EAccounts,
+} from "./helpers/support";
 
 // M3 KB-05B + TD-292 全栈 E2E：审批 → 构建 → 测试 → 发布 → 下线 → 删除 真实链路（UI 驱动）。
 //
