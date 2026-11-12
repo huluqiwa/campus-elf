@@ -161,3 +161,21 @@ if _EMPTY_IMAGE_LINE_RE.match(line):
 ## 7. 高风险确认
 
 本点**不属高风险类**（不碰认证/租户隔离/权限/状态机/删除/发布/加密/AI 护栏；无新迁移/新码/审计面变化；纯函数层小改动）。风险集中在：(a) 识别口径与真实 MinerU 形态的一致性——已由第 0 步实证钉住（§0.2）；(b) chunker 行为变更的回归面——已机械核验零夹具漂移（卡 3）。决策卡 1-4 已于 2026-11-12 经用户拍板（全按推荐）；卡 1 的实证修正（相对路径 → data URI 为主 + 相对路径兼容）随本简报请用户确认后编码。
+
+## 8. 实现结果（2026-11-13，TD-310 阶段 1）
+
+**交付清单**（PR #67，7 文件 +680/-2）：生产代码 `backend/app/kb/chunker.py`（+`_EMPTY_IMAGE_LINE_RE` 正则与段界分支 + 模块 docstring 一条目，+23 行——`app/` 仅此一文件）；测试 `backend/tests/test_kb_chunker_unit.py`（+10）、`backend/tests/integration/test_kb_build_worker.py`（+1 与实证形态常量）、`backend/tests/business/test_bs_m3_03b_image_placeholder.py`（新文件，2 例，含运行时 PDF 生成器——手工 PDF + 未压缩 DeviceRGB 图块，BS-M3-03 `SMOKE_PDF` 先例）；文档 本简报 + `docs/tech-debt.md`（TD-310 处置「已完成（阶段 1）」）+ `docs/test-plan.md`（BS-12 证据）。无新迁移、无新权限码、parser 适配器/build_task 零改动、前端零改动。
+
+**实现注记**：
+
+1. **TDD 红→绿证据**：单元 5 条核心语义用例先红（红相失败信息即「占位符成块」现状：`text='![](data:image/jpeg;base64,…'`）→ 实现后全绿 16；集成新用例的红相在实现落地后补采——`git stash` 只摘 `chunker.py` 改动复跑，`data:image` 确入 `kb_chunks.text_markdown`（1 failed）→ 恢复后绿（40.48s）。
+2. **审查 Minor f-3**：业务场景断言消息「（段界语义，不与图后合并）」强于断言本身（`joined` 两标记都在即可，D2-A 累积语义下两标记合法地可能落入同一 child chunk）——消息改弱为「图前文本应保留/图后文本应保留」；严格段界语义由单测 `test_placeholder_line_acts_as_paragraph_break`（紧凑输入）钉住，断言不变。
+3. **审查 Minor f-1**：TD-310 台账更新并入本 PR（处置「已完成（阶段 1）」+ 第 0 步实证形态补记）；f-2（handoff/README「当前状态」）沿合并后 docs 回填 PR 流程（PR #64/#66 先例）。
+4. **CI skipped 读数口径**：PR/main push CI 均为 **1103 passed + 3 skipped**——基线 1092+1 + 本点 11 passed（10 单测 + 1 集成）+ BS-03b 两例真实引擎 CI 探测跳过（TD-295 先例；若两例在 CI 通过则应为 1105+1，算术自洽；本地 8 例业务场景全绿为真实栈背书）。
+5. **业务场景耗时**：本地真实引擎两例合计 92.09s（MinerU 模型热态；第 0 步冒烟单页含图 140.6s 为含模型加载口径）。
+
+**本地门禁读数**（2026-11-13，win32 / CPython 3.13）：单元 `test_kb_chunker_unit.py` **16 passed**；集成 **58 passed**（`test_kb_build_worker.py` 全量含新 1 条 + `test_kb_chunks.py` + `test_kb_retrieval_test.py` + `test_worker_settings.py`，503.38s）；业务场景 **8 passed**（BS-03b 2 + BS-03 1 + KB-05 发布链 5，175.69s）；`ruff`（app/tests/scripts/alembic）All checks passed；`mypy --no-incremental` **266 文件 0 错误**；`bandit`×2 exit 0（CI 同参：app `-x tests` / alembic `-s B608`）；`alembic check` 无漂移（无新迁移）。
+
+**独立审查**（第 1 轮，独立只读子智能体审 staged diff 7 文件 +680/-2，核验清单 A-I 逐项实读 + 隔离进程实证：正则对 200KB base64 行命中 0.34ms/不命中 2.9ms 线性扫描、中和过滤器复现 3 条核心用例红、PDF xref/流长度程序化校验、16 条单测实跑）：**0 Blocker / 0 Major / 3 Minor**，结论「可提交」。三条 Minor 全部处置（见实现注记 2-3 与 docs 回填）；安全/租户隔离/权限/状态机/数据一致性/AI 护栏类未发现问题。
+
+**PR 与合并事实（2026-11-13）**：PR #67（head 分支 `feature/m3-td310a-image-placeholder-filter`，1 commit `bf98000`）→ rebase 合并为 **`ff0472c`**，分支已删；合并授权由用户在 CI 全绿后确认。PR CI：backend run `43257836210` **success（23:08，1103 passed + 3 skipped）**、四包分支覆盖率 79.92%（211/264，门槛 73）/ 82.41%（417/506，门槛 82）/ 81.25%（13/16，门槛 81）/ 66.67%（4/6，门槛 66）与基线逐包一致全过（TOTAL 90%）；security run `43257836334` success；frontend/evals 按路径过滤未触发。合并后 `main`（tip `ff0472c`）推送 CI：backend run `43262727435` **success（30:06，1103 passed + 3 skipped，四包覆盖率与 PR run 逐包一致）**、security run `43262727160` success。**TD-310 阶段 1 收口**；阶段 2 维持 M4/M3 边界评审口径。
