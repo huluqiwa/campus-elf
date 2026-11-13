@@ -26,10 +26,16 @@ from app.rbac.scopes import DataScopeContext, scope_predicate
 
 @dataclass(frozen=True, slots=True)
 class ScopeBypass:
-    """显式声明「这条路径不按数据范围过滤」。
+    """显式声明「这条路径不按数据范围过滤」（tenant 过滤**保留**）。
 
-    只允许用在**本身已按 user_id 精确锁定本人**的自助路径（如会话设备管理）。
-    理由必填：空理由的绕过与忘记配范围无法区分，所以直接拒绝构造。
+    允许的两类用法（2026-11-14 KB-09B docs 回填按实际口径改写，KB-09B 审查 m3）：
+    1. **本人自助路径**——本身已按 user_id 精确锁定本人（如会话设备管理）；
+    2. **身份侧系统判据**——按租户 id + 主键/外键**等值锁定**非本人的对象
+       （如 KB-06A 分块按版本归属回查、KB-09B 人群解析器按目标用户实时解析），
+       绕过的只是 school/self/class 数据范围谓词，租户边界由 tenant 谓词 +
+       FORCE RLS 双防线兜住。
+    每处使用必须给 `reason` 留痕（空理由的绕过与忘记配范围无法区分，直接拒绝
+    构造）；RLS 不可被本类绕过——它只作用于应用层数据范围谓词。
     """
 
     reason: str
