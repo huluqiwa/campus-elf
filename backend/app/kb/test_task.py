@@ -8,7 +8,12 @@
 - **三段式短事务**（build_task 同款）：取件（READY/TEST_* → TESTING）→ 事务外
   逐 case 检索 → 收口（TEST_PASSED/FAILED + metrics_json + 审计）；
 - **活跃唯一**：部分唯一索引 `(tenant_id, version_id) WHERE status='TESTING'` 兜底；
-- **审计**：`school.kb.test.completed`（系统执行者）。
+- **审计**：`school.kb.test.completed`（系统执行者）；
+- **判分视角（KB-09B，简报 §3.2.3）**：`run.as_audiences` 显式人群优先（创建时
+  结构校验，worker 重校验防御脏行）；否则发起人 `started_by` 执行期实时解析
+  （调岗后重跑按新部门）。解析空集/异常 → 空 token 集 → **不发查询**
+  （Qdrant 空 Filter 匹配全部点，fail-closed）→ 逐 case 判 FAIL（宁严勿松）；
+  不支持 as_user_id/ignore_acl（milestone 口径）。
 """
 
 import logging
@@ -23,8 +28,10 @@ from app.config import get_settings
 from app.db.models.kb import KbDocument, KbDocumentVersion, KbTestRun, KbTestSet
 from app.db.repository import ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
+from app.kb.audience import AudienceValidationError, parse_audience_tokens, resolve_audience_tokens
+from app.kb.audience_source import RepositoryAudienceSource
 from app.kb.embedding import EmbeddingPort, embed_input_text, version_sparse_weights
-from app.kb.indexer import collection_name, search_points
+from app.kb.indexer import acl_query_filter, collection_name, search_points
 from app.kb.status import (
     KB_STATUS_TEST_FAILED,
     KB_STATUS_TEST_PASSED,
@@ -216,6 +223,34 @@ async def run_kb_test(ctx: dict[str, Any], tenant_id: str, version_id: str) -> d
     run, _version, document = claimed
 
     try:
+        # ---- KB-09B 判分视角（fail-closed；简报 §3.2.3）----
+        raw_as_audiences = run.as_audiences
+        if raw_as_audiences is not None:
+            try:
+                view_tokens = parse_audience_tokens(list(raw_as_audiences))
+            except AudienceValidationError as exc:
+                logger.warning("测试运行 as_audiences 非法（fail-closed 空集）：%s", exc.code)
+                view_tokens = []
+        else:
+            async with db_session(tenant_id=tid) as session:
+                source = RepositoryAudienceSource(session, tid)
+                try:
+                    # 发起人已删除 → 空集 FAIL（宁严勿松；与检索测试 as_user_id
+                    # 删态 404 同口径，审查 m1：locked/disabled 仍可判分）
+                    user = await source.load_user(run.started_by)
+                    if user is None or user.status == "deleted":
+                        view_tokens = []
+                    else:
+                        view_tokens = await resolve_audience_tokens(source, run.started_by)
+                except Exception as exc:  # 解析异常=不召回（fail-closed 空集）
+                    logger.warning(
+                        "KB-09 人群解析失败（fail-closed 空集）：%s.%s",
+                        type(exc).__module__,
+                        type(exc).__name__,
+                    )
+                    view_tokens = []
+        query_filter = acl_query_filter(view_tokens) if view_tokens else None
+
         # 取测试集与用例
         async with db_session(tenant_id=tid) as session:
             test_set = await TenantScopedRepository(
@@ -259,18 +294,24 @@ async def run_kb_test(ctx: dict[str, Any], tenant_id: str, version_id: str) -> d
         try:
             for case in case_rows:
                 started = time.monotonic()
-                query_text = embed_input_text(
-                    document_title=document.title, section_path=None, chunk_text=case.question
-                )
-                dense_vectors = await embedder.embed([query_text])
-                sparse = version_sparse_weights([case.question])[0]
-                results = await search_points(
-                    client,
-                    collection=collection,
-                    dense=dense_vectors[0],
-                    sparse=sparse,
-                    top_k=10,
-                )
+                if query_filter is None:
+                    # 空集 fail-closed：不发查询也不做无谓嵌入——检索零召回与
+                    # expected 非空判 FAIL 等价（简报 §3.2.3）
+                    results: list[dict[str, Any]] = []
+                else:
+                    query_text = embed_input_text(
+                        document_title=document.title, section_path=None, chunk_text=case.question
+                    )
+                    dense_vectors = await embedder.embed([query_text])
+                    sparse = version_sparse_weights([case.question])[0]
+                    results = await search_points(
+                        client,
+                        collection=collection,
+                        dense=dense_vectors[0],
+                        sparse=sparse,
+                        top_k=10,
+                        query_filter=query_filter,
+                    )
                 elapsed_ms = round((time.monotonic() - started) * 1000, 1)
                 retrieved_ids = {item["chunk_id"] for item in results}
                 expected = set(case.expected_chunk_ids or [])

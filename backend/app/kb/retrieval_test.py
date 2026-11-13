@@ -14,10 +14,16 @@
   存在性），chunk 回查走 `TenantScopedRepository + ScopeBypass`（kb_chunks
   无归属列，KB-06A 卡 7 同款），Qdrant 按 `collection_name(tenant, version)`
   天然定域；
+- **ACL 视角（KB-09B，简报 §3.2）**：默认操作者自身人群 token 过滤（与 C 端
+  同一套解析器）；`as_user_id`（同租校验，不存在/跨租/已删除 404 同文）与
+  `as_audiences`（诊断 token 数组，二选一）可替换视角；`ignore_acl` 仅
+  `school.kb.retrieval_test.unfiltered` + 强制审计。解析空集/异常 → 空 token
+  集 → **不发查询**（Qdrant 空 Filter 匹配全部点，fail-closed 不下发）；
 - **重排永不 5xx**：超时 → `skipped`、其他失败 → `failed`，一律降级为融合序；
 - 只读、不落库、无新迁移、日志零 query 明文。
 """
 
+import hashlib
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -31,9 +37,16 @@ from app.config import get_settings
 from app.db.models.kb import KbChunk, KbDocument, KbDocumentVersion
 from app.db.repository import ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
+from app.kb.audience import (
+    AudienceValidationError,
+    parse_audience_tokens,
+    resolve_audience_tokens,
+)
+from app.kb.audience_source import RepositoryAudienceSource
 from app.kb.embedding import EmbeddingError, EmbeddingPort, embed_input_text, version_sparse_weights
 from app.kb.indexer import (
     IndexError_,
+    acl_query_filter,
     collection_name,
     search_dense,
     search_points,
@@ -104,6 +117,8 @@ class RetrievalRow:
     sparse: RouteHit | None
     rerank_score: float | None
     final_rank: int
+    # KB-09B：该块 payload `acl_tokens` ∩ 视角 token（可解释召回；空集=非 ACL 命中）
+    acl_matched_tokens: list[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +132,10 @@ class RetrievalTestResult:
     rerank_status: RerankStatus
     latency_ms: float
     results: list[RetrievalRow]
+    # KB-09B：视角解析结果回显（空集=解析失败/空集 fail-closed，可归因）；
+    # acl_filter_applied=False 仅在 ignore_acl（未过滤诊断视图）
+    resolved_audience_tokens: list[str]
+    acl_filter_applied: bool
 
 
 # ---------------------------------------------------------------------------
@@ -145,21 +164,25 @@ def build_rows(
     chunk_rows: Mapping[UUID, KbChunk],
     dense_hits: Sequence[dict[str, Any]],
     sparse_hits: Sequence[dict[str, Any]],
+    view_tokens: Sequence[str] = (),
 ) -> list[RetrievalRow]:
     """融合序行构造：RRF 名次 = 列表位置；逐路分数按 chunk_id 归位。
 
     索引有而 PG 缺行的分块跳过（构建双对账已保证一致，防御性容错），跳过后
-    final_rank 仍连续。
+    final_rank 仍连续。`view_tokens`（KB-09B）：逐行计算 payload `acl_tokens`
+    与视角 token 的交集（可解释召回；视角空集 → 每行交集为空）。
     """
 
     dense_map = route_rank_map(dense_hits)
     sparse_map = route_rank_map(sparse_hits)
+    token_set = set(view_tokens)
     rows: list[RetrievalRow] = []
     for hit in fused:
         chunk_id = UUID(str(hit["chunk_id"]))
         chunk = chunk_rows.get(chunk_id)
         if chunk is None:
             continue
+        payload_tokens = set((hit.get("payload") or {}).get("acl_tokens") or [])
         rows.append(
             RetrievalRow(
                 chunk_id=chunk_id,
@@ -174,6 +197,7 @@ def build_rows(
                 sparse=sparse_map.get(str(chunk_id)),
                 rerank_score=None,
                 final_rank=len(rows) + 1,
+                acl_matched_tokens=sorted(payload_tokens & token_set),
             )
         )
     return rows
@@ -236,18 +260,30 @@ async def run_retrieval_test(
     *,
     tenant_id: UUID,
     scope: DataScopeContext,
+    operator_user_id: UUID,
     version_id: UUID,
     query: str,
     top_k: int = 10,
     with_rerank: bool = False,
+    as_user_id: UUID | None = None,
+    as_audiences: list[str] | None = None,
+    ignore_acl: bool = False,
 ) -> RetrievalTestResult:
-    """单 query 检索测试：三查询旁路合并 + 可选重排；只读，不落库。
+    """单 query 检索测试：三查询旁路合并 + 可选重排 + ACL 视角过滤；只读。
+
+    视角（KB-09B，简报 §3.2.3）：默认操作者自身；`as_user_id` 同租校验
+    （不存在/跨租/已删除 404 同文不泄露）；`as_audiences` 诊断 token 数组
+    （结构校验 422；与 as_user_id 二选一）；`ignore_acl` 不加 filter（权限在
+    路由层校验）+ 强制审计。解析空集/异常 → 空 token 集 → 不发查询。
 
     异常:
         KbError: 版本不可见（`VERSION_NOT_FOUND`，404）、无有效索引
-            （`RETRIEVAL_TEST_NOT_INDEXED`，409）、嵌入/检索基础设施故障
-            （`RETRIEVAL_TEST_EMBED_FAILED` / `RETRIEVAL_TEST_SEARCH_FAILED`
-            / `QDRANT_UNAVAILABLE`，502）。重排失败不抛——降级 + `rerank_status`。
+            （`RETRIEVAL_TEST_NOT_INDEXED`，409）、视角冲突/非法
+            （`RETRIEVAL_TEST_PERSPECTIVE_CONFLICT` / `AUDIENCE_TOKEN_*`，422）、
+            视角用户不存在（`RETRIEVAL_TEST_AS_USER_NOT_FOUND`，404）、
+            嵌入/检索基础设施故障（`RETRIEVAL_TEST_EMBED_FAILED` /
+            `RETRIEVAL_TEST_SEARCH_FAILED` / `QDRANT_UNAVAILABLE`，502）。
+            重排失败不抛——降级 + `rerank_status`。
     """
 
     started = time.monotonic()
@@ -272,6 +308,78 @@ async def run_retrieval_test(
         resolved_version_id = version.id
         document_title = document.title
 
+    # ---- KB-09B 视角解析（fail-closed；简报 §3.2.3）----
+    if as_user_id is not None and as_audiences is not None:
+        raise KbError(
+            "RETRIEVAL_TEST_PERSPECTIVE_CONFLICT", "as_user_id 与 as_audiences 只能二选一", 422
+        )
+    if as_audiences is not None:
+        # 诊断 token 模拟：结构校验、不做同租存在性校验（collection 租户定域）
+        try:
+            view_tokens = parse_audience_tokens(as_audiences)
+        except AudienceValidationError as exc:
+            raise KbError(exc.code, str(exc), 422) from exc
+    else:
+        async with db_session(tenant_id=tenant_id) as session:
+            source = RepositoryAudienceSource(session, tenant_id)
+            target_user_id = operator_user_id
+            if as_user_id is not None:
+                user = await source.load_user(as_user_id)
+                if user is None or user.status == "deleted":
+                    raise KbError("RETRIEVAL_TEST_AS_USER_NOT_FOUND", "视角用户不存在或不属于本租户", 404)
+                target_user_id = as_user_id
+            try:
+                view_tokens = await resolve_audience_tokens(source, target_user_id)
+            except Exception as exc:  # 解析异常=不召回不引用不提示存在（fail-closed 空集）
+                logger.warning(
+                    "KB-09 人群解析失败（fail-closed 空集）：%s.%s",
+                    type(exc).__module__,
+                    type(exc).__name__,
+                )
+                view_tokens = []
+
+    if ignore_acl:
+        # 强制审计（design :587）：query 只落 sha256+长度，不带原文（零 PII 红线）
+        async with db_session(tenant_id=tenant_id) as session:
+            from app.audit.writer import append_audit
+
+            await append_audit(
+                session,
+                action="school.kb.retrieval_test.unfiltered",
+                resource_type="kb_document_version",
+                resource_id=str(resolved_version_id),
+                actor_realm="tenant",
+                actor_id=operator_user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={
+                    "version_id": str(resolved_version_id),
+                    "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                    "query_length": len(query),
+                    **({"as_user_id": str(as_user_id)} if as_user_id is not None else {}),
+                },
+            )
+
+    if ignore_acl:
+        query_filter = None
+        acl_filter_applied = False
+    elif view_tokens:
+        query_filter = acl_query_filter(view_tokens)
+        acl_filter_applied = True
+    else:
+        # 空集 fail-closed：不发查询（Qdrant 空 Filter 匹配全部点，绝不能下发）
+        return RetrievalTestResult(
+            version_id=resolved_version_id,
+            query=query,
+            top_k=top_k,
+            with_rerank=with_rerank,
+            rerank_status="disabled",
+            latency_ms=round((time.monotonic() - started) * 1000, 1),
+            results=[],
+            resolved_audience_tokens=[],
+            acl_filter_applied=True,
+        )
+
     collection = collection_name(tenant_id, resolved_version_id)
     client = AsyncQdrantClient(url=resolved.qdrant_url) if resolved.qdrant_url else None
     if client is None:
@@ -294,16 +402,25 @@ async def run_retrieval_test(
                     dense=dense_vectors[0],
                     sparse=sparse,
                     top_k=pool,
+                    query_filter=query_filter,
                 )
             )
             dense_hits = _stable_hits(
                 await search_dense(
-                    client, collection=collection, dense=dense_vectors[0], limit=pool * 2
+                    client,
+                    collection=collection,
+                    dense=dense_vectors[0],
+                    limit=pool * 2,
+                    query_filter=query_filter,
                 )
             )
             sparse_hits = _stable_hits(
                 await search_sparse(
-                    client, collection=collection, sparse=sparse, limit=pool * 2
+                    client,
+                    collection=collection,
+                    sparse=sparse,
+                    limit=pool * 2,
+                    query_filter=query_filter,
                 )
             )
         except IndexError_ as exc:
@@ -328,6 +445,7 @@ async def run_retrieval_test(
         chunk_rows=chunk_rows,
         dense_hits=dense_hits,
         sparse_hits=sparse_hits,
+        view_tokens=view_tokens,
     )
 
     rerank_status: RerankStatus = "disabled"
@@ -366,4 +484,6 @@ async def run_retrieval_test(
         rerank_status=rerank_status,
         latency_ms=round((time.monotonic() - started) * 1000, 1),
         results=rows,
+        resolved_audience_tokens=list(view_tokens),
+        acl_filter_applied=acl_filter_applied,
     )

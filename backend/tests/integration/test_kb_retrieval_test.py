@@ -4,7 +4,8 @@
 - 确定性 top-1（词袋 embedder 两侧同源，query=子块全文 → cosine 1.0）与行结构
   不变量（final_rank 连续、每行至少一路命中、元数据与 PG 对账）；
 - top_k 裁剪；重排 applied 稳定翻转 / timeout→skipped / failed 降级保融合序；
-- ACL 预留参数 422（fail-closed）；query/top_k 校验 422；
+- ACL 视角三参数语义（as_user/as_audiences/ignore_acl）随 KB-09B
+  `test_kb_acl_retrieval.py` 覆盖；query/top_k 校验 422；
 - 404（不存在/跨租/self 范围外同码不泄露）、403（缺 view_chunks，view 不能顶替）、
   未索引 409；嵌入失败与 Qdrant 未配置 502。
 """
@@ -392,25 +393,6 @@ async def test_rerank_pool_below_top_k_is_floored(
     assert sum(1 for row in body["results"] if row["is_final_reference"]) == min(
         5, len(body["results"])
     )
-
-
-async def test_acl_reserved_params_are_rejected_fail_closed(
-    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
-) -> None:
-    """KB-09 契约预留：任一 ACL 视角参数设值即 422（绝不静默忽略）。"""
-
-    _doc, version_id = await _seed(env, monkeypatch)
-    headers = await login(client, KB_CHUNK_VIEWER)
-    for payload in (
-        {"query": "q", "as_user_id": str(uuid4())},
-        {"query": "q", "as_audiences": ["department:whatever"]},
-        {"query": "q", "ignore_acl": True},
-    ):
-        resp = await client.post(
-            URL.format(version_id=version_id), json=payload, headers=headers
-        )
-        assert resp.status_code == 422, f"{payload} 应 422：{resp.text}"
-        assert resp.json()["detail"]["code"] == "RETRIEVAL_TEST_ACL_UNAVAILABLE"
 
 
 async def test_query_and_top_k_validation(

@@ -14,7 +14,9 @@
 - `GET /school/kb/chunks/{chunk_id}`：分块详情（父/子引用，KB-06A）；
 - `GET /school/kb/versions/{version_id}/chunks/stats`：版本分块统计（KB-06A）；
 - `POST /school/kb/versions/{version_id}/retrieval-test`：单 query 检索测试
-  （dense/sparse/RRF/rerank 分数 + 最终引用，KB-07A；重排失败降级不 5xx）。
+  （dense/sparse/RRF/rerank 分数 + 最终引用，KB-07A；重排失败降级不 5xx；
+  KB-09B ACL 视角过滤：默认操作者 / as_user_id / as_audiences 二选一 /
+  ignore_acl 仅 unfiltered 码 + 强制审计）。
 
 权限：上传/提交/元数据 `school.kb.upload`；查询 `school.kb.view`；构建 `school.kb.build`；
 分块预览与检索测试 `school.kb.view_chunks`（KB-06A/07A）；
@@ -24,6 +26,7 @@ KB-05 发布/回滚/下线/删除的 403/409 写 `school.kb.publish.denied` / `s
 / `school.kb.offline.denied` / `school.kb.delete.denied`（服务层独立事务；404 探测不审计）。
 """
 
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from typing import Annotated, Literal
@@ -845,13 +848,14 @@ class KbTestRunStartResponse(BaseModel):
 
 
 class KbTestRunDetailResponse(BaseModel):
-    """测试运行详情（metrics_json 全字段）。"""
+    """测试运行详情（metrics_json 全字段 + KB-09B 判分视角人群）。"""
 
     run_id: UUID
     version_id: UUID
     test_set_id: UUID
     status: str
     metrics_json: dict[str, object] | None
+    as_audiences: list[str] | None
     started_at: datetime | None
     finished_at: datetime | None
 
@@ -906,10 +910,29 @@ async def start_kb_test_run(
     builder: Annotated[Principal, TestSetDep],
     request: Request,
     test_set_id: Annotated[UUID, Form(description="测试集 id")],
+    as_audiences: Annotated[
+        str | None,
+        Form(description="KB-09B 判分视角人群 token 数组（JSON 字符串；缺省=发起人自身视角）"),
+    ] = None,
 ) -> KbTestRunStartResponse:
     """发起测试运行（READY/TEST_FAILED/TEST_PASSED 可测试；活跃 run 唯一）。"""
 
     tenant_id = _tenant_or_403(builder)
+    # KB-09B：as_audiences 表单载体为 JSON 字符串数组（multipart Form 无原生数组类型）；
+    # 结构校验（422 族）在 service 层单点完成
+    as_audiences_tokens: list[str] | None = None
+    if as_audiences is not None:
+        try:
+            parsed = json.loads(as_audiences)
+        except ValueError as exc:
+            raise _http_error(
+                KbError("AUDIENCE_TOKEN_PAYLOAD_INVALID", "as_audiences 必须是 JSON 字符串数组", 422)
+            ) from exc
+        if not isinstance(parsed, list):
+            raise _http_error(
+                KbError("AUDIENCE_TOKEN_PAYLOAD_INVALID", "as_audiences 必须是 JSON 字符串数组", 422)
+            )
+        as_audiences_tokens = parsed
     try:
         result = await start_test_run(
             tenant_id=tenant_id,
@@ -917,6 +940,7 @@ async def start_kb_test_run(
             version_id=version_id,
             test_set_id=test_set_id,
             user_id=builder.user_id,
+            as_audiences=as_audiences_tokens,
             request_id=getattr(request.state, "request_id", None),
         )
     except KbError as exc:
@@ -951,6 +975,7 @@ async def get_kb_test_run(
         test_set_id=result["test_set_id"],
         status=result["status"],
         metrics_json=result["metrics_json"],
+        as_audiences=result["as_audiences"],
         started_at=result["started_at"],
         finished_at=result["finished_at"],
     )
@@ -1281,7 +1306,7 @@ class KbRetrievalTestRouteHit(BaseModel):
 
 
 class KbRetrievalTestResultRow(BaseModel):
-    """检索测试结果行（「为什么召回」逐路可解释 + 最终引用标记）。"""
+    """检索测试结果行（「为什么召回」逐路可解释 + 最终引用标记 + ACL 命中 token）。"""
 
     chunk_id: UUID
     chunk_index: int
@@ -1296,6 +1321,8 @@ class KbRetrievalTestResultRow(BaseModel):
     rerank_score: float | None
     final_rank: int
     is_final_reference: bool
+    # KB-09B：该块 payload `acl_tokens` ∩ 视角 token（可解释召回）
+    acl_matched_tokens: list[str]
 
 
 class KbRetrievalTestResponse(BaseModel):
@@ -1309,10 +1336,15 @@ class KbRetrievalTestResponse(BaseModel):
     latency_ms: float
     pool_size: int
     results: list[KbRetrievalTestResultRow]
+    # KB-09B：视角解析结果回显（空集=解析失败/空集 fail-closed）；
+    # acl_filter_applied=False 仅在 ignore_acl
+    resolved_audience_tokens: list[str]
+    acl_filter_applied: bool
 
 
 class KbRetrievalTestRequest(BaseModel):
-    """检索测试请求（ACL 视角三参数为 KB-09 契约预留，设值即 422，见路由守卫）。"""
+    """检索测试请求（KB-09B：默认操作者视角；as_user_id/as_audiences 二选一；
+    ignore_acl 仅 `school.kb.retrieval_test.unfiltered` + 强制审计）。"""
 
     query: str = Field(min_length=1, max_length=300, description="raw 码点 ≤300；strip 后非空")
     top_k: int = Field(default=10, ge=1, le=20)
@@ -1332,6 +1364,8 @@ def _retrieval_test_response(result: RetrievalTestResult) -> KbRetrievalTestResp
         latency_ms=result.latency_ms,
         pool_size=len(result.results),
         results=[_retrieval_row_response(row, result.top_k) for row in result.results],
+        resolved_audience_tokens=result.resolved_audience_tokens,
+        acl_filter_applied=result.acl_filter_applied,
     )
 
 
@@ -1358,6 +1392,7 @@ def _retrieval_row_response(row: RetrievalRow, top_k: int) -> KbRetrievalTestRes
         rerank_score=row.rerank_score,
         final_rank=row.final_rank,
         is_final_reference=row.final_rank <= top_k,
+        acl_matched_tokens=row.acl_matched_tokens,
     )
 
 
@@ -1367,13 +1402,17 @@ async def run_kb_retrieval_test(
     request: KbRetrievalTestRequest,
     viewer: Annotated[Principal, ChunkViewerDep],
 ) -> KbRetrievalTestResponse:
-    """单 query 检索测试（dense/sparse/RRF/rerank 分数与最终引用；跨租/范围外 404）。"""
+    """单 query 检索测试（dense/sparse/RRF/rerank 分数与最终引用；KB-09B ACL 视角过滤）。"""
 
     tenant_id = _tenant_or_403(viewer)
-    # KB-09 契约预留：任何 ACL 视角参数都显式拒绝（fail-closed），绝不静默忽略
-    if request.as_user_id is not None or request.as_audiences is not None or request.ignore_acl:
+    # KB-09B：ignore_acl 仅 unfiltered 码（design :587；强制审计在 service 层落地）
+    if request.ignore_acl and not viewer.has_permission("school.kb.retrieval_test.unfiltered"):
         raise _http_error(
-            KbError("RETRIEVAL_TEST_ACL_UNAVAILABLE", "ACL 视角检索未开放：随 KB-09 交付", 422)
+            KbError(
+                "RETRIEVAL_TEST_UNFILTERED_FORBIDDEN",
+                "忽略 ACL 视角需要 school.kb.retrieval_test.unfiltered 权限",
+                403,
+            )
         )
     query = request.query.strip()
     if not query:
@@ -1382,10 +1421,14 @@ async def run_kb_retrieval_test(
         result = await run_retrieval_test(
             tenant_id=tenant_id,
             scope=viewer.scope_context,
+            operator_user_id=viewer.user_id,
             version_id=version_id,
             query=query,
             top_k=request.top_k,
             with_rerank=request.with_rerank,
+            as_user_id=request.as_user_id,
+            as_audiences=request.as_audiences,
+            ignore_acl=request.ignore_acl,
         )
     except KbError as exc:
         raise _http_error(exc) from exc
