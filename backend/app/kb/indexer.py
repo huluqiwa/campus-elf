@@ -296,6 +296,25 @@ async def count_points(client: AsyncQdrantClient, *, collection: str) -> int:
     return int(result.count)
 
 
+def acl_query_filter(tokens: list[str]) -> qmodels.Filter:
+    """ACL 检索过滤（spec :310 min_should:1）：`should` 单条件 `MatchAny`。
+
+    `should` 单条件即「至少命中一个 token」语义，不需要 min_should 子句。
+    **空 token 集是调用方 fail-closed 契约（不发查询）**——本函数对空集
+    fail-loud 抛错，绝不返回 None（Qdrant 空 Filter 匹配全部点）。
+    """
+
+    if not tokens:
+        raise ValueError("acl_query_filter 需要非空 token 集（空集应在调用方 fail-closed 跳过查询）")
+    return qmodels.Filter(
+        should=[
+            qmodels.FieldCondition(
+                key="acl_tokens", match=qmodels.MatchAny(any=list(tokens))
+            )
+        ]
+    )
+
+
 async def search_points(
     client: AsyncQdrantClient,
     *,
@@ -303,26 +322,33 @@ async def search_points(
     dense: list[float],
     sparse: SparseVector,
     top_k: int = 10,
+    query_filter: qmodels.Filter | None = None,
 ) -> list[dict[str, Any]]:
     """Qdrant 混合检索（dense + sparse → 服务端 RRF 融合，design §7.5）。
 
-    返回 `[{"chunk_id": str, "score": float, "payload": dict}]`，按 RRF 分数降序。
+    `query_filter`（KB-09B）：ACL token 过滤——prefetch 两路与顶层同 filter
+    （只滤顶层会在候选池耗尽时漏召回可命中块）。返回
+    `[{"chunk_id": str, "score": float, "payload": dict}]`，按 RRF 分数降序。
     """
 
     try:
         response = await client.query_points(
             collection,
             prefetch=[
-                qmodels.Prefetch(query=dense, using="dense", limit=top_k * 2),
+                qmodels.Prefetch(
+                    query=dense, using="dense", limit=top_k * 2, filter=query_filter
+                ),
                 qmodels.Prefetch(
                     query=qmodels.SparseVector(
                         indices=sparse.indices, values=sparse.values
                     ),
                     using="sparse",
                     limit=top_k * 2,
+                    filter=query_filter,
                 ),
             ],
             query=qmodels.FusionQuery(fusion=qmodels.Fusion.RRF),
+            query_filter=query_filter,
             limit=top_k,
             with_payload=True,
         )
@@ -354,16 +380,24 @@ async def search_dense(
     collection: str,
     dense: list[float],
     limit: int,
+    query_filter: qmodels.Filter | None = None,
 ) -> list[dict[str, Any]]:
     """单路 dense 检索（KB-07 逐路分数旁路；与融合查询同 collection 定域）。
 
+    `query_filter`（KB-09B）：与融合查询同 filter——逐路旁路若不过滤，面板会
+    展示融合视图已被 ACL 排除的块（「测试能复现线上」被旁路打破）。
     返回 `[{"chunk_id": str, "score": float}]`，按分数降序；不带 payload
     （归位只按 id，元数据由 PG 回查）。
     """
 
     try:
         response = await client.query_points(
-            collection, query=dense, using="dense", limit=limit, with_payload=False
+            collection,
+            query=dense,
+            using="dense",
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=False,
         )
     except Exception as exc:
         logger.warning("Qdrant dense 检索失败：%s.%s", type(exc).__module__, type(exc).__name__)
@@ -377,6 +411,7 @@ async def search_sparse(
     collection: str,
     sparse: SparseVector,
     limit: int,
+    query_filter: qmodels.Filter | None = None,
 ) -> list[dict[str, Any]]:
     """单路 sparse（BM25）检索（KB-07 逐路分数旁路）；返回形状同 `search_dense`。"""
 
@@ -386,6 +421,7 @@ async def search_sparse(
             query=qmodels.SparseVector(indices=sparse.indices, values=sparse.values),
             using="sparse",
             limit=limit,
+            query_filter=query_filter,
             with_payload=False,
         )
     except Exception as exc:

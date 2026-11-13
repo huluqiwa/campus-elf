@@ -330,6 +330,25 @@ async def test_put_nonexistent_audience_rejected_422(
     assert response.json()["detail"]["code"] == "AUDIENCE_NOT_FOUND"
 
 
+async def test_put_malformed_uuid_audience_rejected_422(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """KB-09A 复审 Minor 收口：非法 UUID 视同不存在 → 422 同文（防 500 泄漏格式差异）。"""
+
+    _doc, version_id = await seed_test_passed_version(
+        env, monkeypatch, with_audience=False, run_build=False
+    )
+    response = await _put(
+        client,
+        await _manager(client),
+        version_id,
+        [{"audience_type": "department", "audience_id": "not-a-uuid"}],
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "AUDIENCE_NOT_FOUND"
+    assert response.json()["detail"]["message"] == "人群对象不存在或不属于本租户"
+
+
 async def test_put_cross_tenant_audience_rejected_422(
     env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
 ) -> None:

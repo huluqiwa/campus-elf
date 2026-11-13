@@ -614,6 +614,9 @@ class KbTestRun(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     version_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False, server_default="TESTING")
     metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # KB-09B：批量运行判分视角人群（token 字符串数组；null=发起人自身视角）。
+    # 结构校验在服务层（parse_audience_tokens）；不加 as_user_id/ignore_acl（宁严勿松）
+    as_audiences: Mapped[list[Any] | None] = mapped_column(JSONB)
     report_object_key: Mapped[str | None] = mapped_column(String(300))
     started_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -63,6 +63,7 @@ from app.kb.audience import (
     acl_gate,
     audience_tokens,
     parse_audience_items,
+    parse_audience_tokens,
 )
 from app.kb.chunker import CHUNK_TYPE_CHILD
 from app.kb.indexer import (
@@ -1730,11 +1731,25 @@ async def start_test_run(
     version_id: UUID,
     test_set_id: UUID,
     user_id: UUID,
+    as_audiences: list[str] | None = None,
     request_id: str | None = None,
 ) -> dict[str, Any]:
-    """发起测试运行（门禁：READY/TEST_FAILED/TEST_PASSED 可测试；活跃 run 唯一）。"""
+    """发起测试运行（门禁：READY/TEST_FAILED/TEST_PASSED 可测试；活跃 run 唯一）。
+
+    `as_audiences`（KB-09B）：判分视角人群 token 数组——结构校验 422 族
+    （不做同租存在性校验，与检索测试 as_audiences 同口径）；None=发起人自身
+    视角（worker 执行期实时解析）；空数组=显式空集（fail-closed 全 FAIL）。
+    不支持 as_user_id/ignore_acl（milestone「判分宁严勿松」口径）。
+    """
 
     from app.kb.status import NotTestableError, assert_test_allowed
+
+    normalized_audiences: list[str] | None = None
+    if as_audiences is not None:
+        try:
+            normalized_audiences = parse_audience_tokens(as_audiences)
+        except AudienceValidationError as exc:
+            raise KbError(exc.code, str(exc), 422) from exc
 
     try:
         async with db_session(tenant_id=tenant_id) as session:
@@ -1784,6 +1799,9 @@ async def start_test_run(
                 status="TESTING",
                 started_by=user_id,
                 started_at=datetime.now(UTC),
+                # KB-09B：判分视角人群（token 数组；None=发起人自身视角）。
+                # 结构校验在上方完成；空数组=显式空集（fail-closed 全 FAIL）
+                as_audiences=normalized_audiences,
             )
             await run_repository.add(run)
             await session.flush()
@@ -1858,6 +1876,8 @@ async def get_test_run(
             "status": run.status,
             "metrics_json": run.metrics_json,
             "started_by": run.started_by,
+            # KB-09B：判分视角人群回显（None=发起人自身视角；[] =显式空集 fail-closed）
+            "as_audiences": run.as_audiences,
             "started_at": run.started_at,
             "finished_at": run.finished_at,
         }
@@ -2279,19 +2299,28 @@ def _audience_view(version: KbDocumentVersion, rows_: Sequence[KbDocumentAudienc
 
 
 async def _version_with_audiences(
-    session: AsyncSession, tenant_id: UUID, version_id: UUID, scope: DataScopeContext
+    session: AsyncSession,
+    tenant_id: UUID,
+    version_id: UUID,
+    scope: DataScopeContext,
+    *,
+    for_update: bool = True,
 ) -> tuple[KbDocumentVersion, Sequence[KbDocumentAudience]]:
-    """取版本（范围过滤 + FOR UPDATE）+ 其人群行集（同事务；跨租/范围外 404 同文不泄露）。
+    """取版本（范围过滤；写路径 FOR UPDATE）+ 其人群行集（同事务；跨租/范围外 404 同文不泄露）。
 
-    版本行加锁（`_version_locked` 先例）：PUT 与 confirm 对同一版本行串行化——
-    否则 confirm 读行集与提交之间插入并发 PUT 会产生「DB=新行集+已确认、
-    Qdrant=旧 tokens」的收紧方向 fail-open 窗口（审查 Major 3）。
+    写路径（PUT/confirm）版本行加锁（`_version_locked` 先例）：对同一版本行
+    串行化——否则 confirm 读行集与提交之间插入并发 PUT 会产生「DB=新行集+
+    已确认、Qdrant=旧 tokens」的收紧方向 fail-open 窗口（审查 Major 3）；
+    GET（`for_update=False`）为纯读，不加写锁（KB-09A 复审 Minor 收口）。
     """
 
     version_repository: TenantScopedRepository[KbDocumentVersion] = TenantScopedRepository(
         session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
     )
-    version = await _version_locked(session, version_repository, version_id=version_id)
+    if for_update:
+        version = await _version_locked(session, version_repository, version_id=version_id)
+    else:
+        version = await version_repository.get(version_id)
     if version is None:
         raise KbError("VERSION_NOT_FOUND", "文档版本不存在", 404)
     audience_repository: TenantScopedRepository[KbDocumentAudience] = TenantScopedRepository(
@@ -2359,7 +2388,9 @@ async def get_audiences(
     """读取版本人群配置（`school.kb.view`；跨租/范围外 404 同文不泄露）。"""
 
     async with db_session(tenant_id=tenant_id) as session:
-        version, rows_ = await _version_with_audiences(session, tenant_id, version_id, scope)
+        version, rows_ = await _version_with_audiences(
+            session, tenant_id, version_id, scope, for_update=False
+        )
     return _audience_view(version, rows_)
 
 

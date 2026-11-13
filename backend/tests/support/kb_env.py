@@ -42,6 +42,12 @@ KB_SELF_APPROVER = "kb-self-approver"
 KB_PUBLISHER = "kb-publisher"
 KB_B_PUBLISHER = "kb-b-publisher"
 KB_CHUNK_VIEWER = "kb-chunk-viewer"
+# KB-09B：教师型检索操作者（user_type=teacher——部门/任教/班主任 token 解析用）
+KB_TEACHER_VIEWER = "kb-teacher-viewer"
+# KB-09B：ignore_acl 视角（school.kb.retrieval_test.unfiltered；目录已有码）
+KB_ACL_UNFILTERED = "kb-acl-unfiltered"
+# KB-09B：批量测试运行发起人（school.kb.test）
+KB_TEST_RUNNER = "kb-test-runner"
 KB_CHUNK_SELF = "kb-chunk-self"
 KB_B_CHUNK_VIEWER = "kb-b-chunk-viewer"
 # KB-09：人群配置/确认（school.kb.acl.manage；矩阵 §3 校管△ 非默认、超管√）
@@ -144,6 +150,15 @@ async def _seed_data(engine: AsyncEngine) -> tuple[UUID, UUID]:
         permissions=("school.kb.build", "school.kb.view"),
         scope_types=("school",),
     )
+    # KB-09B：批量测试运行发起人（school.kb.test；as_audiences 表单字段用例）
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_TEST_RUNNER,
+        password=PASSWORD,
+        permissions=("school.kb.test", "school.kb.view"),
+        scope_types=("school",),
+    )
     # KB-05：发布人（发布/回滚/下线/删除）与租户 B 发布人（跨租 404 探测）
     await seed_tenant_user(
         engine,
@@ -168,6 +183,25 @@ async def _seed_data(engine: AsyncEngine) -> tuple[UUID, UUID]:
         login_id=KB_CHUNK_VIEWER,
         password=PASSWORD,
         permissions=("school.kb.view_chunks",),
+        scope_types=("school",),
+    )
+    # KB-09B：教师型操作者（teacher 类型 + view_chunks；部门/任教关系由用例种）
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_TEACHER_VIEWER,
+        password=PASSWORD,
+        user_type="teacher",
+        permissions=("school.kb.view_chunks",),
+        scope_types=("school",),
+    )
+    # KB-09B：ignore_acl 视角（unfiltered 码 + view_chunks；目录已有码，无新码）
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_ACL_UNFILTERED,
+        password=PASSWORD,
+        permissions=("school.kb.view_chunks", "school.kb.retrieval_test.unfiltered"),
         scope_types=("school",),
     )
     await seed_tenant_user(
