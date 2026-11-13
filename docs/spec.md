@@ -306,7 +306,7 @@
 - 版本级 ACL 表 `kb_document_audiences`：`audience_type ∈ {department, role, class, grade, course, user, all}`，多条为**并集**；`all` 必须显式选择。
 - **fail-closed**：版本 ACL 记录为 0 条时构建/发布返回 `409 ACL_REQUIRED`；已配置未确认返回 `409 ACL_UNCONFIRMED`。
 - 新版本默认继承上一版本 ACL 但需重新确认；派生版本（KB-10）沿用源版本已确认 ACL。
-- ACL 变更即时生效，**不受"旧会话固定版本"保护**（安全策略优先）；权限 `school.kb.acl.manage`，审计 `kb.acl.updated` / `kb.acl.confirmed`。
+- ACL 变更即时生效，**不受"旧会话固定版本"保护**（安全策略优先）；权限 `school.kb.acl.manage`，审计 `school.kb.acl.updated` / `school.kb.acl.confirmed`（2026-11-14 TD-318 勘误：原文 `kb.acl.*` 补齐 house 前缀，对齐 `docs/rbac-matrix.md` 与实现）。
 - 构建时把 ACL 写入 Qdrant payload（token 形如 `department:<uuid>`）；检索按登录身份解析的人群集合过滤，要求至少命中一个 token（`min_should: 1`）。
 - 检索测试支持"以某用户/人群视角"运行；校方超管可用"忽略 ACL"对比视图（`school.kb.retrieval_test.unfiltered`，强制审计）。
 - 无权行为：不召回、不引用、逐项兜底话术，不提示"存在但无权"。
