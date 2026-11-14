@@ -30,6 +30,7 @@
  */
 import { ApiError, toUserMessage } from "@campus-elf/api-client";
 import type {
+  KbAudienceView,
   KbChunkDetailView,
   KbChunkStatsView,
   KbChunkView,
@@ -50,7 +51,14 @@ import {
   kbEntryConflictMessage,
 } from "../approval-logic";
 import {
+  KB_AUDIENCE_TYPES,
   KB_PAGE_SIZE,
+  aclBannerText,
+  aclConfirmedLabel,
+  aclManageGate,
+  aclVisible as aclVisibleGate,
+  audienceEditError,
+  audienceTypeLabel,
   chunkFilterError,
   chunkTypeLabel,
   chunksGate,
@@ -71,6 +79,9 @@ import {
   rollbackTargets,
   routeScoreText,
   sectionOptions,
+  tokenLabel,
+  unfilteredGate,
+  type KbAudienceEditRow,
   type KbRollbackTarget,
 } from "../kb-logic";
 import { useAuthStore } from "../stores/auth";
@@ -130,6 +141,21 @@ const activeVersionId = ref<string | null>(null);
 
 // KB-06B：分块子视图状态（独立 chunksGeneration：子视图有自己的打开/关闭与筛选重置节奏）。
 const chunksVisible = computed(() => chunksGate(permissions.value));
+
+// KB-09C：人群配置子视图状态（版本行入口；与分块子视图互斥打开——同一时间只看一个子视图）。
+// aclGeneration 与 chunksGeneration 同构（审查 M1）：迟到的 getAudiences/PUT/confirm 响应
+// 不得把 A 版本的人群渲染/写进 B 版本（跨版本误写路径）。
+const aclEntryVisible = computed(() => aclVisibleGate(permissions.value));
+const aclManageVisible = computed(() => aclManageGate(permissions.value));
+const aclView = ref<{ versionId: string; versionNo: number } | null>(null);
+const aclData = ref<KbAudienceView | null>(null);
+const aclLoading = ref(false);
+const aclSaving = ref(false);
+const aclConfirming = ref(false);
+const aclDialogVisible = ref(false);
+const aclRows = ref<KbAudienceEditRow[]>([]);
+const aclEditError = ref<string | null>(null);
+let aclGeneration = 0;
 const chunksView = ref<{ versionId: string; versionNo: number } | null>(null);
 const chunks = ref<KbChunkView[]>([]);
 const chunksLoading = ref(false);
@@ -152,6 +178,11 @@ let chunksGeneration = 0;
 const retrievalQuery = ref("");
 const retrievalTopK = ref<number>(10);
 const retrievalWithRerank = ref(false);
+// KB-09C：视角三控件（缺省=操作者视角；ignore_acl 仅 unfiltered 码持有人渲染）。
+const retrievalAsUserId = ref("");
+const retrievalAsAudiencesText = ref("");
+const retrievalIgnoreAcl = ref(false);
+const retrievalUnfilteredVisible = computed(() => unfilteredGate(permissions.value));
 const retrievalTestLoading = ref(false);
 const retrievalTestError = ref<string | null>(null);
 const retrievalTestResult = ref<KbRetrievalTestResult | null>(null);
@@ -437,6 +468,7 @@ async function loadChunkStats(generation: number): Promise<void> {
 
 /** 从版本表行进入子视图：重置筛选与列表（spec：按所选版本定域，不混入其他版本）。 */
 function openChunks(row: KbVersionView): void {
+  aclView.value = null; // KB-09C：子视图互斥
   chunksView.value = { versionId: row.id, versionNo: row.version_no };
   chunkFilters.value = { q: "", sectionPath: "", chunkType: "" };
   chunksFilterError.value = null;
@@ -447,6 +479,9 @@ function openChunks(row: KbVersionView): void {
   retrievalQuery.value = "";
   retrievalTopK.value = 10;
   retrievalWithRerank.value = false;
+  retrievalAsUserId.value = "";
+  retrievalAsAudiencesText.value = "";
+  retrievalIgnoreAcl.value = false;
   retrievalTestLoading.value = false;
   retrievalTestError.value = null;
   retrievalTestResult.value = null;
@@ -459,6 +494,139 @@ function openChunks(row: KbVersionView): void {
 function closeChunks(): void {
   chunksView.value = null;
   chunksGeneration += 1;
+}
+
+// ---- KB-09C：人群配置子视图（GET view / PUT·confirm acl.manage；服务端是唯一门禁） ----
+
+function openAcl(row: KbVersionView): void {
+  chunksView.value = null; // 子视图互斥
+  chunksGeneration += 1;
+  aclGeneration += 1;
+  aclView.value = { versionId: row.id, versionNo: row.version_no };
+  void loadAcl();
+}
+
+function closeAcl(): void {
+  aclGeneration += 1;
+  aclView.value = null;
+  aclData.value = null;
+  aclDialogVisible.value = false;
+}
+
+async function loadAcl(): Promise<void> {
+  const view = aclView.value;
+  if (!view) return;
+  const generation = aclGeneration;
+  aclLoading.value = true;
+  try {
+    const fresh = await kbApi.getAudiences(view.versionId);
+    // 迟响应丢弃（审查 M1）：closeAcl/openB 后 vA 的响应不得覆盖 B 的数据
+    if (generation !== aclGeneration || aclView.value?.versionId !== view.versionId) return;
+    aclData.value = fresh;
+  } catch (error) {
+    if (generation !== aclGeneration || aclView.value?.versionId !== view.versionId) return;
+    reportError(error, "人群配置加载失败");
+  } finally {
+    if (generation === aclGeneration) aclLoading.value = false;
+  }
+}
+
+function openAclDialog(): void {
+  const view = aclView.value;
+  const data = aclData.value;
+  // 归属校验（审查 M1）：aclData 必须仍是当前子视图版本的数据（迟响应不播种编辑行集）
+  if (!view || !data || data.version_id !== view.versionId) return;
+  aclRows.value = data.audiences.map((item) => ({
+    audience_type: item.audience_type,
+    audience_id: item.audience_id,
+  }));
+  aclEditError.value = null;
+  aclDialogVisible.value = true;
+}
+
+function addAclRow(): void {
+  aclRows.value.push({ audience_type: "department", audience_id: "" });
+}
+
+function removeAclRow(index: number): void {
+  aclRows.value.splice(index, 1);
+  onAclRowsChange();
+}
+
+function onAclRowTypeChange(index: number, audienceType: string): void {
+  const row = aclRows.value[index];
+  if (row === undefined) return;
+  row.audience_type = audienceType;
+  if (audienceType === "all") row.audience_id = null; // all 不带 id（后端 AUDIENCE_ID_FORBIDDEN）
+  onAclRowsChange();
+}
+
+function onAclRowIdChange(index: number, value: string): void {
+  const row = aclRows.value[index];
+  if (row === undefined) return;
+  row.audience_id = value;
+  onAclRowsChange();
+}
+
+/** 行集变化即跑预检（kb-logic 镜像后端 422 族；服务端仍是唯一门禁）。 */
+function onAclRowsChange(): void {
+  aclEditError.value = audienceEditError(aclRows.value);
+}
+
+async function saveAcl(): Promise<void> {
+  const view = aclView.value;
+  if (!view || !aclManageVisible.value) return;
+  const precheck = audienceEditError(aclRows.value);
+  if (precheck !== null) {
+    aclEditError.value = precheck;
+    return;
+  }
+  const generation = aclGeneration;
+  aclSaving.value = true;
+  try {
+    const result = await kbApi.replaceAudiences(view.versionId, {
+      // m4：提交前 trim id，与后端落库规范化对齐（避免对话框与库短时不一致）
+      audiences: aclRows.value.map((row) => ({
+        audience_type: row.audience_type,
+        audience_id: row.audience_id === null ? null : row.audience_id.trim(),
+      })),
+    });
+    if (generation !== aclGeneration || aclView.value?.versionId !== view.versionId) return;
+    aclData.value = result;
+    aclDialogVisible.value = false;
+    ElMessage.warning("人群已保存并置为未确认：确认后才能构建/发布");
+  } catch (error) {
+    if (generation !== aclGeneration || aclView.value?.versionId !== view.versionId) return;
+    if (error instanceof ApiError && error.status === 422) {
+      aclEditError.value = toUserMessage(error, "人群配置被拒绝");
+    } else {
+      reportError(error, "人群保存失败");
+    }
+  } finally {
+    aclSaving.value = false; // 无条件复位（审查复审 m5）：loading 是全局 UI 灯，数据写入已由守卫拦
+  }
+}
+
+async function confirmAcl(): Promise<void> {
+  const view = aclView.value;
+  if (!view || !aclManageVisible.value) return;
+  const generation = aclGeneration;
+  aclConfirming.value = true;
+  try {
+    const result = await kbApi.confirmAudiences(view.versionId);
+    if (generation !== aclGeneration || aclView.value?.versionId !== view.versionId) return;
+    aclData.value = result;
+    ElMessage.success("人群 ACL 已确认");
+  } catch (error) {
+    if (generation !== aclGeneration || aclView.value?.versionId !== view.versionId) return;
+    if (error instanceof ApiError && error.status === 409) {
+      ElMessage.warning(toUserMessage(error, "人群确认被拒绝"));
+    } else {
+      reportError(error, "人群确认失败");
+    }
+  } finally {
+    aclConfirming.value = false; // 无条件复位（同上）
+  }
 }
 
 /** 筛选应用：任一变化（含「只看子块」/清除）都回第一页——后端筛选在游标推进之前，旧游标跨筛选失效。 */
@@ -539,6 +707,19 @@ async function runRetrievalTest(): Promise<void> {
       query: retrievalQuery.value,
       top_k: retrievalTopK.value,
       with_rerank: retrievalWithRerank.value,
+      // KB-09C 视角三参数（缺省不进请求体=操作者视角；as_user 与 as_audiences 二选一，
+      // UI 层以 as_audiences 优先——两者同时填时后端 422 PERSPECTIVE_CONFLICT 兜底）
+      ...(retrievalAsAudiencesText.value.trim() !== ""
+        ? {
+            as_audiences: retrievalAsAudiencesText.value
+              .split(/[,\n]/)
+              .map((token) => token.trim())
+              .filter((token) => token !== ""),
+          }
+        : retrievalAsUserId.value.trim() !== ""
+          ? { as_user_id: retrievalAsUserId.value.trim() }
+          : {}),
+      ...(retrievalUnfilteredVisible.value && retrievalIgnoreAcl.value ? { ignore_acl: true } : {}),
     });
     if (runSeq !== retrievalRunSeq) return;
     if (generation !== chunksGeneration || chunksView.value === null) return;
@@ -623,6 +804,12 @@ watch([() => props.modelValue, () => props.documentId], ([open, id]) => {
   chunksParentFilter.value = null;
   chunkFilters.value = { q: "", sectionPath: "", chunkType: "" };
   chunksGeneration += 1;
+  // KB-09C：人群子视图随抽屉打开/切换文档复位（与分块子视图同口径——否则重开抽屉
+  // 仍停在人群子视图，文档主体（构建/发布按钮）不可见）
+  aclView.value = null;
+  aclData.value = null;
+  aclDialogVisible.value = false;
+  aclGeneration += 1;
   if (!open || id === null) return;
   // TD-291：加载审批单（最近一单直显状态与驳回理由）
   void loadApprovals(id, generation);
@@ -702,6 +889,12 @@ function formatDateTime(iso: string): string {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+/** KB-09C：检索测试视角 token 回显（空集=解析失败/空集 fail-closed——零召回可归因）。 */
+function resolvedTokensText(tokens: string[]): string {
+  if (tokens.length === 0) return "（空集 fail-closed）";
+  return tokens.map((token) => tokenLabel(token)).join("、");
+}
+
 function currentScan() {
   return detail.value?.current_version?.scan ?? null;
 }
@@ -775,6 +968,31 @@ function currentScan() {
                 data-testid="kb-retrieval-rerank"
               />
               <span class="muted rerank-hint">重排较慢（分钟级）</span>
+              <!-- KB-09C 视角三控件（缺省=操作者视角；as_user 与 as_audiences 二选一） -->
+              <el-input
+                v-model="retrievalAsUserId"
+                size="small"
+                placeholder="以用户视角（用户 id，可空）"
+                clearable
+                class="retrieval-as"
+                data-testid="kb-retrieval-as-user"
+              />
+              <el-input
+                v-model="retrievalAsAudiencesText"
+                size="small"
+                placeholder="模拟人群 token（逗号分隔，可空）"
+                clearable
+                class="retrieval-as"
+                data-testid="kb-retrieval-as-audiences"
+              />
+              <template v-if="retrievalUnfilteredVisible">
+                <el-switch
+                  v-model="retrievalIgnoreAcl"
+                  size="small"
+                  data-testid="kb-retrieval-ignore-acl"
+                />
+                <span class="muted rerank-hint">忽略 ACL</span>
+              </template>
               <el-button
                 size="small"
                 type="primary"
@@ -795,6 +1013,15 @@ function currentScan() {
               <p class="muted" data-testid="kb-retrieval-meta">
                 {{ rerankStatusLabel(retrievalTestResult.rerank_status) }} ·
                 {{ retrievalTestResult.pool_size }} 行 · {{ retrievalTestResult.latency_ms }}ms
+                <template v-if="retrievalTestResult.acl_filter_applied">
+                  · 视角 token：
+                  <span data-testid="kb-retrieval-resolved-tokens">
+                    {{ resolvedTokensText(retrievalTestResult.resolved_audience_tokens) }}
+                  </span>
+                </template>
+                <template v-else>
+                  · <span data-testid="kb-retrieval-unfiltered">未过滤视图（ignore_acl）</span>
+                </template>
               </p>
               <el-table
                 :data="retrievalTestResult.results"
@@ -840,6 +1067,21 @@ function currentScan() {
                 </el-table-column>
                 <el-table-column label="rerank" width="84">
                   <template #default="{ row }">{{ formatScore(row.rerank_score) }}</template>
+                </el-table-column>
+                <!-- KB-09C：该块 payload ACL token ∩ 视角 token（空=非 ACL 命中，如 ignore_acl 视图）。 -->
+                <el-table-column label="命中 token" min-width="120">
+                  <template #default="{ row }">
+                    <el-tag
+                      v-for="token in row.acl_matched_tokens"
+                      :key="token"
+                      size="small"
+                      type="info"
+                      class="acl-token-tag"
+                    >
+                      {{ tokenLabel(token) }}
+                    </el-tag>
+                    <span v-if="row.acl_matched_tokens.length === 0" class="muted">—</span>
+                  </template>
                 </el-table-column>
                 <el-table-column label="" width="76">
                   <template #default="{ row }">
@@ -1034,6 +1276,61 @@ function currentScan() {
             <pre class="chunk-text" data-testid="kb-chunk-text">{{
               chunkDetail.text_markdown
             }}</pre>
+          </div>
+        </section>
+      </template>
+      <!-- KB-09C 人群配置子视图（卡 C1-A：版本行入口；确认态=可构建/发布不变量的 UX 提示）。 -->
+      <template v-else-if="detail && aclView">
+        <section v-loading="aclLoading" data-testid="kb-acl-view">
+          <div class="chunks-head">
+            <el-button link data-testid="kb-acl-back" @click="closeAcl">← 返回文档</el-button>
+            <span class="chunks-title">
+              v{{ aclView.versionNo }} 查阅人群
+              <el-tag
+                :type="(aclData?.acl_confirmed ?? false) ? 'success' : 'warning'"
+                size="small"
+                data-testid="kb-acl-confirmed-tag"
+              >
+                {{ aclConfirmedLabel(aclData?.acl_confirmed ?? false) }}
+              </el-tag>
+            </span>
+          </div>
+          <el-alert
+            v-if="aclBannerText(aclData?.acl_confirmed ?? false)"
+            :title="aclBannerText(aclData?.acl_confirmed ?? false) ?? ''"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="acl-banner"
+            data-testid="kb-acl-banner"
+          />
+          <el-table :data="aclData?.audiences ?? []" size="small" data-testid="kb-acl-table">
+            <el-table-column label="类型" width="110">
+              <template #default="{ row }">{{ audienceTypeLabel(row.audience_type) }}</template>
+            </el-table-column>
+            <el-table-column label="对象" min-width="180">
+              <template #default="{ row }">
+                <span class="mono">{{ row.audience_id ?? "—" }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <p v-if="(aclData?.audiences.length ?? 0) === 0" class="muted" data-testid="kb-acl-empty">
+            未配置人群：构建/发布将被 409 ACL_REQUIRED 拒绝。
+          </p>
+          <div v-if="aclManageVisible" class="acl-actions">
+            <el-button size="small" data-testid="kb-acl-edit" @click="openAclDialog">
+              编辑人群
+            </el-button>
+            <el-button
+              size="small"
+              type="primary"
+              :disabled="aclData === null || aclData.acl_confirmed"
+              :loading="aclConfirming"
+              data-testid="kb-acl-confirm"
+              @click="confirmAcl"
+            >
+              确认人群
+            </el-button>
           </div>
         </section>
       </template>
@@ -1311,6 +1608,20 @@ function currentScan() {
               </el-button>
             </template>
           </el-table-column>
+          <!-- KB-09C：人群配置入口列（卡 C1-A；无 school.kb.view 的主体整列不出现）。 -->
+          <el-table-column v-if="aclEntryVisible" label="人群" width="76">
+            <template #default="{ row }">
+              <el-button
+                link
+                size="small"
+                type="primary"
+                data-testid="kb-acl-open"
+                @click="openAcl(row as KbVersionView)"
+              >
+                查看
+              </el-button>
+            </template>
+          </el-table-column>
         </el-table>
         <el-button
           v-if="nextCursor !== null"
@@ -1323,6 +1634,79 @@ function currentScan() {
         >
         <p v-else-if="versions.length === 0 && !versionsLoading" class="muted">暂无版本记录。</p>
       </template>
+
+      <!-- KB-09C 人群编辑对话框（卡 C2-A：条目逐行编辑 + kb-logic 镜像后端 422 族预检）。 -->
+      <el-dialog
+        v-model="aclDialogVisible"
+        title="编辑查阅人群（全量替换）"
+        width="520px"
+        data-testid="kb-acl-dialog"
+      >
+        <p class="muted acl-dialog-hint">
+          保存为全量替换：不在列表中的既有条目将被移除，且确认态重置为未确认（需重新确认后才能构建/发布）。
+        </p>
+        <el-table :data="aclRows" size="small" data-testid="kb-acl-edit-table">
+          <el-table-column label="类型" min-width="260">
+            <template #default="{ $index }">
+              <el-radio-group
+                :model-value="aclRows[$index]?.audience_type"
+                size="small"
+                data-testid="kb-acl-row-type"
+                @update:model-value="onAclRowTypeChange($index, $event as string)"
+              >
+                <el-radio v-for="t in KB_AUDIENCE_TYPES" :key="t" :value="t" class="acl-type-radio">
+                  {{ audienceTypeLabel(t) }}
+                </el-radio>
+              </el-radio-group>
+            </template>
+          </el-table-column>
+          <el-table-column label="对象 id / 年级值" min-width="200">
+            <template #default="{ $index }">
+              <el-input
+                :model-value="aclRows[$index]?.audience_id ?? ''"
+                size="small"
+                :disabled="aclRows[$index]?.audience_type === 'all'"
+                :placeholder="aclRows[$index]?.audience_type === 'all' ? '全体（无需 id）' : ''"
+                data-testid="kb-acl-row-id"
+                @update:model-value="onAclRowIdChange($index, $event)"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="" width="60">
+            <template #default="{ $index }">
+              <el-button
+                link
+                size="small"
+                type="danger"
+                data-testid="kb-acl-row-remove"
+                @click="removeAclRow($index)"
+              >
+                移除
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-button size="small" class="acl-add-row" data-testid="kb-acl-row-add" @click="addAclRow">
+          添加条目
+        </el-button>
+        <p v-if="aclEditError" class="test-error" data-testid="kb-acl-edit-error">
+          {{ aclEditError }}
+        </p>
+        <template #footer>
+          <el-button data-testid="kb-acl-dialog-cancel" @click="aclDialogVisible = false">
+            取消
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="aclSaving"
+            :disabled="aclEditError !== null"
+            data-testid="kb-acl-save"
+            @click="saveAcl"
+          >
+            保存（置为未确认）
+          </el-button>
+        </template>
+      </el-dialog>
     </div>
   </el-drawer>
 </template>
@@ -1447,6 +1831,31 @@ function currentScan() {
 }
 .rerank-hint {
   white-space: nowrap;
+}
+/* KB-09C：视角控件与人群子视图 */
+.retrieval-as {
+  flex: 1;
+  min-width: 140px;
+}
+.acl-banner {
+  margin-bottom: 8px;
+}
+.acl-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+.acl-token-tag {
+  margin-right: 4px;
+}
+.acl-dialog-hint {
+  margin-top: 0;
+}
+.acl-add-row {
+  margin-top: 8px;
+}
+.acl-type-radio {
+  margin-right: 8px;
 }
 .retrieval-chunk-index {
   margin-right: 4px;

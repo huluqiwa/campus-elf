@@ -158,7 +158,7 @@ export interface KbRetrievalTestRouteHit {
   rank: number;
 }
 
-/** 检索测试结果行（「为什么召回」逐路可解释 + 最终引用标记）。 */
+/** 检索测试结果行（「为什么召回」逐路可解释 + 最终引用标记 + KB-09B ACL 命中 token）。 */
 export interface KbRetrievalTestResultRow {
   chunk_id: string;
   chunk_index: number;
@@ -174,6 +174,9 @@ export interface KbRetrievalTestResultRow {
   rerank_score: number | null;
   final_rank: number;
   is_final_reference: boolean;
+  /** 该块 payload `acl_tokens` ∩ 视角 token（KB-09B；空=视角 token 与该块 payload 无交集——
+   * 注意 ignore_acl 视图下仍按视角 token 计算交集，并非恒空）。 */
+  acl_matched_tokens: string[];
 }
 
 /** 检索测试响应（pool_size = len(results)；results 按 final_rank 升序）。 */
@@ -186,14 +189,46 @@ export interface KbRetrievalTestResult {
   latency_ms: number;
   pool_size: number;
   results: KbRetrievalTestResultRow[];
+  /** KB-09B：视角解析结果回显（空=解析失败/空集 fail-closed，零召回可归因）。 */
+  resolved_audience_tokens: string[];
+  /** false 仅在 ignore_acl（未过滤诊断视图）。 */
+  acl_filter_applied: boolean;
 }
 
 /** 检索测试输入（query raw 码点 ≤300 strip 后非空；top_k 1-20；with_rerank 默认 false；
- * ACL 三参数为 KB-09 契约预留——后端设值即 422 `RETRIEVAL_TEST_ACL_UNAVAILABLE`，前端不提供入口）。 */
+ * KB-09C 视角三参数：缺省=操作者自身视角；as_user_id 与 as_audiences 二选一
+ * （后端 `RETRIEVAL_TEST_PERSPECTIVE_CONFLICT` 422）；ignore_acl 仅
+ * `school.kb.retrieval_test.unfiltered` 持有人可用（403 + 强制审计）。） */
 export interface KbRetrievalTestInput {
   query: string;
   top_k?: number;
   with_rerank?: boolean;
+  /** 以某用户视角运行（同租校验；不存在/跨租/已删除 404 同文）。 */
+  as_user_id?: string;
+  /** 模拟人群 token 数组（结构校验 422 族；不做同租存在性校验）。 */
+  as_audiences?: string[];
+  /** 忽略 ACL（未过滤诊断视图；需 unfiltered 码 + 强制审计）。 */
+  ignore_acl?: boolean;
+}
+
+/** 版本人群条目（`all` 时 audience_id 为 null；后端 `AudienceItem`，service.py:2247）。 */
+export interface KbAudienceItem {
+  audience_type: string;
+  audience_id: string | null;
+}
+
+/** 版本人群配置视图（后端 `AudienceView`，service.py:2255；跨租/范围外 404 同文不泄露）。 */
+export interface KbAudienceView {
+  version_id: string;
+  audiences: KbAudienceItem[];
+  acl_confirmed: boolean;
+  acl_confirmed_by: string | null;
+  acl_confirmed_at: string | null;
+}
+
+export interface KbAudienceInput {
+  audience_type: string;
+  audience_id?: string | null;
 }
 
 export interface KbUploadInput {
@@ -229,8 +264,17 @@ export interface KbApi {
   /** 版本分块统计（per-version 固定口径；404 `VERSION_NOT_FOUND`）。 */
   getChunkStats(versionId: string): Promise<KbChunkStatsView>;
   /** 单 query 检索测试（dense/sparse/RRF/rerank 分数与最终引用；跨租/范围外 404 `VERSION_NOT_FOUND`，
-   * rerank 失败不报错走 `rerank_status` 降级）。 */
+   * rerank 失败不报错走 `rerank_status` 降级；KB-09C 视角三参数见 `KbRetrievalTestInput`）。 */
   retrievalTest(versionId: string, input: KbRetrievalTestInput): Promise<KbRetrievalTestResult>;
+  /** 读取版本人群配置（`school.kb.view`；跨租/范围外 404 同文不泄露）。 */
+  getAudiences(versionId: string): Promise<KbAudienceView>;
+  /** 全量替换版本人群并置未确认（`school.kb.acl.manage`；已构建版本即时清 payload——fail-closed）。 */
+  replaceAudiences(
+    versionId: string,
+    input: { audiences: KbAudienceInput[] },
+  ): Promise<KbAudienceView>;
+  /** 确认版本人群（`school.kb.acl.manage`；空集 409 `ACL_REQUIRED`、已确认 409）。 */
+  confirmAudiences(versionId: string): Promise<KbAudienceView>;
 }
 
 export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
@@ -314,8 +358,34 @@ export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
             query: input.query,
             ...(input.top_k === undefined ? {} : { top_k: input.top_k }),
             ...(input.with_rerank === undefined ? {} : { with_rerank: input.with_rerank }),
+            ...(input.as_user_id === undefined ? {} : { as_user_id: input.as_user_id }),
+            ...(input.as_audiences === undefined ? {} : { as_audiences: input.as_audiences }),
+            ...(input.ignore_acl === undefined ? {} : { ignore_acl: input.ignore_acl }),
           }),
         },
+      );
+    },
+    async getAudiences(versionId) {
+      return request<KbAudienceView>(`/api/v1/school/kb/document-versions/${versionId}/audiences`);
+    },
+    async replaceAudiences(versionId, input) {
+      return request<KbAudienceView>(`/api/v1/school/kb/document-versions/${versionId}/audiences`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audiences: input.audiences.map((item) => ({
+            audience_type: item.audience_type,
+            ...(item.audience_id === undefined || item.audience_id === null
+              ? { audience_id: null }
+              : { audience_id: item.audience_id }),
+          })),
+        }),
+      });
+    },
+    async confirmAudiences(versionId) {
+      return request<KbAudienceView>(
+        `/api/v1/school/kb/document-versions/${versionId}/audiences/confirm`,
+        { method: "POST" },
       );
     },
   };

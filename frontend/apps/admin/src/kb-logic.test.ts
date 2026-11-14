@@ -4,6 +4,12 @@ import { ApiError } from "@campus-elf/api-client";
 import type { KbChunkStatsView, KbDocumentView, KbVersionView } from "@campus-elf/api-client";
 
 import {
+  aclBannerText,
+  aclConfirmedLabel,
+  aclManageGate,
+  aclVisible,
+  audienceEditError,
+  audienceTypeLabel,
   chunkFilterError,
   chunkTypeLabel,
   chunksGate,
@@ -43,6 +49,8 @@ import {
   sectionOptions,
   shouldPollScan,
   staleBannerText,
+  tokenLabel,
+  unfilteredGate,
   uploadAttemptFor,
   uploadSignature,
 } from "./kb-logic";
@@ -613,5 +621,110 @@ describe("KB-07B 检索词与 top_k 前端预检", () => {
     expect(retrievalTopKError(10)).toBeNull();
     expect(retrievalTopKError(1)).toBeNull();
     expect(retrievalTopKError(20)).toBeNull();
+  });
+});
+
+describe("KB-09C 人群配置门禁（权限码纯函数）", () => {
+  const VIEW = ["school.kb.view"];
+  const MANAGE = ["school.kb.view", "school.kb.acl.manage"];
+  const UNFILTERED = ["school.kb.view_chunks", "school.kb.retrieval_test.unfiltered"];
+
+  it("aclVisible：school.kb.view 持有人可见入口（只读）", () => {
+    expect(aclVisible(VIEW)).toBe(true);
+    expect(aclVisible(MANAGE)).toBe(true);
+    expect(aclVisible([])).toBe(false);
+  });
+
+  it("aclManageGate：编辑/确认按钮仅 acl.manage 持有人（GET view 与 PUT manage 分授镜像）", () => {
+    expect(aclManageGate(MANAGE)).toBe(true);
+    expect(aclManageGate(VIEW)).toBe(false);
+    expect(aclManageGate([])).toBe(false);
+  });
+
+  it("unfilteredGate：ignore_acl 控件仅 unfiltered 码持有人渲染", () => {
+    expect(unfilteredGate(UNFILTERED)).toBe(true);
+    expect(unfilteredGate(["school.kb.view_chunks"])).toBe(false);
+    expect(unfilteredGate([])).toBe(false);
+  });
+});
+
+describe("KB-09C 人群条目校验（镜像后端 parse_audience_items 422 族）", () => {
+  it("空集合法（PUT 空数组=清空→回未确认态）", () => {
+    expect(audienceEditError([])).toBeNull();
+  });
+
+  it("七类逐类合法；all 不带 id 合法", () => {
+    for (const t of ["department", "role", "class", "grade", "course", "user"]) {
+      expect(audienceEditError([{ audience_type: t, audience_id: "x" }])).toBeNull();
+    }
+    expect(audienceEditError([{ audience_type: "all", audience_id: null }])).toBeNull();
+  });
+
+  it("白名单外类型 → AUDIENCE_TYPE_INVALID 文案", () => {
+    expect(audienceEditError([{ audience_type: "group", audience_id: "x" }])).toContain("人群类型");
+  });
+
+  it("all 与其他类型混配 → AUDIENCE_ALL_MIXED 文案（fail-closed）", () => {
+    const error = audienceEditError([
+      { audience_type: "all", audience_id: null },
+      { audience_type: "department", audience_id: "d-1" },
+    ]);
+    expect(error).toContain("不得与其他人群类型混配");
+  });
+
+  it("all 带 id → AUDIENCE_ID_FORBIDDEN 文案", () => {
+    expect(audienceEditError([{ audience_type: "all", audience_id: "d-1" }])).toContain(
+      "不接受对象 id",
+    );
+  });
+
+  it("非 all 空 id（含空白）→ AUDIENCE_ID_REQUIRED 文案", () => {
+    for (const blank of ["", "   ", null]) {
+      expect(audienceEditError([{ audience_type: "department", audience_id: blank }])).toContain(
+        "必须提供对象 id",
+      );
+    }
+  });
+
+  it("同 type+id 重复 → AUDIENCE_DUPLICATE 文案", () => {
+    expect(
+      audienceEditError([
+        { audience_type: "department", audience_id: "d-1" },
+        { audience_type: "department", audience_id: "d-1" },
+      ]),
+    ).toContain("重复");
+  });
+
+  it("id 尾随空白与洁净 id 视为同一条目（判重键先 trim，与后端 strip 后判重同构——复审 m4 固化）", () => {
+    expect(
+      audienceEditError([
+        { audience_type: "department", audience_id: "d-1 " },
+        { audience_type: "department", audience_id: "d-1" },
+      ]),
+    ).toContain("重复");
+  });
+});
+
+describe("KB-09C 确认态文案与 token 展示", () => {
+  it("aclConfirmedLabel：确认/未确认两态", () => {
+    expect(aclConfirmedLabel(true)).toContain("已确认");
+    expect(aclConfirmedLabel(false)).toContain("未确认");
+  });
+
+  it("aclBannerText：未确认时警示「确认后才能构建/发布」", () => {
+    expect(aclBannerText(false)).toContain("未确认");
+    expect(aclBannerText(false)).toContain("确认");
+    expect(aclBannerText(true)).toBeNull();
+  });
+
+  it("audienceTypeLabel：七类中文标签；未知类型显示原码", () => {
+    expect(audienceTypeLabel("department")).toBe("部门");
+    expect(audienceTypeLabel("all")).toBe("全体");
+    expect(audienceTypeLabel("group")).toBe("group");
+  });
+
+  it("tokenLabel：all→全体；type:<id> 原样展示（诊断面不美化 id）", () => {
+    expect(tokenLabel("all")).toBe("全体");
+    expect(tokenLabel("department:d-1")).toBe("department:d-1");
   });
 });
