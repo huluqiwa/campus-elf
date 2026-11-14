@@ -148,6 +148,13 @@ class KbDocumentVersion(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, 
             "scan_attempts >= 0", name="scan_attempts_nonnegative"
         ),
         UniqueConstraint("id", "tenant_id", name="uq_kb_document_versions_id_tenant_id"),
+        # KB-10A：派生版本追溯源版本（自引用复合 FK；SET NULL 保留历史）
+        ForeignKeyConstraint(
+            ["parent_version_id", "tenant_id"],
+            ["kb_document_versions.id", "kb_document_versions.tenant_id"],
+            name="fk_kb_document_versions_parent_version_id",
+            ondelete="SET NULL",
+        ),
         UniqueConstraint(
             "tenant_id",
             "document_id",
@@ -193,6 +200,10 @@ class KbDocumentVersion(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, 
     # K4 人群确认态（KB-09A）：null = 未确认（fail-closed 门禁判据，spec :307）
     acl_confirmed_by: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     acl_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # KB-10A：派生版本（K5）——parent_version_id 追溯源版本；derivation_type ∈
+    # initial/chunk_edit（NULL=initial 历史行；CHECK c7e9f1a3b5d7）
+    parent_version_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    derivation_type: Mapped[str | None] = mapped_column(String(24))
     created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
 
 
@@ -247,6 +258,72 @@ class KbDocumentAudience(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin,
     audience_type: Mapped[str] = mapped_column(String(24), nullable=False)
     audience_id: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+
+
+class KbChunkEdit(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """块编辑提交记录（K5；spec :324-326——base_hash 乐观锁 + 轻量确认）。
+
+    status 三态（D4-A）：submitted（POST edits 落库）→ confirmed（derive 纳入，
+    derived_version_id 关联）或 discarded（未纳入派生）；部分唯一
+    `(source_version_id, chunk_id) WHERE status='submitted'`——同块至多一个提交态。
+    """
+
+    __tablename__ = "kb_chunk_edits"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('submitted', 'confirmed', 'discarded')", name="status_valid"
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_kb_chunk_edits_id_tenant_id"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_kb_chunk_edits_tenant_id_tenants",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_version_id", "tenant_id"],
+            ["kb_document_versions.id", "kb_document_versions.tenant_id"],
+            name="fk_kb_chunk_edits_source_version_id",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["chunk_id", "tenant_id"],
+            ["kb_chunks.id", "kb_chunks.tenant_id"],
+            name="fk_kb_chunk_edits_chunk_id_kb_chunks",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["edited_by", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_kb_chunk_edits_edited_by_users",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["derived_version_id", "tenant_id"],
+            ["kb_document_versions.id", "kb_document_versions.tenant_id"],
+            name="fk_kb_chunk_edits_derived_version_id",
+            ondelete="SET NULL",
+        ),
+        Index("ix_kb_chunk_edits_tenant_id", "tenant_id"),
+        Index("ix_kb_chunk_edits_source_version_id", "source_version_id"),
+        Index(
+            "uq_kb_chunk_edits_source_chunk_submitted",
+            "source_version_id",
+            "chunk_id",
+            unique=True,
+            postgresql_where=text("status = 'submitted'"),
+        ),
+    )
+
+    source_version_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    chunk_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    before_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    after_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    new_content: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    derived_version_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    edited_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
 
 
 BUILD_JOB_STATUSES = ("BUILD_QUEUED", "BUILDING", "READY", "FAILED")

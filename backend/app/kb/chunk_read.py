@@ -83,7 +83,7 @@ def decode_chunk_cursor(cursor: str) -> tuple[int, UUID]:
 
 @dataclass(frozen=True, slots=True)
 class ChunkView:
-    """分块列表/详情行（KB-10 的 is_human_edited 三列不暴露）。"""
+    """分块列表/详情行（KB-10A：is_human_edited 三列透出，spec :328）。"""
 
     id: UUID
     chunk_type: str
@@ -98,6 +98,9 @@ class ChunkView:
     char_count: int
     embedding_status: str
     created_at: datetime
+    is_human_edited: bool
+    edited_by: UUID | None
+    edited_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +196,9 @@ def _chunk_view(chunk: KbChunk) -> ChunkView:
         char_count=chunk.char_count,
         embedding_status=chunk.embedding_status,
         created_at=chunk.created_at,
+        is_human_edited=chunk.is_human_edited,
+        edited_by=chunk.edited_by,
+        edited_at=chunk.edited_at,
     )
 
 

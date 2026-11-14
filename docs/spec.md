@@ -305,7 +305,7 @@
 #### KB-09 文档查阅人群 ACL 与检索强制过滤（K4）
 - 版本级 ACL 表 `kb_document_audiences`：`audience_type ∈ {department, role, class, grade, course, user, all}`，多条为**并集**；`all` 必须显式选择。
 - **fail-closed**：版本 ACL 记录为 0 条时构建/发布返回 `409 ACL_REQUIRED`；已配置未确认返回 `409 ACL_UNCONFIRMED`。
-- 新版本默认继承上一版本 ACL 但需重新确认；派生版本（KB-10）沿用源版本已确认 ACL。
+- 新版本默认继承上一版本 ACL 但需重新确认；派生版本（KB-10）沿用源版本已确认 ACL（2026-11-15 D3-A 拍板：KB-10 派生版本直接复制源 audiences 行与确认态列——轻量确认哲学；本行「需重新确认」语义保留给真重传新版本）。
 - ACL 变更即时生效，**不受"旧会话固定版本"保护**（安全策略优先）；权限 `school.kb.acl.manage`，审计 `school.kb.acl.updated` / `school.kb.acl.confirmed`（2026-11-14 TD-318 勘误：原文 `kb.acl.*` 补齐 house 前缀，对齐 `docs/rbac-matrix.md` 与实现）。
 - 构建时把 ACL 写入 Qdrant payload（token 形如 `department:<uuid>`）；检索按登录身份解析的人群集合过滤，要求至少命中一个 token（`min_should: 1`）。
 - 检索测试支持"以某用户/人群视角"运行；校方超管可用"忽略 ACL"对比视图（`school.kb.retrieval_test.unfiltered`，强制审计）。

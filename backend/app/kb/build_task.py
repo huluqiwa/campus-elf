@@ -34,6 +34,7 @@ from app.config import get_settings
 from app.db.models.kb import (
     KbBuildJob,
     KbChunk,
+    KbChunkEdit,
     KbDocument,
     KbDocumentAudience,
     KbDocumentVersion,
@@ -241,6 +242,17 @@ def _document_repository(
     )
 
 
+def _chunk_edit_repository(
+    session: AsyncSession, tenant_id: UUID
+) -> TenantScopedRepository[KbChunkEdit]:
+    return TenantScopedRepository(
+        session,
+        KbChunkEdit,
+        tenant_id,
+        scope=ScopeBypass(reason="块编辑记录按版本/块 id 精确操作，系统执行者"),
+    )
+
+
 def _chunk_repository(session: AsyncSession, tenant_id: UUID) -> TenantScopedRepository[KbChunk]:
     return TenantScopedRepository(
         session,
@@ -291,18 +303,22 @@ async def _claim(
             if version is not None
             else None
         )
-        # 首次构建：版本/文档 APPROVED；重试（retry 端点把 job 排回 QUEUED）：FAILED
+        # 首次构建：版本/文档 APPROVED；重试（retry 端点把 job 排回 QUEUED）：FAILED。
+        # KB-10A 派生构建豁免：文档可能 PUBLISHED（源版本在线）——版本状态检查保留，
+        # 文档状态检查跳过且文档状态不跟随（源文档不进 BUILDING，spec :327 不影响源）。
+        is_derived = version is not None and version.derivation_type == "chunk_edit"
         if (
             version is None
             or document is None
             or version.status not in (KB_STATUS_APPROVED, KB_STATUS_FAILED)
-            or document.status not in (KB_STATUS_APPROVED, KB_STATUS_FAILED)
+            or (not is_derived and document.status not in (KB_STATUS_APPROVED, KB_STATUS_FAILED))
         ):
             return None
         now = datetime.now(UTC)
         assert_transition(version.status, KB_STATUS_BUILDING)
         version.status = KB_STATUS_BUILDING
-        document.status = KB_STATUS_BUILDING
+        if not is_derived:
+            document.status = KB_STATUS_BUILDING
         job.status = JOB_STATUS_BUILDING
         job.started_at = now
         job.heartbeat_at = now
@@ -378,6 +394,7 @@ async def _finish(
     chunks: list[tuple[UUID, RawChunk, list[float] | None]] | None = None,
     collection: str | None = None,
     dense_dim: int | None = None,
+    human_edits: dict[UUID, tuple[UUID, Any]] | None = None,
     request_id: str | None = None,
 ) -> None:
     """收口（短事务）：版本/文档/job 终态 + chunks 原子落库 + 索引记录 + 审计。
@@ -421,7 +438,9 @@ async def _finish(
         target_status = KB_STATUS_READY if success else KB_STATUS_FAILED
         assert_transition(version.status, target_status)
         version.status = target_status
-        document.status = target_status
+        # KB-10A 派生构建：文档状态不跟随（源文档可能 PUBLISHED 在线，spec :327）
+        if version.derivation_type != "chunk_edit":
+            document.status = target_status
         job.status = JOB_STATUS_READY if success else JOB_STATUS_FAILED
         job.finished_at = now
         job.heartbeat_at = now
@@ -458,6 +477,18 @@ async def _finish(
                     },
                     embedding_status="ready",
                     chunk_hash=chunk.chunk_hash,
+                    # KB-10A：人工编辑标记（is_human_edited 进 payload 与分块详情，spec :328）
+                    is_human_edited=(
+                        human_edits is not None and chunk_id in human_edits
+                    ),
+                    edited_by=(
+                        human_edits[chunk_id][0] if human_edits and chunk_id in human_edits else None
+                    ),
+                    edited_at=(
+                        human_edits[chunk_id][1]
+                        if human_edits and chunk_id in human_edits
+                        else None
+                    ),
                 )
                 await _chunk_repository(session, tenant_id).add(row)
                 chunk_rows.append(row)
@@ -799,18 +830,31 @@ async def build_kb_version(ctx: dict[str, Any], tenant_id: str, version_id: str)
         if gate is not None:
             raise BuildPipelineError(gate, "人群 ACL 未配置或未确认（fail-closed，K4）")
         store = build_object_store(resolved)
-        prepared, collection = await _run_pipeline(
-            tid,
-            job.id,
-            version_id=vid,
-            document_id=version.document_id,
-            doc_title=(await _load_doc_title(tid, version.document_id)),
-            source_object_key=version.source_object_key,
-            source_mime=version.mime,
-            filename=version.source_filename,
-            settings=resolved,
-            store=store,
-        )
+        human_edits: dict[UUID, tuple[UUID, Any]] | None
+        if version.derivation_type == "chunk_edit":
+            # KB-10A 派生构建（D1-A/D2-A）：跳 PARSING/CHUNKING；COPY 全部分块
+            # （改动块按 confirmed 编辑更新）→ EMBED 仅改动块 → 未改块向量从源
+            # collection 复制 → INDEX → VALIDATE → READY（spec :327）
+            prepared, collection, human_edits = await _run_derived_pipeline(
+                tid,
+                job.id,
+                version=version,
+                settings=resolved,
+            )
+        else:
+            prepared, collection = await _run_pipeline(
+                tid,
+                job.id,
+                version_id=vid,
+                document_id=version.document_id,
+                doc_title=(await _load_doc_title(tid, version.document_id)),
+                source_object_key=version.source_object_key,
+                source_mime=version.mime,
+                filename=version.source_filename,
+                settings=resolved,
+                store=store,
+            )
+            human_edits = None
     except BuildPipelineError as exc:
         await _finish(
             tid,
@@ -847,9 +891,319 @@ async def build_kb_version(ctx: dict[str, Any], tenant_id: str, version_id: str)
         return {"status": "failed", "error_code": code}
 
     await _finish(
-        tid, vid, attempt=claimed_attempt, success=True, chunks=prepared, collection=collection
+        tid,
+        vid,
+        attempt=claimed_attempt,
+        success=True,
+        chunks=prepared,
+        collection=collection,
+        human_edits=human_edits,
     )
     return {"status": "ready", "chunks": len(prepared)}
+
+
+async def _run_derived_pipeline(
+    tenant_id: UUID,
+    job_id: UUID,
+    *,
+    version: KbDocumentVersion,
+    settings: Any,
+) -> tuple[list[tuple[UUID, RawChunk, list[float] | None]], str, dict[UUID, tuple[UUID, Any]]]:
+    """派生构建管线（KB-10A，D1-A/D2-A；spec :327）：跳 PARSING/CHUNKING。
+
+    COPY：从源版本 kb_chunks 全量复制（confirmed 编辑的改动块按 new_content 更新，
+    chunk_hash/token/char 重算，is_human_edited/edited_by 落派生行）；
+    EMBED：仅改动块调 embedder（**嵌入调用次数 = 改动块数**，spec :330 验收）；
+    未改块向量从源 collection 按 chunk_id retrieve 复制（D1-A：不建缓存表）；
+    sparse 重算（派生语料 IDF，TD-312 口径）；INDEX/VALIDATE 同既有。
+
+    返回 ((chunk_id, chunk, dense) 列表, collection 名, human_edits 映射)。
+    任何阶段抛 `BuildPipelineError`；失败不影响源版本与线上 alias（独立 collection）。
+    """
+
+    parent_version_id = version.parent_version_id
+    if parent_version_id is None:
+        raise BuildPipelineError(
+            "CHUNK_EDIT_STATE", "派生版本缺少 parent_version_id（编程错误级）"
+        )
+
+    # ---------- COPY：源分块 + confirmed 编辑 ----------
+    await _stage_progress(
+        tenant_id, job_id, stage=STAGE_CHUNKING, processed_units=0, total_units=1
+    )
+    async with db_session(tenant_id=tenant_id) as session:
+        source_chunks = (
+            (
+                await session.execute(
+                    _chunk_repository(session, tenant_id)
+                    .base_query()
+                    .where(KbChunk.document_version_id == parent_version_id)
+                    .order_by(KbChunk.chunk_index.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        confirmed_edits = (
+            (
+                await session.execute(
+                    _chunk_edit_repository(session, tenant_id)
+                    .base_query()
+                    .where(
+                        KbChunkEdit.source_version_id == parent_version_id,
+                        KbChunkEdit.status == "confirmed",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        source_index = (
+            await session.execute(
+                _index_repository(session, tenant_id)
+                .base_query()
+                .where(KbIndexVersion.document_version_id == parent_version_id)
+            )
+        ).scalar_one_or_none()
+    if not source_chunks:
+        raise BuildPipelineError("CHUNK_EDIT_STATE", "源版本无分块（编程错误级）")
+    if source_index is None:
+        raise BuildPipelineError(
+            "INDEX_SOURCE_MISSING", "源版本索引不存在（未构建的版本不可派生）"
+        )
+    edits_by_chunk: dict[UUID, KbChunkEdit] = {edit.chunk_id: edit for edit in confirmed_edits}
+    # M1（fail-closed）：confirmed 编辑必须指向子块（submit 端点已拦截；此处二道门）
+    source_chunk_by_id = {chunk.id: chunk for chunk in source_chunks}
+    for edit_chunk_id in edits_by_chunk:
+        source_chunk = source_chunk_by_id.get(edit_chunk_id)
+        if source_chunk is None or source_chunk.chunk_type != CHUNK_TYPE_CHILD:
+            raise BuildPipelineError(
+                "CHUNK_EDIT_TARGET_INVALID",
+                "confirmed 编辑指向非子块（提交端点拦截失效，编程错误级）",
+            )
+
+    doc_title = await _load_doc_title(tenant_id, version.document_id)
+    derived: list[tuple[UUID, RawChunk, KbChunk]] = []
+    for source_chunk in source_chunks:
+        edit = edits_by_chunk.get(source_chunk.id)
+        if edit is not None:
+            chunk = RawChunk(
+                chunk_type=source_chunk.chunk_type,
+                text=edit.new_content,
+                section_path=source_chunk.section_path,
+                page_start=source_chunk.page_start,
+                page_end=source_chunk.page_end,
+                overlap_prev=source_chunk.overlap_prev,
+                overlap_next=source_chunk.overlap_next,
+                metadata={
+                    "table": "table" in (source_chunk.metadata_json or {}),
+                    "code": "code" in (source_chunk.metadata_json or {}),
+                },
+            )
+        else:
+            chunk = RawChunk(
+                chunk_type=source_chunk.chunk_type,
+                text=source_chunk.text,
+                section_path=source_chunk.section_path,
+                page_start=source_chunk.page_start,
+                page_end=source_chunk.page_end,
+                overlap_prev=source_chunk.overlap_prev,
+                overlap_next=source_chunk.overlap_next,
+                metadata={
+                    "table": "table" in (source_chunk.metadata_json or {}),
+                    "code": "code" in (source_chunk.metadata_json or {}),
+                },
+            )
+        derived.append((uuid4(), chunk, source_chunk))
+    await _stage_progress(
+        tenant_id,
+        job_id,
+        stage=STAGE_CHUNKING,
+        processed_units=len(derived),
+        total_units=len(derived),
+    )
+
+    # ---------- EMBED：仅改动块（嵌入调用次数 = 改动块数，spec :330）----------
+    edited_positions = [
+        position
+        for position, (_cid, chunk, source_chunk) in enumerate(derived)
+        if source_chunk.id in edits_by_chunk
+    ]
+    edited_texts = [
+        embed_input_text(
+            document_title=doc_title,
+            section_path=derived[position][1].section_path,
+            chunk_text=derived[position][1].text,
+        )
+        for position in edited_positions
+        if derived[position][1].chunk_type == CHUNK_TYPE_CHILD
+    ]
+    total = len(edited_texts)
+    await _stage_progress(
+        tenant_id, job_id, stage=STAGE_EMBEDDING, processed_units=0, total_units=total
+    )
+    embedder = _build_embedder(settings)
+    edited_dense: list[list[float]] = []
+    for start in range(0, total, settings.kb_embed_batch_size):
+        batch = edited_texts[start : start + settings.kb_embed_batch_size]
+        try:
+            edited_dense.extend(await embedder.embed(batch))
+        except EmbeddingError as exc:
+            raise BuildPipelineError(exc.code, exc.message) from exc
+        await _stage_progress(
+            tenant_id,
+            job_id,
+            stage=STAGE_EMBEDDING,
+            processed_units=min(start + len(batch), total),
+            total_units=total,
+        )
+    if edited_dense and len(edited_dense[0]) != settings.kb_embed_dim:
+        raise BuildPipelineError(
+            "EMBED_DIM_MISMATCH",
+            f"嵌入维度漂移（实际 {len(edited_dense[0])}，配置 {settings.kb_embed_dim}）",
+        )
+
+    # ---------- 向量装配：未改块从源 collection 复制（D1-A）----------
+    collection = collection_name(tenant_id, version.id)
+    if not settings.qdrant_url:
+        raise BuildPipelineError("INDEX_UNAVAILABLE", "Qdrant 未配置（QDRANT_URL 缺失）")
+    source_collection = source_index.qdrant_collection
+    client = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        # 只索子块（KB-03B Minor 3）——retrieve ids 仅子块（父块在源 collection 无点）
+        source_point_ids = [
+            source_chunk.id
+            for (_cid, chunk, source_chunk) in derived
+            if chunk.chunk_type == CHUNK_TYPE_CHILD
+        ]
+        retrieved = await client.retrieve(
+            source_collection, ids=source_point_ids, with_vectors=True
+        )
+        source_vectors = {str(point.id): point.vector for point in retrieved}
+        if len(source_vectors) != len(source_point_ids):
+            raise BuildPipelineError(
+                "INDEX_SOURCE_MISSING",
+                f"源 collection 向量缺失（{len(source_vectors)}/{len(source_point_ids)}）",
+            )
+        dense_by_position: dict[int, list[float]] = {}
+        edited_iter = iter(edited_dense)
+        for position, (_cid, chunk, source_chunk) in enumerate(derived):
+            if chunk.chunk_type != CHUNK_TYPE_CHILD:
+                continue  # 只索子块（KB-03B Minor 3）
+            if source_chunk.id in edits_by_chunk:
+                dense_by_position[position] = next(edited_iter)
+            else:
+                source_vector = source_vectors[str(source_chunk.id)]
+                # named vectors dict：dense 键取 dense 向量（Qdrant retrieve 返回 dict 形态）
+                dense_payload = cast(dict[str, Any], source_vector)
+                dense_by_position[position] = list(dense_payload["dense"])
+    except BuildPipelineError:
+        await client.close()
+        raise
+    except Exception as exc:
+        await client.close()
+        logger.warning("源向量读取失败：%s.%s", type(exc).__module__, type(exc).__name__)
+        raise BuildPipelineError("INDEX_SOURCE_MISSING", "源 collection 向量读取失败") from exc
+    await client.close()
+
+    # ---------- INDEX ----------
+    sparse_vectors_all = version_sparse_weights([chunk.text for (_cid, chunk, _src) in derived])
+    acl_tokens = await _confirmed_audience_tokens(tenant_id, version.id)
+    child_positions = [
+        position
+        for position, (_cid, chunk, _src) in enumerate(derived)
+        if chunk.chunk_type == CHUNK_TYPE_CHILD
+    ]
+    # N2：parent 映射（源 chunk id → 派生新 id）——未改块/改动块的父块上下文不丢
+    parent_mapping: dict[UUID, UUID] = {
+        source_chunk.id: new_id for new_id, _chunk, source_chunk in derived
+    }
+    points = [
+        IndexPoint(
+            chunk_id=new_id,
+            parent_id=parent_mapping.get(source_chunk.parent_id) if source_chunk.parent_id else None,
+            document_id=version.document_id,
+            chunk_type=chunk.chunk_type,
+            section_path=chunk.section_path,
+            page_start=chunk.page_start,
+            page_end=chunk.page_end,
+            text_hash=chunk.chunk_hash,
+            dense=dense_by_position[position],
+            sparse=sparse_vectors_all[position],
+            is_human_edited=source_chunk.id in edits_by_chunk,
+        )
+        for position, (new_id, chunk, source_chunk) in enumerate(derived)
+        if chunk.chunk_type == CHUNK_TYPE_CHILD
+    ]
+    # dense_dim 用实际向量维度（改动块必 ≥1——derive 前置；与既有管线 len(dense[0]) 同口径）
+    dense_dim = len(dense_by_position[child_positions[0]])
+    client = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        try:
+            await ensure_collection(client, collection=collection, dense_dim=dense_dim)
+        except IndexError_ as exc:
+            raise BuildPipelineError(exc.code, exc.message) from exc
+        except Exception as exc:
+            logger.warning("Qdrant 建集合失败：%s.%s %s", type(exc).__module__, type(exc).__name__, str(exc)[:400])
+            raise BuildPipelineError(
+                "INDEX_UNAVAILABLE", "向量索引不可用（Qdrant 建集合失败）"
+            ) from exc
+        written = await upsert_points(
+            client,
+            collection=collection,
+            tenant_id=tenant_id,
+            version_id=version.id,
+            doc_title=doc_title,
+            points=points,
+            acl_tokens=acl_tokens,
+        )
+    finally:
+        await client.close()
+    if written != len(child_positions):
+        raise BuildPipelineError(
+            "INDEX_UPSERT_FAILED", f"向量写入条数不一致（{written}/{len(child_positions)}）"
+        )
+    await _stage_progress(
+        tenant_id,
+        job_id,
+        stage=STAGE_INDEXING,
+        processed_units=written,
+        total_units=len(child_positions),
+    )
+
+    # ---------- VALIDATING ----------
+    await _stage_progress(
+        tenant_id, job_id, stage=STAGE_VALIDATING, processed_units=0, total_units=1
+    )
+    client = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        indexed = await count_points(client, collection=collection)
+    finally:
+        await client.close()
+    if indexed != len(child_positions):
+        raise BuildPipelineError(
+            "INDEX_VALIDATE_MISMATCH",
+            f"索引对账不一致（Qdrant {indexed} vs 子块 {len(child_positions)}）",
+        )
+    await _stage_progress(
+        tenant_id, job_id, stage=STAGE_VALIDATING, processed_units=1, total_units=1
+    )
+
+    # human_edits：改动块 → (edited_by, edited_at)；未改块继承源行值（二次派生场景，
+    # N5：edited_at 携带最初编辑时间而非构建收口时间——溯源准确）
+    human_edits: dict[UUID, tuple[UUID, Any]] = {}
+    for new_chunk_id, _chunk, source_chunk in derived:
+        edit = edits_by_chunk.get(source_chunk.id)
+        if edit is not None:
+            human_edits[new_chunk_id] = (edit.edited_by, edit.created_at)
+        elif source_chunk.is_human_edited and source_chunk.edited_by is not None:
+            human_edits[new_chunk_id] = (source_chunk.edited_by, source_chunk.edited_at)
+
+    prepared = [
+        (new_chunk_id, chunk, dense_by_position.get(position))
+        for position, (new_chunk_id, chunk, _src) in enumerate(derived)
+    ]
+    return prepared, collection, human_edits
 
 
 async def _load_doc_title(tenant_id: UUID, document_id: UUID) -> str:
