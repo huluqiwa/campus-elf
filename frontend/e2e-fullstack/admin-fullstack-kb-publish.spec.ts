@@ -250,16 +250,38 @@ test("发布链①：提交审批 → 构建 409 门禁 → publisher 403 审批
   expect(afterApprove.status, `详情响应异常：${JSON.stringify(afterApprove.json)}`).toBe(200);
   expect((afterApprove.json as KbDocument).status).toBe("APPROVED");
 
-  // KB-09 门禁接线：构建前配置并确认人群（publisher UI 流同口径）
-  await configureAcl(accounts, publisherToken, versionId ?? "");
-
-  // publisher UI：登出换账号 → 创建构建 → 轮询到 READY（TEI embedding + Qdrant 索引真实执行）
+  // KB-09C 门禁 UI 化（卡 C5-A）：构建前由 publisher 在 UI 里配置并确认人群——
+  // UI 路径全栈可达性真值化（原 configureAcl API 接线由 UI 流取代；链②③的
+  // configureAcl 调用保留——编排接线，本段起 UI 为主链路）
   await logoutViaUi(page);
   await loginViaUi(page, publisher);
   // publisher 无审批中心入口、无上传入口（D3-A UI 边界）
   await expect(page.getByRole("menuitem", { name: "审批中心" })).toHaveCount(0);
   await expect(page.getByRole("menuitem", { name: "上传文档" })).toHaveCount(0);
   await page.getByRole("menuitem", { name: "知识库" }).click();
+  const aclDrawer = await openDrawer(page, title);
+  await aclDrawer.getByTestId("kb-acl-open").first().click();
+  await expect(aclDrawer.getByTestId("kb-acl-view")).toBeVisible();
+  await expect(aclDrawer.getByTestId("kb-acl-empty")).toContainText("未配置人群");
+  await aclDrawer.getByTestId("kb-acl-edit").click();
+  // el-dialog teleport 到 body——对话框内控件用 page 级定位
+  await expect(page.getByTestId("kb-acl-dialog")).toBeVisible();
+  await page.getByTestId("kb-acl-row-add").click();
+  await page
+    .getByTestId("kb-acl-edit-table")
+    .locator("tbody tr")
+    .first()
+    .getByTestId("kb-acl-row-type")
+    .getByText("全体", { exact: true })
+    .click();
+  await page.getByTestId("kb-acl-save").click();
+  await expect(aclDrawer.getByTestId("kb-acl-confirmed-tag")).toContainText("未确认");
+  await aclDrawer.getByTestId("kb-acl-confirm").click();
+  await expect(aclDrawer.getByTestId("kb-acl-confirmed-tag")).toContainText("已确认");
+  await page.locator(".el-drawer__close-btn").click();
+  await expect(page.getByTestId("kb-document-drawer")).toBeHidden();
+
+  // publisher：重开抽屉创建构建 → 轮询到 READY（TEI embedding + Qdrant 索引真实执行）
   const buildDrawer = await openDrawer(page, title);
   await buildDrawer.getByTestId("kb-create-build").click();
   await page.locator(".el-message-box").getByRole("button", { name: "OK" }).click();

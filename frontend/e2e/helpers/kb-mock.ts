@@ -85,6 +85,14 @@ export interface KbMockCaptures {
   versionActions: KbVersionActionCapture[];
   /** KB-06B：分块详情请求路径（列表/统计走 versions 路由，进 versionActions）。 */
   chunkUrls: string[];
+  /** KB-09C：人群配置请求路径（GET/PUT/confirm 走 document-versions 路由）。 */
+  aclActions: KbVersionActionCapture[];
+}
+
+/** KB-09C：版本人群状态（有状态 mock；PUT 全量替换 + confirm 置确认）。 */
+export interface KbAudienceStateFixture {
+  audiences: { audience_type: string; audience_id: string | null }[];
+  acl_confirmed: boolean;
 }
 
 export interface KbMockOptions {
@@ -114,6 +122,11 @@ export interface KbMockOptions {
   chunksByVersion?: Record<string, KbChunkFixture[]>;
   /** KB-07B：检索测试响应延迟（毫秒），用于验证「在途改筛选 → loading 收敛 + 迟响应丢弃」。 */
   retrievalDelayMs?: number;
+  /** KB-09C：版本人群状态（versionId → 行集+确认态）；缺省 = 配 ("all", None) 已确认（卡 4 口径，
+   * 既有检索断言零漂移——用户 token 恒含 all）。 */
+  audiencesByVersion?: Record<string, KbAudienceStateFixture>;
+  /** KB-09C：PUT audiences 固定返回错误（验证「服务端唯一门禁」422 兜底路径——审查 m3）。 */
+  aclPutError?: { status: number; body: unknown };
 }
 
 export interface KbMock {
@@ -122,6 +135,8 @@ export interface KbMock {
     documents: KbDocumentFixture[];
     /** KB-06B：按 versionId 存取的分块夹具（断言走这里——mockKbApi 克隆了 options 传入值）。 */
     chunksByVersion: Record<string, KbChunkFixture[]>;
+    /** KB-09C：按 versionId 存取的人群状态（PUT/confirm 就地改——断言走这里）。 */
+    audiencesByVersion: Record<string, KbAudienceStateFixture>;
   };
 }
 
@@ -361,7 +376,16 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     versionUrls: [],
     versionActions: [],
     chunkUrls: [],
+    aclActions: [],
   };
+  /** KB-09C：按 versionId 存取的人群状态（PUT/confirm 直接改这里——断言走 state）。 */
+  const audiencesByVersion: Record<string, KbAudienceStateFixture> = {};
+  for (const [versionId, state] of Object.entries(options.audiencesByVersion ?? {})) {
+    audiencesByVersion[versionId] = {
+      audiences: state.audiences.map((item) => ({ ...item })),
+      acl_confirmed: state.acl_confirmed,
+    };
+  }
   const replayByKey = new Map<string, { batch_id: string; documents: KbDocumentFixture[] }>();
   /** KB-05B：每文档活跃发布（mock 的 alias 行，含首次发布时间——重放保留原值，service.py:2577）；夹具不预置——「已发布但无指针」的重放拒绝路径因此可测。 */
   const activePublish = new Map<string, { versionId: string; publishedAt: string }>();
@@ -515,18 +539,40 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
    * 同序（分数按位置递减），RRF 与后端/Qdrant 同公式 k=60；fake 重排按融合位置给升序分数
    * （与后端集成 FakeReranker 同形）→ 稳定翻转融合序。不模拟 409/502（简报卡 4）。
    */
+  /** KB-09C：人群状态读取（缺省配 ("all", None) 已确认——卡 4 口径）。 */
+  function audienceStateFor(versionId: string): KbAudienceStateFixture {
+    return (
+      audiencesByVersion[versionId] ?? {
+        audiences: [{ audience_type: "all", audience_id: null }],
+        acl_confirmed: true,
+      }
+    );
+  }
+
+  /** KB-09C：该版本 payload acl_tokens（构建期写入的版本级 token 集，测试用）。 */
+  function audienceTokensFor(versionId: string): string[] {
+    return audienceStateFor(versionId).audiences.map((item) =>
+      item.audience_id === null ? item.audience_type : `${item.audience_type}:${item.audience_id}`,
+    );
+  }
+
   function retrievalRowsFor(
     versionId: string,
     query: string,
     topK: number,
     withRerank: boolean,
+    viewTokens: string[],
+    ignoreAcl: boolean,
   ): {
     rerank_status: "applied" | "disabled";
     pool_size: number;
     latency_ms: number;
+    resolved_audience_tokens: string[];
+    acl_filter_applied: boolean;
     results: unknown[];
   } {
     const all = chunksByVersion[versionId] ?? [];
+    const payloadTokens = audienceTokensFor(versionId);
     const grams = new Set<string>();
     const chars = [...query];
     for (let i = 0; i + 1 < chars.length; i += 1) {
@@ -540,7 +586,13 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
       return count;
     };
     const pool = Math.min(withRerank ? Math.max(20, topK) : topK, all.length);
-    const scored = all
+    // KB-09B ACL 语义镜像（retrieval_test.py）：视角 token 空 → 零召回不发查询；
+    // ignore_acl → 不过滤（诊断视图，命中 token 列恒空）。
+    // 版本级 ACL：每块 payload token 同集。ignore_acl → 不过滤（诊断视图）；
+    // 视角 token 空 → 零候选（fail-closed 不发查询）；有交集 → 全部候选；无交集 → 零候选。
+    const hasOverlap = viewTokens.some((token) => payloadTokens.includes(token));
+    const candidates = ignoreAcl || hasOverlap ? all : [];
+    const scored = candidates
       .map((chunk) => ({ chunk, hits: hitCount(chunk.text) }))
       .sort((a, b) => b.hits - a.hits || a.chunk.chunk_index - b.chunk.chunk_index)
       .slice(0, pool);
@@ -568,6 +620,8 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
         rerank_score: rerankScore,
         final_rank: finalRank,
         is_final_reference: finalRank <= topK,
+        // KB-09B：该块 payload token ∩ 视角 token（版本级 ACL → 每块同集）
+        acl_matched_tokens: payloadTokens.filter((token) => viewTokens.includes(token)),
       };
     };
     if (!withRerank) {
@@ -575,6 +629,8 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
         rerank_status: "disabled",
         pool_size: poolSize,
         latency_ms: 1.2,
+        resolved_audience_tokens: viewTokens,
+        acl_filter_applied: !ignoreAcl,
         results: scored.map((entry, position) => rowFor(entry, position, null, position + 1)),
       };
     }
@@ -588,7 +644,14 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
       .map((item, finalPosition) =>
         rowFor(item.entry, item.position, item.rerankScore, finalPosition + 1),
       );
-    return { rerank_status: "applied", pool_size: poolSize, latency_ms: 1.2, results };
+    return {
+      rerank_status: "applied",
+      pool_size: poolSize,
+      latency_ms: 1.2,
+      resolved_audience_tokens: viewTokens,
+      acl_filter_applied: !ignoreAcl,
+      results,
+    };
   }
 
   /** 上传成功后新建的文档：状态 UPLOADED、扫描 pending（`service.py:181-193` 的初始映射）。 */
@@ -842,6 +905,9 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
         query?: string;
         top_k?: number;
         with_rerank?: boolean;
+        as_user_id?: string;
+        as_audiences?: string[];
+        ignore_acl?: boolean;
       };
       const delayMs = options.retrievalDelayMs ?? 0;
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -850,11 +916,32 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
           detail: { code: "RETRIEVAL_TEST_QUERY_REQUIRED", message: "检索词不能为空" },
         });
       }
+      // KB-09B 视角（retrieval_test.py）：默认操作者；as_audiences 优先于 as_user_id
+      // （后端两者同设 422 PERSPECTIVE_CONFLICT）；ignore_acl 不过滤但回显 token。
+      // 操作者/目标用户 token mock 简化为 ["all"]+self（role 集不模拟——all 恒注入是
+      // 零漂移口径；真实解析器行为由集成测试背书）。
+      // as_audiences 不做结构校验（后端 parse_audience_tokens 422 族，audience.py:170-207）——
+      // 前端无 as_audiences 预检入口、非法 token 走后端唯一门禁；mock 伪 token 零召回与
+      // 后端「无交集零召回」同形（KB-09C 审查 m2 登记）。
+      const ignoreAcl = body.ignore_acl === true;
+      const viewTokens =
+        body.as_audiences !== undefined && body.as_audiences !== null
+          ? body.as_audiences
+          : body.as_user_id !== undefined && body.as_user_id !== null
+            ? [`user:${body.as_user_id}`, "all"]
+            : ["all"];
       const topK = body.top_k ?? 10;
       return json(
         route,
         200,
-        retrievalRowsFor(versionId, body.query ?? "", topK, body.with_rerank === true),
+        retrievalRowsFor(
+          versionId,
+          body.query ?? "",
+          topK,
+          body.with_rerank === true,
+          viewTokens,
+          ignoreAcl,
+        ),
       );
     }
 
@@ -1031,5 +1118,68 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     return json(route, 404, { detail: "未 mock 的知识库路径" });
   });
 
-  return { captures, state: { documents, chunksByVersion } };
+  // KB-09C 人群配置路由（后注册优先于 documents**——glob 会吞 document-versions 前缀）。
+  // 判据锚点：GET 挂 view（school_kb.py GET audiences）、PUT 全量替换+置未确认、
+  // confirm 空集 409 ACL_REQUIRED / 已确认 409 ACL_ALREADY_CONFIRMED（service.py:2356-2474）；
+  // PUT 结构校验族（audience.py parse_audience_items）由前端预检拦，mock 不复刻。
+  await page.route("**/api/v1/school/kb/document-versions/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const method = request.method();
+    captures.aclActions.push({ method, path });
+    const match = path.match(/\/school\/kb\/document-versions\/([^/]+)(\/audiences)(\/confirm)?$/);
+    if (!match) return json(route, 404, { detail: "未 mock 的人群路径" });
+    const versionId = match[1] ?? "";
+    const action = match[3];
+    const found = findVersion(versionId);
+    if (!found) {
+      return json(route, 404, { detail: { code: "VERSION_NOT_FOUND", message: "文档版本不存在" } });
+    }
+    // 显式写回 audiencesByVersion（惰性默认对象不落 dict——断言走 state 必须可读）
+    if (audiencesByVersion[versionId] === undefined) {
+      audiencesByVersion[versionId] = audienceStateFor(versionId);
+    }
+    const state = audiencesByVersion[versionId] as KbAudienceStateFixture;
+    const viewPayload = () => ({
+      version_id: versionId,
+      audiences: state.audiences,
+      acl_confirmed: state.acl_confirmed,
+      acl_confirmed_by: state.acl_confirmed ? "60000000-0000-0000-0000-000000000009" : null,
+      acl_confirmed_at: state.acl_confirmed ? "2026-11-14T00:00:00Z" : null,
+    });
+    if (method === "GET") {
+      return json(route, 200, viewPayload());
+    }
+    if (method === "PUT") {
+      if (options.aclPutError !== undefined) {
+        return json(route, options.aclPutError.status, options.aclPutError.body);
+      }
+      const body = (request.postDataJSON() ?? {}) as {
+        audiences?: { audience_type: string; audience_id: string | null }[];
+      };
+      state.audiences = (body.audiences ?? []).map((item) => ({ ...item }));
+      state.acl_confirmed = false; // 全量替换置未确认（spec :309）
+      return json(route, 200, viewPayload());
+    }
+    if (method === "POST" && action === "/confirm") {
+      if (state.audiences.length === 0) {
+        return json(route, 409, {
+          detail: { code: "ACL_REQUIRED", message: "人群 ACL 未配置（先设置查阅人群）" },
+        });
+      }
+      if (state.acl_confirmed) {
+        return json(route, 409, {
+          detail: { code: "ACL_ALREADY_CONFIRMED", message: "人群 ACL 已确认" },
+        });
+      }
+      state.acl_confirmed = true;
+      return json(route, 200, viewPayload());
+    }
+    return json(route, 404, { detail: "未 mock 的人群动作" });
+  });
+
+  return {
+    captures,
+    state: { documents, chunksByVersion, audiencesByVersion },
+  };
 }

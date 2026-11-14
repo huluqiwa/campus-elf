@@ -380,7 +380,7 @@ test("详情抽屉：版本列表按游标加载更多", async ({ page }) => {
   const row = page
     .getByTestId("kb-document-table")
     .locator(".el-table__row", { hasText: "校园安全手册" });
-  await row.getByRole("button", { name: "查看" }).click();
+  await row.getByTestId("kb-detail-open").click();
 
   const drawer = page.getByTestId("kb-document-drawer");
   await expect(drawer).toBeVisible();
@@ -404,7 +404,7 @@ test("详情 404：提示文档已不可见、关闭抽屉并刷新列表", asyn
   await expect.poll(() => captures.listUrls.length).toBe(1);
   await table
     .locator(".el-table__row", { hasText: "校园安全手册" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
 
   await expect(page.getByText("文档已不可见，列表已刷新")).toBeVisible();
@@ -429,7 +429,7 @@ test("抽屉竞态：A 的迟到 404 不会关掉已打开的 B", async ({ page 
   );
   await table
     .locator(".el-table__row", { hasText: "校园安全手册" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
   await expect.poll(() => captures.detailIds.length).toBeGreaterThan(0);
 
@@ -438,7 +438,7 @@ test("抽屉竞态：A 的迟到 404 不会关掉已打开的 B", async ({ page 
   await expect(page.getByTestId("kb-document-drawer")).toBeHidden();
   await table
     .locator(".el-table__row", { hasText: "可疑附件" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
 
   const drawer = page.getByTestId("kb-document-drawer");
@@ -569,7 +569,7 @@ test("抽屉审批入口：PENDING_APPROVAL + upload 权限可提交，成功后
   await page.goto("/kb/documents");
   await page
     .locator(".el-table__row", { hasText: "可提交样例" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
   const drawer = page.getByTestId("kb-document-drawer");
   await expect(drawer).toBeVisible();
@@ -589,7 +589,7 @@ test("抽屉审批入口：同版本已有待审批单 → 后端 409 提示，�
   await page.goto("/kb/documents");
   await page
     .locator(".el-table__row", { hasText: "校园安全手册" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
   const drawer = page.getByTestId("kb-document-drawer");
   await expect(drawer).toBeVisible();
@@ -619,7 +619,7 @@ test("抽屉构建入口：APPROVED + build 权限可创建，重复创建吃 40
   await page.goto("/kb/documents");
   await page
     .locator(".el-table__row", { hasText: "已审批样例" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
   const drawer = page.getByTestId("kb-document-drawer");
   await expect(drawer).toBeVisible();
@@ -633,7 +633,7 @@ test("抽屉构建入口：APPROVED + build 权限可创建，重复创建吃 40
   await page.locator(".el-drawer__close-btn").click();
   await page
     .locator(".el-table__row", { hasText: "已审批样例" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
   await expect(drawer).toBeVisible();
   await drawer.getByTestId("kb-create-build").click();
@@ -660,7 +660,7 @@ test("REJECTED 文档：显示已驳回文案与审批中心指引，无入口�
   await page.goto("/kb/documents");
   const row = page.locator(".el-table__row", { hasText: "被驳回样例" });
   await expect(row).toContainText("已驳回");
-  await row.getByRole("button", { name: "查看" }).click();
+  await row.getByTestId("kb-detail-open").click();
   const drawer = page.getByTestId("kb-document-drawer");
   await expect(drawer).toBeVisible();
 
@@ -696,7 +696,7 @@ test("测试沙箱：READY 文档上传测试集→运行→刷新→TEST_PASSED
   await page.goto("/kb/documents");
   await page
     .locator(".el-table__row", { hasText: "测试沙箱文档" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
   const drawer = page.getByTestId("kb-document-drawer");
   await expect(drawer).toBeVisible();
@@ -726,7 +726,7 @@ test("测试沙箱：无 school.kb.test 码 → 测试区块不出现", async ({
   await page.goto("/kb/documents");
   await page
     .locator(".el-table__row", { hasText: "校园安全手册" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
   const drawer = page.getByTestId("kb-document-drawer");
   await expect(drawer).toBeVisible();
@@ -788,10 +788,7 @@ function publishedDocument(): KbDocumentFixture {
 }
 
 async function openDrawer(page: Page, title: string): Promise<ReturnType<Page["getByTestId"]>> {
-  await page
-    .locator(".el-table__row", { hasText: title })
-    .getByRole("button", { name: "查看" })
-    .click();
+  await page.locator(".el-table__row", { hasText: title }).getByTestId("kb-detail-open").click();
   const drawer = page.getByTestId("kb-document-drawer");
   await expect(drawer).toBeVisible();
   return drawer;
@@ -1344,7 +1341,7 @@ test("KB-06B 空集：筛选无命中显示空态；切文档/重开抽屉子视
   await page.keyboard.press("Escape");
   await page
     .locator(".el-table__row", { hasText: "已发布样例" })
-    .getByRole("button", { name: "查看" })
+    .getByTestId("kb-detail-open")
     .click();
   await expect(page.getByTestId("kb-document-drawer")).toBeVisible();
   await expect(page.getByTestId("kb-chunks-view")).toHaveCount(0);
@@ -1503,4 +1500,254 @@ test("KB-07B 在途检索时改筛选：loading 收敛（运行序号）、迟�
   await runButton.click();
   await expect(drawer.getByTestId("kb-retrieval-table")).toBeVisible();
   await expect(retrievalRows(drawer)).toHaveCount(4);
+});
+
+// ---------------------------------------------------------------------------
+// KB-09C：人群配置子视图（卡 C1-A/C2-A）与检索测试视角（卡 C3-A）
+// ---------------------------------------------------------------------------
+
+const ACL_PERMS = [...BOTH, "school.kb.acl.manage"];
+const ACL_VERSION_ID = "61000000-0000-0000-0000-0000000000e1";
+
+function aclDocument(): KbDocumentFixture {
+  return kbDocument({
+    id: "60000000-0000-0000-0000-0000000000e0",
+    title: "人群样例",
+    status: "TEST_PASSED",
+    current_version: kbVersion({
+      id: ACL_VERSION_ID,
+      version_no: 1,
+      filename: "人群样例.pdf",
+      status: "TEST_PASSED",
+    }),
+    versions: [
+      kbVersion({
+        id: ACL_VERSION_ID,
+        version_no: 1,
+        filename: "人群样例.pdf",
+        status: "TEST_PASSED",
+      }),
+    ],
+  });
+}
+
+async function openAclView(page: Page, drawer: ReturnType<Page["getByTestId"]>): Promise<void> {
+  await drawer.getByTestId("kb-acl-open").first().click();
+  await expect(drawer.getByTestId("kb-acl-view")).toBeVisible();
+}
+
+test("KB-09C view 持有人：人群列出现，子视图默认 all 已确认，无编辑/确认按钮", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: VIEW_ONLY } });
+  await mockKbApi(page, { documents: [aclDocument()] });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "人群样例");
+  await openAclView(page, drawer);
+
+  await expect(drawer.getByTestId("kb-acl-confirmed-tag")).toContainText("已确认");
+  await expect(drawer.getByTestId("kb-acl-table").locator("tbody tr")).toHaveCount(1);
+  await expect(drawer.getByTestId("kb-acl-table")).toContainText("全体");
+  await expect(drawer.getByTestId("kb-acl-banner")).toHaveCount(0);
+  await expect(drawer.getByTestId("kb-acl-edit")).toHaveCount(0);
+  await expect(drawer.getByTestId("kb-acl-confirm")).toHaveCount(0);
+});
+
+test("KB-09C 未确认：警示横幅出现，确认成功后 tag 变已确认、横幅消失", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: ACL_PERMS } });
+  const mock = await mockKbApi(page, {
+    documents: [aclDocument()],
+    audiencesByVersion: {
+      [ACL_VERSION_ID]: {
+        audiences: [{ audience_type: "department", audience_id: "d-1" }],
+        acl_confirmed: false,
+      },
+    },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "人群样例");
+  await openAclView(page, drawer);
+
+  await expect(drawer.getByTestId("kb-acl-confirmed-tag")).toContainText("未确认");
+  await expect(drawer.getByTestId("kb-acl-banner")).toContainText("未确认");
+  await drawer.getByTestId("kb-acl-confirm").click();
+
+  await expect(drawer.getByTestId("kb-acl-confirmed-tag")).toContainText("已确认");
+  await expect(drawer.getByTestId("kb-acl-banner")).toHaveCount(0);
+  expect(mock.state.audiencesByVersion[ACL_VERSION_ID]?.acl_confirmed).toBe(true);
+});
+
+test("KB-09C 编辑保存：PUT 全量替换 + 警告「置为未确认」+ state 落库", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: ACL_PERMS } });
+  const mock = await mockKbApi(page, { documents: [aclDocument()] });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "人群样例");
+  await openAclView(page, drawer);
+
+  await drawer.getByTestId("kb-acl-edit").click();
+  // el-dialog teleport 到 body——对话框内控件用 page 级定位（drawer 子树不含它）。
+  // 初始夹具是 [all]：直接把第一行类型改为部门并填 id（复用行，不新增）。
+  await expect(page.getByTestId("kb-acl-dialog")).toBeVisible();
+  await page
+    .getByTestId("kb-acl-edit-table")
+    .locator("tbody tr")
+    .first()
+    .getByTestId("kb-acl-row-type")
+    .getByText("部门", { exact: true })
+    .click();
+  await page
+    .getByTestId("kb-acl-edit-table")
+    .locator("tbody tr")
+    .first()
+    .getByTestId("kb-acl-row-id")
+    .fill("d-1");
+  await page.getByTestId("kb-acl-save").click();
+
+  await expect(drawer.getByTestId("kb-acl-confirmed-tag")).toContainText("未确认");
+  await expect(drawer.getByTestId("kb-acl-banner")).toContainText("未确认");
+  const state = mock.state.audiencesByVersion[ACL_VERSION_ID];
+  expect(state?.audiences).toEqual([{ audience_type: "department", audience_id: "d-1" }]);
+  expect(state?.acl_confirmed).toBe(false);
+  expect(mock.captures.aclActions.some((item) => item.method === "PUT")).toBe(true);
+});
+
+test("KB-09C 编辑预检：all 与部门混配 → 前端拦下错误文案，保存禁用", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: ACL_PERMS } });
+  const mock = await mockKbApi(page, { documents: [aclDocument()] });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "人群样例");
+  await openAclView(page, drawer);
+
+  await drawer.getByTestId("kb-acl-edit").click();
+  await expect(page.getByTestId("kb-acl-dialog")).toBeVisible();
+  // 初始夹具已是 [all]：直接新增一行 department 并填 id → [all, department] 混配
+  await page.getByTestId("kb-acl-row-add").click();
+  await page
+    .getByTestId("kb-acl-edit-table")
+    .locator("tbody tr")
+    .nth(1)
+    .getByTestId("kb-acl-row-id")
+    .fill("d-1");
+
+  await expect(page.getByTestId("kb-acl-edit-error")).toContainText("不得与其他人群类型混配");
+  await expect(page.getByTestId("kb-acl-save")).toBeDisabled();
+  expect(mock.captures.aclActions.filter((item) => item.method === "PUT")).toHaveLength(0);
+});
+
+test("KB-09C 清空保存：空表提示 + confirm 吃 409 ACL_REQUIRED", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: ACL_PERMS } });
+  const mock = await mockKbApi(page, { documents: [aclDocument()] });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "人群样例");
+  await openAclView(page, drawer);
+
+  await drawer.getByTestId("kb-acl-edit").click();
+  await expect(page.getByTestId("kb-acl-dialog")).toBeVisible();
+  await page
+    .getByTestId("kb-acl-edit-table")
+    .locator("tbody tr")
+    .first()
+    .getByTestId("kb-acl-row-remove")
+    .click();
+  await page.getByTestId("kb-acl-save").click();
+  await expect(drawer.getByTestId("kb-acl-empty")).toContainText("未配置人群");
+
+  await drawer.getByTestId("kb-acl-confirm").click();
+  await expect(page.getByText("人群 ACL 未配置")).toBeVisible();
+  const state = mock.state.audiencesByVersion[ACL_VERSION_ID];
+  expect(state?.audiences).toHaveLength(0);
+  expect(state?.acl_confirmed).toBe(false);
+});
+
+test("KB-09C 服务端唯一门禁：PUT 422 → 错误文案回填对话框且不关闭（审查 m3）", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: ACL_PERMS } });
+  await mockKbApi(page, {
+    documents: [aclDocument()],
+    aclPutError: {
+      status: 422,
+      body: {
+        detail: { code: "AUDIENCE_ALL_MIXED", message: "all（显式全体）不得与其他人群类型混配" },
+      },
+    },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "人群样例");
+  await openAclView(page, drawer);
+
+  await drawer.getByTestId("kb-acl-edit").click();
+  await expect(page.getByTestId("kb-acl-dialog")).toBeVisible();
+  await page.getByTestId("kb-acl-save").click();
+
+  await expect(page.getByTestId("kb-acl-edit-error")).toContainText("不得与其他人群类型混配");
+  await expect(page.getByTestId("kb-acl-dialog")).toBeVisible();
+});
+
+test("KB-09C 检索测试：模拟人群 token 不匹配 → 零行 + 视角 token 回显", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+    audiencesByVersion: {
+      [CHUNK_VERSION_ID]: {
+        audiences: [{ audience_type: "department", audience_id: "d-1" }],
+        acl_confirmed: true,
+      },
+    },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+  await drawer.getByTestId("kb-retrieval-as-audiences").fill("department:other-1");
+  await drawer.getByTestId("kb-retrieval-q").fill("安装步骤1");
+  await drawer.getByTestId("kb-retrieval-run").click();
+
+  await expect(drawer.getByTestId("kb-retrieval-meta")).toContainText("视角 token");
+  await expect(drawer.getByTestId("kb-retrieval-resolved-tokens")).toContainText(
+    "department:other-1",
+  );
+  // 不匹配 → 零召回（有结果容器 0 行 + No Data，不渲染 empty——empty 仅「未运行」时出现）
+  await expect(drawer.getByTestId("kb-retrieval-meta")).toContainText("0 行");
+  await expect(retrievalRows(drawer)).toHaveCount(0);
+  await expect(drawer.getByTestId("kb-retrieval-table")).toContainText("No Data");
+});
+
+test("KB-09C ignore_acl：无码开关不渲染；有码开启后未过滤视图恢复行数且命中 token 为空", async ({
+  page,
+}) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: CHUNK_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkedDocument()],
+    chunksByVersion: { [CHUNK_VERSION_ID]: chunkFixtures() },
+    audiencesByVersion: {
+      [CHUNK_VERSION_ID]: {
+        audiences: [{ audience_type: "department", audience_id: "d-1" }],
+        acl_confirmed: true,
+      },
+    },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer);
+  // 无 unfiltered 码：开关与提示均不渲染
+  await expect(drawer.getByTestId("kb-retrieval-ignore-acl")).toHaveCount(0);
+  await drawer.getByTestId("kb-retrieval-q").fill("安装步骤1");
+  await drawer.getByTestId("kb-retrieval-run").click();
+  // 部门文档 × 操作者 token（all）→ 零召回（结果容器 0 行 + No Data）
+  await expect(drawer.getByTestId("kb-retrieval-meta")).toContainText("0 行");
+  await expect(drawer.getByTestId("kb-retrieval-table")).toContainText("No Data");
+
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: [...CHUNK_PERMS, "school.kb.retrieval_test.unfiltered"] },
+  });
+  await page.reload();
+  const drawer2 = await openDrawer(page, "分块样例");
+  await openChunksView(page, drawer2);
+  await expect(drawer2.getByTestId("kb-retrieval-ignore-acl")).toBeVisible();
+  await drawer2.getByTestId("kb-retrieval-ignore-acl").click();
+  await drawer2.getByTestId("kb-retrieval-q").fill("安装步骤1");
+  await drawer2.getByTestId("kb-retrieval-run").click();
+
+  await expect(drawer2.getByTestId("kb-retrieval-unfiltered")).toContainText("未过滤视图");
+  await expect(retrievalRows(drawer2)).toHaveCount(4);
+  // 未过滤视图：行仍带 payload token 交集——操作者 token 只含 all，部门文档无交集 → 全「—」
+  await expect(drawer2.getByTestId("kb-retrieval-table")).toContainText("—");
 });

@@ -149,7 +149,12 @@ onMounted(() => {
       </el-table-column>
       <el-table-column label="操作" width="90">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openDocument(row as KbDocumentView)"
+          <!-- KB-09C：加 testid——人群/分块列出现后行内「查看」按钮不再唯一，定位改用 testid -->
+          <el-button
+            link
+            type="primary"
+            data-testid="kb-detail-open"
+            @click="openDocument(row as KbDocumentView)"
             >查看</el-button
           >
         </template>

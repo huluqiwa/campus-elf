@@ -603,3 +603,114 @@ export function retrievalTopKError(topK: number): string | null {
   if (!Number.isInteger(topK) || topK < 1 || topK > 20) return "top-k 需为 1~20 的整数";
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// KB-09C：文档查阅人群 ACL（简报 M3-KB-09 §3.3 决策卡 C1-A/C2-A/C3-A）
+// ---------------------------------------------------------------------------
+
+/** 权限码：配置读侧入口（GET audiences 挂 view）；编辑/确认按钮分授（PUT/confirm 挂 manage）。 */
+export const KB_ACL_MANAGE_CODE = "school.kb.acl.manage";
+/** 权限码：ignore_acl 控件渲染判据（后端 403 `RETRIEVAL_TEST_UNFILTERED_FORBIDDEN` 的 UX 镜像）。 */
+export const KB_RETRIEVAL_UNFILTERED_CODE = "school.kb.retrieval_test.unfiltered";
+
+export const KB_VIEW_CODE = "school.kb.view";
+
+/** 人群配置入口可见性（`school.kb.view` 持有人可读；后端 GET audiences 同码）。 */
+export function aclVisible(permissions: readonly string[]): boolean {
+  return permissions.includes(KB_VIEW_CODE);
+}
+
+/** 人群编辑/确认按钮门禁（`school.kb.acl.manage`；服务端仍是唯一门禁）。 */
+export function aclManageGate(permissions: readonly string[]): boolean {
+  return permissions.includes(KB_ACL_MANAGE_CODE);
+}
+
+/** ignore_acl 控件渲染门禁（`school.kb.retrieval_test.unfiltered`；无码 403 的 UX 镜像）。 */
+export function unfilteredGate(permissions: readonly string[]): boolean {
+  return permissions.includes(KB_RETRIEVAL_UNFILTERED_CODE);
+}
+
+/** 人群类型白名单（后端 `KB_AUDIENCE_TYPES`，models/kb.py；顺序即下拉框序）。 */
+export const KB_AUDIENCE_TYPES: readonly string[] = [
+  "department",
+  "role",
+  "class",
+  "grade",
+  "course",
+  "user",
+  "all",
+];
+
+export interface KbAudienceEditRow {
+  audience_type: string;
+  audience_id: string | null;
+}
+
+/**
+ * 人群条目编辑预检（镜像后端 `parse_audience_items` 422 族，`audience.py`；
+ * 服务端仍是唯一门禁——前端拦的是明显错误，crafty 输入吃后端 422）。
+ * 返回 null = 合法；否则为人读错误文案（与后端 message 对齐）。
+ */
+export function audienceEditError(items: readonly KbAudienceEditRow[]): string | null {
+  const seen = new Set<string>();
+  for (const item of items) {
+    const audienceType = item.audience_type;
+    if (!KB_AUDIENCE_TYPES.includes(audienceType)) {
+      return `未知人群类型：${audienceType}（AUDIENCE_TYPE_INVALID）`;
+    }
+    if (audienceType === "all") {
+      if (item.audience_id !== null && item.audience_id !== undefined) {
+        return "all（显式全体）不接受对象 id（AUDIENCE_ID_FORBIDDEN）";
+      }
+    } else if (item.audience_id === null || item.audience_id.trim() === "") {
+      return `${audienceType} 人群必须提供对象 id（AUDIENCE_ID_REQUIRED）`;
+    }
+    // 判重键先 trim（与后端 parse_audience_items「strip 后判重」同构，审查 m4）
+    const key = `${audienceType}:${(item.audience_id ?? "").trim()}`;
+    if (seen.has(key)) {
+      return "人群条目重复（AUDIENCE_DUPLICATE）";
+    }
+    seen.add(key);
+  }
+  const hasAll = items.some((item) => item.audience_type === "all");
+  if (hasAll && items.length > 1) {
+    return "all（显式全体）不得与其他人群类型混配（AUDIENCE_ALL_MIXED）";
+  }
+  return null;
+}
+
+/** 确认态 tag 文案。 */
+export function aclConfirmedLabel(confirmed: boolean): string {
+  return confirmed ? "已确认" : "未确认";
+}
+
+/**
+ * 人群子视图顶部横幅文案（确认态=可构建/发布不变量的 UX 提示，state-machines :86/:98）。
+ * 已确认返回 null（不渲染横幅）。
+ */
+export function aclBannerText(confirmed: boolean): string | null {
+  if (confirmed) return null;
+  return "人群 ACL 未确认：确认后才能构建/发布；保存（全量替换）会把确认态重置为未确认。";
+}
+
+/** 人群类型中文标签（未知类型显示原码，不猜）。 */
+export function audienceTypeLabel(audienceType: string): string {
+  const labels: Record<string, string> = {
+    department: "部门",
+    role: "角色",
+    class: "班级",
+    grade: "年级",
+    course: "课程",
+    user: "指定人",
+    all: "全体",
+  };
+  return labels[audienceType] ?? audienceType;
+}
+
+/**
+ * 检索测试命中 token 展示（诊断面不美化 id——原 token 即事实源；
+ * 仅 `all` 翻译为「全体」，与人群类型标签对齐）。
+ */
+export function tokenLabel(token: string): string {
+  return token === "all" ? "全体" : token;
+}

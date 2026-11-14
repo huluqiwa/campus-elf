@@ -366,6 +366,8 @@ const RETRIEVAL_RESULT: KbRetrievalTestResult = {
   rerank_status: "disabled",
   latency_ms: 12.3,
   pool_size: 2,
+  resolved_audience_tokens: ["all"],
+  acl_filter_applied: true,
   results: [
     {
       chunk_id: "c-1",
@@ -381,6 +383,7 @@ const RETRIEVAL_RESULT: KbRetrievalTestResult = {
       rerank_score: null,
       final_rank: 1,
       is_final_reference: true,
+      acl_matched_tokens: ["all"],
     },
     {
       chunk_id: "c-2",
@@ -396,6 +399,7 @@ const RETRIEVAL_RESULT: KbRetrievalTestResult = {
       rerank_score: null,
       final_rank: 2,
       is_final_reference: true,
+      acl_matched_tokens: [],
     },
   ],
 };
@@ -454,5 +458,151 @@ describe("createKbApi.retrievalTest", () => {
       status: 502,
       detail,
     });
+  });
+});
+
+describe("createKbApi.audiences（KB-09C）", () => {
+  const ACL_VIEW = {
+    version_id: "v-1",
+    audiences: [{ audience_type: "department", audience_id: "d-1" }],
+    acl_confirmed: true,
+    acl_confirmed_by: "u-9",
+    acl_confirmed_at: "2026-11-14T00:00:00Z",
+  };
+
+  it("getAudiences 按 version GET", async () => {
+    const { session, calls } = sessionStub(() => ({ body: ACL_VIEW }));
+    const result = await createKbApi(session).getAudiences("v-1");
+
+    expect(calls[0].path).toBe("/api/v1/school/kb/document-versions/v-1/audiences");
+    expect(calls[0].init?.method).toBeUndefined();
+    expect(result.acl_confirmed).toBe(true);
+    expect(result.audiences[0].audience_type).toBe("department");
+  });
+
+  it("replaceAudiences PUT 全量替换（JSON 体 snake_case）", async () => {
+    const { session, calls } = sessionStub(() => ({ body: ACL_VIEW }));
+    const result = await createKbApi(session).replaceAudiences("v-1", {
+      audiences: [
+        { audience_type: "department", audience_id: "d-1" },
+        { audience_type: "all", audience_id: null },
+      ],
+    });
+
+    expect(calls[0].path).toBe("/api/v1/school/kb/document-versions/v-1/audiences");
+    expect(calls[0].init?.method).toBe("PUT");
+    const headers = calls[0].init?.headers as Record<string, string>;
+    expect(headers["Content-Type"]).toBe("application/json");
+    const body = JSON.parse(calls[0].init?.body as string) as {
+      audiences: { audience_type: string; audience_id: string | null }[];
+    };
+    expect(body.audiences).toHaveLength(2);
+    expect(body.audiences[1]).toEqual({ audience_type: "all", audience_id: null });
+    expect(result.acl_confirmed).toBe(true);
+  });
+
+  it("confirmAudiences POST confirm", async () => {
+    const { session, calls } = sessionStub(() => ({ body: ACL_VIEW }));
+    const result = await createKbApi(session).confirmAudiences("v-1");
+
+    expect(calls[0].path).toBe("/api/v1/school/kb/document-versions/v-1/audiences/confirm");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(result.version_id).toBe("v-1");
+  });
+
+  it("跨租/不存在 404 VERSION_NOT_FOUND 原样抛出", async () => {
+    const detail = { code: "VERSION_NOT_FOUND", message: "文档版本不存在" };
+    const { session } = sessionStub(() => ({ status: 404, body: detail }));
+    await expect(createKbApi(session).getAudiences("v-x")).rejects.toMatchObject({
+      status: 404,
+      detail,
+    });
+  });
+
+  it("PUT 422 AUDIENCE_ALL_MIXED 原样抛出（服务端为唯一门禁）", async () => {
+    const detail = { code: "AUDIENCE_ALL_MIXED", message: "all（显式全体）不得与其他人群类型混配" };
+    const { session } = sessionStub(() => ({ status: 422, body: detail }));
+    await expect(
+      createKbApi(session).replaceAudiences("v-1", {
+        audiences: [{ audience_type: "all", audience_id: null }],
+      }),
+    ).rejects.toMatchObject({ status: 422, detail });
+  });
+});
+
+describe("createKbApi.retrievalTest（KB-09C 视角三参数）", () => {
+  const ROW = {
+    chunk_id: "c-1",
+    chunk_index: 1,
+    chunk_type: "child",
+    section_path: "s",
+    page_start: null,
+    page_end: null,
+    text_preview: "预览",
+    rrf_score: 0.9,
+    dense: { score: 1, rank: 1 },
+    sparse: null,
+    rerank_score: null,
+    final_rank: 1,
+    is_final_reference: true,
+    acl_matched_tokens: ["all"],
+  };
+  const RESULT = {
+    version_id: "v-1",
+    query: "q",
+    top_k: 10,
+    with_rerank: false,
+    rerank_status: "disabled",
+    latency_ms: 1,
+    pool_size: 1,
+    results: [ROW],
+    resolved_audience_tokens: ["all"],
+    acl_filter_applied: true,
+  };
+
+  it("默认操作者视角：三参数缺省不进请求体", async () => {
+    const { session, calls } = sessionStub(() => ({ body: RESULT }));
+    await createKbApi(session).retrievalTest("v-1", { query: "q" });
+
+    const body = JSON.parse(calls[0].init?.body as string) as Record<string, unknown>;
+    expect(body.as_user_id).toBeUndefined();
+    expect(body.as_audiences).toBeUndefined();
+    expect(body.ignore_acl).toBeUndefined();
+    expect(body.acl_filter_applied).toBeUndefined();
+  });
+
+  it("as_user_id 视角：snake_case 进请求体", async () => {
+    const { session, calls } = sessionStub(() => ({ body: RESULT }));
+    await createKbApi(session).retrievalTest("v-1", {
+      query: "q",
+      as_user_id: "u-7",
+    });
+
+    const body = JSON.parse(calls[0].init?.body as string) as Record<string, unknown>;
+    expect(body.as_user_id).toBe("u-7");
+    expect(body.as_audiences).toBeUndefined();
+    expect(body.ignore_acl).toBeUndefined();
+  });
+
+  it("as_audiences + ignore_acl 进请求体", async () => {
+    const { session, calls } = sessionStub(() => ({ body: RESULT }));
+    await createKbApi(session).retrievalTest("v-1", {
+      query: "q",
+      as_audiences: ["department:d-1", "all"],
+      ignore_acl: true,
+    });
+
+    const body = JSON.parse(calls[0].init?.body as string) as Record<string, unknown>;
+    expect(body.as_audiences).toEqual(["department:d-1", "all"]);
+    expect(body.ignore_acl).toBe(true);
+  });
+
+  it("响应回读 resolved_audience_tokens/acl_filter_applied 与逐行 acl_matched_tokens", async () => {
+    const { session } = sessionStub(() => ({ body: RESULT }));
+    const result = await createKbApi(session).retrievalTest("v-1", { query: "q" });
+
+    expect(result.resolved_audience_tokens).toEqual(["all"]);
+    expect(result.acl_filter_applied).toBe(true);
+    expect(result.results[0].acl_matched_tokens).toEqual(["all"]);
   });
 });
