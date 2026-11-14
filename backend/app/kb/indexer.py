@@ -189,6 +189,8 @@ class IndexPoint:
     text_hash: str
     dense: list[float]
     sparse: SparseVector
+    # KB-10A：人工编辑标记（spec :328 进 payload 与分块详情）
+    is_human_edited: bool = False
 
 
 def build_payload(
@@ -221,6 +223,7 @@ def build_payload(
         "chunk_type": point.chunk_type,
         "text_hash": point.text_hash,
         "acl_tokens": list(acl_tokens),
+        "is_human_edited": bool(point.is_human_edited),
         "is_published": False,
     }
 

@@ -39,6 +39,15 @@ from pydantic import BaseModel, Field, StringConstraints
 from app.api.pagination import PageResponse
 from app.auth.principal import Principal, require_permission
 from app.core.sse import SSE_HEADERS, format_heartbeat, format_sse
+from app.kb.chunk_edit import (
+    derive_version as derive_version_service,
+)
+from app.kb.chunk_edit import (
+    list_chunk_edits as list_chunk_edits_service,
+)
+from app.kb.chunk_edit import (
+    submit_chunk_edit as submit_chunk_edit_service,
+)
 from app.kb.chunk_read import (
     ChunkRef,
     ChunkStats,
@@ -97,6 +106,8 @@ DeleterDep = require_permission("school.kb.delete", realm="tenant")
 ChunkViewerDep = require_permission("school.kb.view_chunks", realm="tenant")
 # KB-09：人群配置/确认（矩阵 §3：校管△ 可授、超管√；读侧沿 view 先例）
 AclManagerDep = require_permission("school.kb.acl.manage", realm="tenant")
+ChunkEditorDep = require_permission("school.kb.chunk.edit", realm="tenant")
+ChunkConfirmerDep = require_permission("school.kb.chunk.confirm", realm="tenant")
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -1132,7 +1143,7 @@ async def delete_kb_document_version(
 
 
 class KbChunkResponse(BaseModel):
-    """知识库分块（KB-10 的人工编辑三列不暴露）。"""
+    """知识库分块（KB-10A：人工编辑三列透出）。"""
 
     id: UUID
     chunk_type: str
@@ -1147,6 +1158,10 @@ class KbChunkResponse(BaseModel):
     char_count: int
     embedding_status: str
     created_at: datetime
+    # KB-10A：人工编辑三列透出（spec :328「is_human_edited 写入 payload 与分块详情」）
+    is_human_edited: bool
+    edited_by: UUID | None
+    edited_at: datetime | None
 
 
 class KbChunkRef(BaseModel):
@@ -1199,6 +1214,9 @@ def _chunk_response(view: ChunkView) -> KbChunkResponse:
         char_count=view.char_count,
         embedding_status=view.embedding_status,
         created_at=view.created_at,
+        is_human_edited=view.is_human_edited,
+        edited_by=view.edited_by,
+        edited_at=view.edited_at,
     )
 
 
@@ -1433,3 +1451,147 @@ async def run_kb_retrieval_test(
     except KbError as exc:
         raise _http_error(exc) from exc
     return _retrieval_test_response(result)
+
+
+# ---------------------------------------------------------------------------
+# KB-10A：切块编辑与派生重建（K5；docs/design-briefs/M3-KB-10.md，已确认 D0-D6）
+# ---------------------------------------------------------------------------
+
+
+class KbChunkEditRequest(BaseModel):
+    """块编辑提交（spec :324：base_hash 乐观锁 + 理由必填）。"""
+
+    new_content: str = Field(min_length=1, description="编辑后全文（服务端做结构校验与长度上限）")
+    reason: str = Field(min_length=1, max_length=500, description="编辑理由（必填，入审计）")
+    base_hash: str = Field(min_length=64, max_length=64, description="提交时看到的 chunk_hash")
+
+
+class KbChunkEditResponse(BaseModel):
+    """块编辑提交记录（M2：new_content 透出——KB-10B diff 渲染数据源）。"""
+
+    chunk_id: UUID
+    source_version_id: UUID
+    status: str
+    before_hash: str
+    after_hash: str
+    new_content: str
+    reason: str
+    derived_version_id: UUID | None
+
+
+class KbDeriveResponse(BaseModel):
+    """派生结果（派生版本行已建、构建任务已排）。"""
+
+    version_id: UUID
+    parent_version_id: UUID
+    derivation_type: str
+    edited_chunks: int
+
+
+@router.post(
+    "/chunks/{chunk_id}/edits",
+    status_code=201,
+    response_model=KbChunkEditResponse,
+)
+async def submit_kb_chunk_edit(
+    chunk_id: UUID,
+    request: KbChunkEditRequest,
+    editor: Annotated[Principal, ChunkEditorDep],
+    http_request: Request,
+) -> KbChunkEditResponse:
+    """提交块编辑（spec :324；乐观锁 409 CHUNK_CONFLICT、结构 422；服务端唯一门禁）。"""
+
+    tenant_id = _tenant_or_403(editor)
+    reason = request.reason.strip()
+    if not reason:
+        raise _http_error(KbError("CHUNK_EDIT_REASON_REQUIRED", "编辑理由不能为空", 422))
+    try:
+        view = await submit_chunk_edit_service(
+            tenant_id=tenant_id,
+            scope=editor.scope_context,
+            chunk_id=chunk_id,
+            user_id=editor.user_id,
+            new_content=request.new_content,
+            reason=reason,
+            base_hash=request.base_hash,
+            request_id=getattr(http_request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbChunkEditResponse(
+        chunk_id=view.chunk_id,
+        source_version_id=view.source_version_id,
+        status=view.status,
+        before_hash=view.before_hash,
+        after_hash=view.after_hash,
+        new_content=view.new_content,
+        reason=view.reason,
+        derived_version_id=view.derived_version_id,
+    )
+
+
+@router.get(
+    "/document-versions/{version_id}/chunk-edits",
+    response_model=list[KbChunkEditResponse],
+)
+async def list_kb_chunk_edits(
+    version_id: UUID,
+    viewer: Annotated[Principal, ViewerDep],
+) -> list[KbChunkEditResponse]:
+    """块编辑提交记录列表（spec :466；跨租/范围外版本 404 同文不泄露）。"""
+
+    tenant_id = _tenant_or_403(viewer)
+    try:
+        views = await list_chunk_edits_service(
+            tenant_id=tenant_id, scope=viewer.scope_context, version_id=version_id
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return [
+        KbChunkEditResponse(
+            chunk_id=view.chunk_id,
+            source_version_id=view.source_version_id,
+            status=view.status,
+            before_hash=view.before_hash,
+            after_hash=view.after_hash,
+            new_content=view.new_content,
+            reason=view.reason,
+            derived_version_id=view.derived_version_id,
+        )
+        for view in views
+    ]
+
+
+@router.post(
+    "/document-versions/{version_id}/derive",
+    status_code=201,
+    response_model=KbDeriveResponse,
+)
+async def derive_kb_version(
+    version_id: UUID,
+    confirmer: Annotated[Principal, ChunkConfirmerDep],
+    http_request: Request,
+) -> KbDeriveResponse:
+    """确认并派生新版本（spec :326；校方超管 `school_super_admin` 角色 + chunk.confirm 码）。"""
+
+    tenant_id = _tenant_or_403(confirmer)
+    if "school_super_admin" not in confirmer.roles:
+        raise _http_error(
+            KbError("CHUNK_CONFIRM_FORBIDDEN", "派生确认仅校方超管可用", 403)
+        )
+    try:
+        result = await derive_version_service(
+            tenant_id=tenant_id,
+            scope=confirmer.scope_context,
+            version_id=version_id,
+            user_id=confirmer.user_id,
+            request_id=getattr(http_request.state, "request_id", None),
+        )
+    except KbError as exc:
+        raise _http_error(exc) from exc
+    return KbDeriveResponse(
+        version_id=result["version_id"],
+        parent_version_id=result["parent_version_id"],
+        derivation_type=result["derivation_type"],
+        edited_chunks=result["edited_chunks"],
+    )

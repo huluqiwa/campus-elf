@@ -48,6 +48,9 @@ KB_TEACHER_VIEWER = "kb-teacher-viewer"
 KB_ACL_UNFILTERED = "kb-acl-unfiltered"
 # KB-09B：批量测试运行发起人（school.kb.test）
 KB_TEST_RUNNER = "kb-test-runner"
+# KB-10A：块编辑提交人 / 派生确认人（school.kb.chunk.edit / chunk.confirm 分授）
+KB_CHUNK_EDITOR = "kb-chunk-editor"
+KB_CHUNK_CONFIRMER = "kb-chunk-confirmer"
 KB_CHUNK_SELF = "kb-chunk-self"
 KB_B_CHUNK_VIEWER = "kb-b-chunk-viewer"
 # KB-09：人群配置/确认（school.kb.acl.manage；矩阵 §3 校管△ 非默认、超管√）
@@ -158,6 +161,38 @@ async def _seed_data(engine: AsyncEngine) -> tuple[UUID, UUID]:
         password=PASSWORD,
         permissions=("school.kb.test", "school.kb.view"),
         scope_types=("school",),
+    )
+    # KB-10A：块编辑提交人（chunk.edit + view）/ 派生确认人（chunk.confirm + view）
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_CHUNK_EDITOR,
+        password=PASSWORD,
+        permissions=("school.kb.chunk.edit", "school.kb.view"),
+        scope_types=("school",),
+    )
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_CHUNK_CONFIRMER,
+        password=PASSWORD,
+        permissions=("school.kb.chunk.confirm", "school.kb.view"),
+        scope_types=("school",),
+    )
+    # 派生确认仅校方超管（spec :326）——confirmer 绑 school_super_admin 内置角色
+    # （角色行由租户开通 seed 产生；user_roles 直插走真实绑定链路）
+    # 测试租户不走开通流程——手动调用库函数 seed_builtin_roles 种内置角色
+    await execute("select seed_builtin_roles(:tid)", tid=str(tenant_a))
+    admin_rows = await rows(
+        "select id from roles where code = 'school_super_admin' limit 1"
+    )
+    assert admin_rows, "school_super_admin 角色未种子化"
+    await execute(
+        "insert into user_roles (id, tenant_id, user_id, role_id) "
+        "values (gen_random_uuid(), :tid, :uid, :rid)",
+        tid=str(tenant_a),
+        uid=str((await rows("select id from users where login_id = :l", l=KB_CHUNK_CONFIRMER))[0]["id"]),
+        rid=str(admin_rows[0]["id"]),
     )
     # KB-05：发布人（发布/回滚/下线/删除）与租户 B 发布人（跨租 404 探测）
     await seed_tenant_user(
