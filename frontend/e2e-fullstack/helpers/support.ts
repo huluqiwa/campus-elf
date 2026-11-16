@@ -40,6 +40,9 @@ export interface E2EAccounts {
   /** KB-05B（TD-292）：审批人（审批中心 + 通过/驳回）与发布人（构建/测试/发布/删除）。 */
   kb_approver: { school_code: string; login_id: string; password: string };
   kb_publisher: { school_code: string; login_id: string; password: string };
+  /** KB-10B：块编辑提交人（chunk.edit）与派生确认人（chunk.confirm + school_super_admin）。 */
+  kb_chunk_editor: { school_code: string; login_id: string; password: string };
+  kb_chunk_confirmer: { school_code: string; login_id: string; password: string };
   role_admin: { school_code: string; login_id: string; password: string };
   role_target: { school_code: string; login_id: string; password: string };
   mfa_target: {

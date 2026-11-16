@@ -32,6 +32,7 @@ import { ApiError, toUserMessage } from "@campus-elf/api-client";
 import type {
   KbAudienceView,
   KbChunkDetailView,
+  KbChunkEditResponse,
   KbChunkStatsView,
   KbChunkView,
   KbDocumentDetailView,
@@ -59,6 +60,13 @@ import {
   aclVisible as aclVisibleGate,
   audienceEditError,
   audienceTypeLabel,
+  chunkConfirmGate,
+  chunkEditActionMessage,
+  chunkEditError,
+  chunkEditGate,
+  chunkEditMaxChars,
+  CHUNK_EDIT_MIN_CAP,
+  CHUNK_EDIT_REASON_MAX_CHARS,
   chunkFilterError,
   chunkTypeLabel,
   chunksGate,
@@ -67,6 +75,7 @@ import {
   embeddingStatusMeta,
   formatBytes,
   formatChunkStats,
+  formatEditDiff,
   formatScore,
   isActiveVersion,
   kbPublishActionMessage,
@@ -84,6 +93,7 @@ import {
   type KbAudienceEditRow,
   type KbRollbackTarget,
 } from "../kb-logic";
+import { codePointLength } from "../logic";
 import { useAuthStore } from "../stores/auth";
 import {
   caseSummaries,
@@ -187,6 +197,55 @@ const retrievalTestLoading = ref(false);
 const retrievalTestError = ref<string | null>(null);
 const retrievalTestResult = ref<KbRetrievalTestResult | null>(null);
 let retrievalRunSeq = 0;
+
+// KB-10B：块编辑与派生（卡 E1-E6；chunk.edit 码 / chunk.confirm 码 + school_super_admin role 双判——
+// 服务端仍是唯一门禁；409/422 族回填对话框不关闭，KB-09C 先例；E6 引导零后端改动）。
+const chunkEditVisible = computed(() => chunkEditGate(permissions.value));
+const chunkConfirmVisible = computed(() =>
+  chunkConfirmGate(permissions.value, auth.user?.roles ?? []),
+);
+const editDialogVisible = ref(false);
+const editTarget = ref<KbChunkView | null>(null);
+const editContent = ref("");
+const editReason = ref("");
+const editCapChars = ref(CHUNK_EDIT_MIN_CAP);
+const editDialogError = ref<string | null>(null);
+const editSubmitting = ref(false);
+const chunkEdits = ref<KbChunkEditResponse[]>([]);
+const chunkEditsLoading = ref(false);
+const openEditDiffIndex = ref<number | null>(null);
+const derivingVersionId = ref<string | null>(null);
+
+/** 实时预检（镜像 validate_edit_content 422 族；提交按钮禁用绑定）。 */
+const editContentCheck = computed(() =>
+  editDialogVisible.value ? chunkEditError(editContent.value, editCapChars.value) : null,
+);
+/** 理由预检（必填由提交按钮 trim 判断；长度上限镜像后端 max_length=500——复审 m6）。 */
+const editReasonCheck = computed(() =>
+  editDialogVisible.value && codePointLength(editReason.value.trim()) > CHUNK_EDIT_REASON_MAX_CHARS
+    ? `编辑理由超出长度上限（${codePointLength(editReason.value.trim())} > ${CHUNK_EDIT_REASON_MAX_CHARS} 码点）`
+    : null,
+);
+
+/** 卡 E6（TD-321）：版本已派生（提交记录含 derived_version_id）→ 对话框横幅引导，防静默搁浅。 */
+const targetVersionDerived = computed(() =>
+  chunkEdits.value.some((row) => row.derived_version_id !== null),
+);
+const targetDerivedVersionShort = computed(() => {
+  const derived = chunkEdits.value.find((row) => row.derived_version_id !== null);
+  const id = derived?.derived_version_id ?? null;
+  return id === null ? null : id.slice(0, 8);
+});
+
+/** diff 摘要（卡 E3：当前块文本 vs 提交 new_content；纯文本 multiset 对比）。 */
+const editDiff = computed(() => {
+  const index = openEditDiffIndex.value;
+  if (index === null) return null;
+  const edit = chunkEdits.value[index];
+  const chunk = chunks.value.find((row) => row.id === edit?.chunk_id);
+  if (edit === undefined || chunk === undefined) return null;
+  return formatEditDiff(chunk.text, edit.new_content);
+});
 
 const testGate = computed(() =>
   detail.value
@@ -489,11 +548,109 @@ function openChunks(row: KbVersionView): void {
   const generation = chunksGeneration;
   void loadChunksPage(generation);
   void loadChunkStats(generation);
+  void loadChunkEdits(generation);
 }
 
 function closeChunks(): void {
   chunksView.value = null;
   chunksGeneration += 1;
+}
+
+// ---- KB-10B：块编辑提交记录 / 编辑对话框 / 派生确认（服务端仍是唯一门禁） ----
+
+function chunkIndexById(chunkId: string): number | null {
+  return chunks.value.find((row) => row.id === chunkId)?.chunk_index ?? null;
+}
+
+async function loadChunkEdits(generation: number): Promise<void> {
+  if (chunksView.value === null) return;
+  chunkEditsLoading.value = true;
+  try {
+    const items = await kbApi.listChunkEdits(chunksView.value.versionId);
+    if (generation !== chunksGeneration) return;
+    chunkEdits.value = items;
+  } catch (error) {
+    if (generation !== chunksGeneration) return;
+    reportError(error, "编辑提交记录加载失败");
+  } finally {
+    if (generation === chunksGeneration) chunkEditsLoading.value = false;
+  }
+}
+
+function toggleEditDiff(index: number): void {
+  openEditDiffIndex.value = openEditDiffIndex.value === index ? null : index;
+}
+
+/** 打开编辑对话框（仅子块；上限按 TD-320 动态口径显示）。 */
+function openChunkEdit(chunk: KbChunkView): void {
+  if (chunk.chunk_type !== "child") return;
+  editTarget.value = chunk;
+  editContent.value = chunk.text;
+  editReason.value = "";
+  editCapChars.value = chunkEditMaxChars(chunk.char_count);
+  editDialogError.value = null;
+  editDialogVisible.value = true;
+}
+
+function isKbError(error: unknown, code: string): boolean {
+  return (
+    error instanceof ApiError &&
+    error.detail !== null &&
+    typeof error.detail === "object" &&
+    (error.detail as Record<string, unknown>).code === code
+  );
+}
+
+async function submitChunkEdit(): Promise<void> {
+  const target = editTarget.value;
+  if (target === null || editSubmitting.value) return;
+  editSubmitting.value = true;
+  editDialogError.value = null;
+  try {
+    await kbApi.submitChunkEdit(target.id, {
+      new_content: editContent.value,
+      reason: editReason.value.trim(),
+      base_hash: target.chunk_hash,
+    });
+    editDialogVisible.value = false;
+    ElMessage.success("编辑已提交，待派生确认");
+    if (chunksView.value !== null) {
+      await loadChunkEdits(chunksGeneration);
+    }
+  } catch (error) {
+    // 409 CHUNK_EDIT_STATE：当前后端 submit 无任何路径返回该码（submit 不查派生态、
+    // 并发派生冲突走版本号唯一约束在 derive 端点）——此分支当前不可达，仅防御未来
+    // 行为变更；真实的已派生引导在对话框横幅（targetVersionDerived）与派生入口 409。
+    if (isKbError(error, "CHUNK_EDIT_STATE")) {
+      editDialogVisible.value = false;
+      const derived = chunkEdits.value.find((row) => row.derived_version_id !== null);
+      const derivedId = derived?.derived_version_id ?? null;
+      ElMessage.warning(
+        derivedId !== null
+          ? `该版本已派生（新版本 ${derivedId.slice(0, 8)}…）——请到版本列表打开派生版本继续编辑`
+          : "该版本已派生——请到版本列表打开派生版本继续编辑",
+      );
+      return;
+    }
+    // 409 CHUNK_CONFLICT / 422 族：对话框内警示不关闭（KB-09C 先例；服务端 message 优先）
+    editDialogError.value = chunkEditActionMessage(error, "编辑提交失败");
+  } finally {
+    editSubmitting.value = false;
+  }
+}
+
+async function deriveFromVersion(row: KbVersionView): Promise<void> {
+  if (derivingVersionId.value !== null) return;
+  derivingVersionId.value = row.id;
+  try {
+    const result = await kbApi.deriveVersion(row.id);
+    ElMessage.success(`派生版本已创建并排队构建（纳入 ${result.edited_chunks} 处编辑）`);
+    await refreshAfterAction();
+  } catch (error) {
+    ElMessage.warning(chunkEditActionMessage(error, "派生确认失败"));
+  } finally {
+    derivingVersionId.value = null;
+  }
 }
 
 // ---- KB-09C：人群配置子视图（GET view / PUT·confirm acl.manage；服务端是唯一门禁） ----
@@ -939,6 +1096,42 @@ function currentScan() {
             {{ formatChunkStats(chunkStats) }}
           </p>
 
+          <!-- KB-10B（卡 E3）：编辑提交记录区（含 diff 摘要展开；派生入口在版本行）。 -->
+          <div
+            v-if="chunkEdits.length > 0"
+            v-loading="chunkEditsLoading"
+            class="chunk-edits"
+            data-testid="kb-chunk-edits"
+          >
+            <span class="retrieval-title">编辑提交记录</span>
+            <ul data-testid="kb-chunk-edits-list">
+              <li v-for="(edit, index) in chunkEdits" :key="`${edit.chunk_id}-${index}`">
+                <el-tag size="small" :type="edit.status === 'submitted' ? 'warning' : 'success'">
+                  {{ edit.status === "submitted" ? "待派生" : "已纳入派生" }}
+                </el-tag>
+                <span>块 #{{ chunkIndexById(edit.chunk_id) ?? "?" }}</span>
+                <span class="muted">{{ edit.reason }}</span>
+                <el-button
+                  link
+                  size="small"
+                  type="primary"
+                  data-testid="kb-chunk-edit-diff"
+                  @click="toggleEditDiff(index)"
+                >
+                  {{ openEditDiffIndex === index ? "收起改动" : "查看改动" }}
+                </el-button>
+              </li>
+            </ul>
+            <div v-if="editDiff !== null" data-testid="kb-chunk-edit-diff-view">
+              <p v-for="(line, ri) in editDiff.removed" :key="`r-${ri}`" class="diff-removed">
+                - {{ line }}
+              </p>
+              <p v-for="(line, ai) in editDiff.added" :key="`a-${ai}`" class="diff-added">
+                + {{ line }}
+              </p>
+            </div>
+          </div>
+
           <!-- KB-07B 检索测试区（卡 1A/2A：常驻紧凑，结果表仅运行后渲染；纯文本无 v-html；
                分数与名次来自后端逐路旁路查询——「为什么召回」逐路可解释）。 -->
           <div class="retrieval-test" data-testid="kb-retrieval">
@@ -1186,6 +1379,34 @@ function currentScan() {
                 </el-tag>
               </template>
             </el-table-column>
+            <!-- KB-10B（卡 E4）：人工修订 tag（spec :328 分块详情透出）。 -->
+            <el-table-column label="人工修订" width="88">
+              <template #default="{ row }">
+                <el-tag
+                  v-if="row.is_human_edited"
+                  size="small"
+                  type="danger"
+                  data-testid="kb-chunk-human-tag"
+                >
+                  人工修订
+                </el-tag>
+                <span v-else class="muted">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="chunkEditVisible" label="" width="56">
+              <template #default="{ row }">
+                <el-button
+                  v-if="row.chunk_type === 'child'"
+                  link
+                  size="small"
+                  type="primary"
+                  data-testid="kb-chunk-edit-open"
+                  @click="openChunkEdit(row as KbChunkView)"
+                >
+                  编辑
+                </el-button>
+              </template>
+            </el-table-column>
             <el-table-column label="" width="56">
               <template #default="{ row }">
                 <el-button
@@ -1237,6 +1458,24 @@ function currentScan() {
                 #{{ chunkDetail.chunk_index }} · {{ chunkTypeLabel(chunkDetail.chunk_type) }}
               </span>
               <span class="muted">{{ chunkDetail.section_path ?? "" }}</span>
+              <el-tag
+                v-if="chunkDetail.is_human_edited"
+                size="small"
+                type="danger"
+                data-testid="kb-chunk-detail-human-tag"
+              >
+                人工修订
+              </el-tag>
+              <el-button
+                v-if="chunkEditVisible && chunkDetail.chunk_type === 'child'"
+                link
+                size="small"
+                type="primary"
+                data-testid="kb-chunk-detail-edit"
+                @click="openChunkEdit(chunkDetail)"
+              >
+                编辑
+              </el-button>
             </div>
             <p v-if="chunkDetail.parent" class="chunk-nav">
               父块：
@@ -1622,6 +1861,21 @@ function currentScan() {
               </el-button>
             </template>
           </el-table-column>
+          <!-- KB-10B（卡 E3）：派生确认入口（chunk.confirm 码 + 校方超管 role 双判；服务端唯一门禁）。 -->
+          <el-table-column v-if="chunkConfirmVisible" label="派生" width="76">
+            <template #default="{ row }">
+              <el-button
+                link
+                size="small"
+                type="primary"
+                data-testid="kb-derive-open"
+                :loading="derivingVersionId === (row as KbVersionView).id"
+                @click="deriveFromVersion(row as KbVersionView)"
+              >
+                派生
+              </el-button>
+            </template>
+          </el-table-column>
         </el-table>
         <el-button
           v-if="nextCursor !== null"
@@ -1704,6 +1958,75 @@ function currentScan() {
             @click="saveAcl"
           >
             保存（置为未确认）
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <!-- KB-10B 编辑对话框（卡 E1）：textarea + 理由 + kb-logic 镜像 422 族预检 + 409 回填不关闭。 -->
+      <el-dialog
+        v-model="editDialogVisible"
+        title="编辑子块文本"
+        width="640"
+        data-testid="kb-chunk-edit-dialog"
+      >
+        <div v-if="editTarget !== null">
+          <p class="muted">
+            块 #{{ editTarget.chunk_index }} · {{ chunkTypeLabel(editTarget.chunk_type) }} · 上限
+            {{ editCapChars }} 码点（TD-320：max(500, 原块码点)）
+          </p>
+          <p
+            v-if="targetVersionDerived"
+            class="edit-error"
+            data-testid="kb-chunk-edit-derived-warn"
+          >
+            该版本已派生{{
+              targetDerivedVersionShort === null ? "" : `（新版本 ${targetDerivedVersionShort}…）`
+            }}——本次提交不会纳入现有派生，建议到派生版本继续编辑
+          </p>
+          <el-input
+            v-model="editContent"
+            type="textarea"
+            :rows="10"
+            data-testid="kb-chunk-edit-content"
+          />
+          <el-input
+            v-model="editReason"
+            placeholder="编辑理由（必填）"
+            class="edit-reason"
+            data-testid="kb-chunk-edit-reason"
+          />
+          <p
+            v-if="editContentCheck !== null"
+            class="edit-error"
+            data-testid="kb-chunk-edit-precheck"
+          >
+            {{ editContentCheck }}
+          </p>
+          <p
+            v-if="editReasonCheck !== null"
+            class="edit-error"
+            data-testid="kb-chunk-edit-reason-precheck"
+          >
+            {{ editReasonCheck }}
+          </p>
+          <p v-if="editDialogError !== null" class="edit-error" data-testid="kb-chunk-edit-error">
+            {{ editDialogError }}
+          </p>
+        </div>
+        <template #footer>
+          <el-button data-testid="kb-chunk-edit-cancel" @click="editDialogVisible = false">
+            取消
+          </el-button>
+          <el-button
+            type="primary"
+            :disabled="
+              editContentCheck !== null || editReasonCheck !== null || editReason.trim() === ''
+            "
+            :loading="editSubmitting"
+            data-testid="kb-chunk-edit-submit"
+            @click="submitChunkEdit"
+          >
+            提交编辑
           </el-button>
         </template>
       </el-dialog>
@@ -1905,5 +2228,44 @@ function currentScan() {
   word-break: break-word;
   max-height: 320px;
   overflow: auto;
+}
+.chunk-edits {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+.chunk-edits ul {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.chunk-edits li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+.diff-removed {
+  margin: 2px 0;
+  color: var(--el-color-danger);
+  background: var(--el-fill-color-light);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-added {
+  margin: 2px 0;
+  color: var(--el-color-success);
+  background: var(--el-fill-color-light);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.edit-error {
+  margin: 6px 0 0;
+  color: var(--el-color-danger);
+  font-size: 12px;
 }
 </style>

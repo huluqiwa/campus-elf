@@ -1047,3 +1047,12 @@
 - 修复后复测读数（实现者实测）：chunk_edits 集成 **17**、unit+build_worker **31**、chunks+audiences **37**、acl_retrieval **12**、BS-M3-11 **3** 全绿；ruff/mypy×2（278+3 文件）/bandit×2/alembic check/git diff --check 全过。
 - PR 与合并事实（2026-11-17）：PR #77（单 commit `4e58857`）→ squash 合并 **`319d25d`**，分支已删；合并授权由用户在 CI 全绿后确认。PR CI backend run `43915233190` **success（1199 passed + 3 skipped / 33:28）**、四包覆盖率 79.92/82.41/81.25/66.67% 逐包一致全过、security run `43915233384` success（47s）；合并后 main push security run `43924679178` success（backend run `43924679146` 见 README 门禁段）。
 - 判例沉淀：①「复审通过才提交」不可省——第 1 轮修复后跳复审合并，5 个 Major 直进 main，其中 M1 是租户数据范围红线；②同族缺陷按模式扫描（watchdog/finish/claim 族三处 + test_task 两处一并修）；③范围外/状态外发现先机械核验再登记（对齐 TD-315 判例）。
+
+### M3 KB-10B 切块编辑与派生重建前端（K5 前端半）
+
+- 日期：2026-11-17
+- 范围：分支 `feature/m3-kb10b-chunk-edit-frontend`（简报 commit `77bb73e` + 实现 20 文件 +1469/-10，工作树待提交）
+- 对照：简报 `docs/design-briefs/M3-KB-10B.md`（决策卡 E0-E8 用户拍板全按推荐 + §8 注记 11 条）；spec :322-334（:329 校验行 TD-320 回写）；TD-320/321/322 处置回写
+- **独立复审（合并前，对工作树全量 diff）**：**0 Blocker / 0 Major / 6 Minor**。六 Minor 全处置：m1 e2e_seed 格式化（ruff format）；m2 api-client `listChunkEdits` 权限注释勘正（GET 挂 `school.kb.view` 非 chunk.edit）；m3 乐观锁 mock 分支不可达取舍登记（简报 §8.10——UI 层 base_hash 恒同源，路径由 KB-10A 后端集成钉住）；m4 spec 行号交叉引用勘正（:328→:329）；m5 契约偏离登记（§8.9：`chunkEditActionMessage` 命名与派生按钮恒可点取舍）；m6 理由长度 500 前端预检（`CHUNK_EDIT_REASON_MAX_CHARS` + `editReasonCheck` 禁用绑定）+ submit 409 CHUNK_EDIT_STATE 防御分支注释如实化（当前后端不可达）。
+- 复测读数（实现者实测）：前端 vitest **203**（+15）、后端受影响 **56**（unit 15/chunk_edits 17/chunks 24——E2/E5 红→绿）、mock E2E **177**（170+7）、全栈链④真实栈 passed（UI 编辑→UI 派生→READY→沙箱→发布派生→源 chunks 零漂移）、ruff/mypy×2（278+3 文件）/bandit×2/alembic check 零漂移/vue-tsc/eslint/prettier 全绿。
+- 判例沉淀：①Element Plus `el-input` 的 data-testid 落在原生 input/textarea 本体（attrs 透传）——E2E 定位直取元素而非包装 div；②全栈 E2E 的 webServer 端口（4173/4174）与 mock E2E 共享——两套 Playwright 绝不可并行（本轮两次撞车：campus 假失败 + 链② 600s 超时假失败，串行复跑均绿）；③multipart 表单字段名以回包契约为准（`test_set_id`/`run_id` 非 `id`）——链④调试三跑定位。

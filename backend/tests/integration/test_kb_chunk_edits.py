@@ -833,3 +833,58 @@ async def test_second_derivation_preserves_human_edited_provenance(
             f"chunk {row['id']}: PG={row['is_human_edited']} "
             f"Qdrant={qdrant_edited.get(str(row['id']))}（M4 双事实源不一致）"
         )
+
+
+async def test_edit_long_table_block_same_length_accepted(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """TD-320（卡 E5-A）：超长原子块（表格不拆）的同长度修正必须可提交——
+    上限 = max(500, 原块码点)；超过动态上限仍 422。"""
+
+    long_markdown = (
+        "# 长表手册\n\n## 数据表\n\n"
+        "| 列 | 说明 |\n| --- | --- |\n"
+        f"| 字段甲 | {'长' * 600} |\n"
+        f"| 字段乙 | {'值' * 300} |\n"
+        "\n## 附注\n\n简短说明文字，供对照超限用例使用。\n"
+    )
+    _doc, version_id = await _seed_test_passed_version(
+        env,
+        monkeypatch,
+        title="长表文档",
+        markdown=long_markdown,
+        embedder=TokenOverlapEmbedder(),
+    )
+    chunks = await _child_chunks(version_id)
+    target = next(c for c in chunks if len(c["text"]) > 500)
+    assert target["text"].startswith("|"), "长块应为表格原子块"
+
+    # 同长度修正（替换正文行）→ 201（此前 500 硬上限下必 422）
+    corrected = target["text"].replace("长" * 600, "正" * 600)
+    assert len(corrected) == len(target["text"])
+    editor = await login(client, KB_CHUNK_EDITOR)
+    resp = await client.post(
+        EDITS_URL.format(chunk_id=str(target["id"])),
+        json={
+            "new_content": corrected,
+            "reason": "TD-320 同长度修正",
+            "base_hash": target["chunk_hash"],
+        },
+        headers=editor,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "submitted"
+
+    # 超过动态上限（原块 600 码点，新内容 700+ 码点）→ 422
+    another = next(c for c in chunks if c["id"] != target["id"])
+    resp = await client.post(
+        EDITS_URL.format(chunk_id=str(another["id"])),
+        json={
+            "new_content": another["text"] + "x" * 700,
+            "reason": "超限",
+            "base_hash": another["chunk_hash"],
+        },
+        headers=editor,
+    )
+    assert resp.status_code == 422, resp.text
+    assert "长度上限" in resp.json()["detail"]["message"]

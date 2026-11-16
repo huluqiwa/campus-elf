@@ -1751,3 +1751,279 @@ test("KB-09C ignore_acl：无码开关不渲染；有码开启后未过滤视图
   // 未过滤视图：行仍带 payload token 交集——操作者 token 只含 all，部门文档无交集 → 全「—」
   await expect(drawer2.getByTestId("kb-retrieval-table")).toContainText("—");
 });
+
+// ---------------------------------------------------------------------------
+// KB-10B：切块编辑与派生重建（卡 E1-E6；chunk.edit/chunk.confirm 码 + 超管 role 双判；
+// 服务端唯一门禁——mock 镜像乐观锁/部分唯一/已派生 409 语义，422 族由前端预检拦）。
+// ---------------------------------------------------------------------------
+
+const KB10B_VERSION_ID = "61000000-0000-0000-0000-0000000000f1";
+const KB10B_EDIT_PERMS = [...BOTH, "school.kb.view_chunks", "school.kb.chunk.edit"];
+const KB10B_CONFIRM_PERMS = [...KB10B_EDIT_PERMS, "school.kb.chunk.confirm"];
+const KB10B_CHILD_ID = "62000000-0000-0000-0000-0000000000f1";
+
+const chunkDocChild = kbChunk({
+  id: KB10B_CHILD_ID,
+  chunk_type: "child",
+  chunk_index: 1,
+  parent_id: "62000000-0000-0000-0000-0000000000f0",
+  text: "安装步骤说明，需要修正错别字。",
+  text_markdown: "安装步骤说明，需要修正错别字。",
+  char_count: 15,
+  is_human_edited: false,
+  edited_by: null,
+  edited_at: null,
+  chunk_hash: "b".repeat(64),
+});
+const chunkDocParent = kbChunk({
+  id: "62000000-0000-0000-0000-0000000000f0",
+  chunk_type: "parent",
+  chunk_index: 0,
+  parent_id: null,
+  text: "安装步骤说明，需要修正错别字。",
+  text_markdown: "安装步骤说明，需要修正错别字。",
+  char_count: 15,
+  is_human_edited: false,
+  edited_by: null,
+  edited_at: null,
+  chunk_hash: "a".repeat(64),
+});
+
+function chunkEditDocument(): KbDocumentFixture {
+  return kbDocument({
+    id: "60000000-0000-0000-0000-0000000000f0",
+    title: "编辑样例",
+    status: "TEST_PASSED",
+    current_version: kbVersion({
+      id: KB10B_VERSION_ID,
+      version_no: 1,
+      filename: "编辑样例.pdf",
+      status: "TEST_PASSED",
+    }),
+    versions: [
+      kbVersion({
+        id: KB10B_VERSION_ID,
+        version_no: 1,
+        filename: "编辑样例.pdf",
+        status: "TEST_PASSED",
+      }),
+    ],
+  });
+}
+
+async function openChunkView(
+  page: Page,
+  perms: string[],
+  roles?: string[],
+): Promise<{
+  drawer: ReturnType<Page["getByTestId"]>;
+  mock: Awaited<ReturnType<typeof mockKbApi>>;
+}> {
+  await mockAuth(page, {
+    authenticated: true,
+    user: { permissions: perms, ...(roles === undefined ? {} : { roles }) },
+  });
+  const mock = await mockKbApi(page, {
+    documents: [chunkEditDocument()],
+    chunksByVersion: { [KB10B_VERSION_ID]: [chunkDocParent, chunkDocChild] },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "编辑样例");
+  await drawer.getByTestId("kb-chunks-open").first().click();
+  await expect(drawer.getByTestId("kb-chunks-view")).toBeVisible();
+  return { drawer, mock };
+}
+
+async function submitEdit(page: Page, content: string, reason: string): Promise<void> {
+  await page.getByTestId("kb-chunk-edit-content").fill(content);
+  await page.getByTestId("kb-chunk-edit-reason").fill(reason);
+  await page.getByTestId("kb-chunk-edit-submit").click();
+}
+
+test("KB-10B edit 码渲染编辑列（仅 child 行）；无码隐藏；人工修订 tag 预置渲染", async ({
+  page,
+}) => {
+  // 有码：child 行有编辑按钮、parent 行没有；无人工修订 tag
+  const first = await openChunkView(page, KB10B_EDIT_PERMS);
+  await expect(first.drawer.getByTestId("kb-chunk-edit-open")).toHaveCount(1);
+  await expect(first.drawer.getByTestId("kb-chunk-human-tag")).toHaveCount(0);
+  await first.drawer.getByTestId("kb-chunk-detail-open").nth(1).click(); // child 行（第 2 行）
+  await expect(first.drawer.getByTestId("kb-chunk-detail")).toBeVisible();
+  await expect(first.drawer.getByTestId("kb-chunk-detail-edit")).toBeVisible();
+
+  // 预置 is_human_edited → tag 渲染（表列 + 详情头部）
+  await mockAuth(page, { authenticated: true, user: { permissions: KB10B_EDIT_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkEditDocument()],
+    chunksByVersion: {
+      [KB10B_VERSION_ID]: [
+        chunkDocParent,
+        kbChunk({
+          ...chunkDocChild,
+          is_human_edited: true,
+          edited_by: "70000000-0000-0000-0000-000000000001",
+          edited_at: "2026-11-17T00:00:00Z",
+        }),
+      ],
+    },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "编辑样例");
+  await drawer.getByTestId("kb-chunks-open").first().click();
+  await expect(drawer.getByTestId("kb-chunk-human-tag")).toBeVisible();
+
+  // 无 chunk.edit 码：编辑列整体不出现（view_chunks 仍可看子视图）
+  const none = await openChunkView(page, ["school.kb.view", "school.kb.view_chunks"]);
+  await expect(none.drawer.getByTestId("kb-chunk-edit-open")).toHaveCount(0);
+});
+
+test("KB-10B 编辑提交 201：提交记录区出现待派生 + state 落记录", async ({ page }) => {
+  const { drawer, mock } = await openChunkView(page, KB10B_EDIT_PERMS);
+  await drawer.getByTestId("kb-chunk-edit-open").click();
+  const dialog = page.getByTestId("kb-chunk-edit-dialog");
+  await expect(dialog).toBeVisible();
+  // 预填原文（对话框初始值 = chunk text）
+  await expect(page.getByTestId("kb-chunk-edit-content")).toHaveValue(
+    "安装步骤说明，需要修正错别字。",
+  );
+  // el-dialog teleport 到 body：page 级定位（KB-09C 先例）
+  await submitEdit(page, "安装步骤说明，已修正错别字。", "修正错别字");
+  await expect(dialog).toBeHidden();
+  // 提交记录区出现（待派生 tag + 理由 + 块号）
+  await expect(drawer.getByTestId("kb-chunk-edits")).toBeVisible();
+  await expect(drawer.getByTestId("kb-chunk-edits")).toContainText("待派生");
+  await expect(drawer.getByTestId("kb-chunk-edits")).toContainText("修正错别字");
+  await expect(drawer.getByTestId("kb-chunk-edits")).toContainText("块 #1");
+  // state 断言（有状态 mock）
+  const state = mock.state.chunkEditsByVersion[KB10B_VERSION_ID];
+  expect(state.edits).toHaveLength(1);
+  expect(state.edits[0]?.status).toBe("submitted");
+  expect(state.edits[0]?.chunk_id).toBe(KB10B_CHILD_ID);
+  expect(state.edits[0]?.before_hash).toBe("b".repeat(64));
+  expect(mock.captures.chunkEditActions).toHaveLength(1);
+});
+
+test("KB-10B 预检镜像：围栏不闭合/超上限禁提交；理由清空禁用", async ({ page }) => {
+  const { drawer } = await openChunkView(page, KB10B_EDIT_PERMS);
+  await drawer.getByTestId("kb-chunk-edit-open").click();
+  await page.getByTestId("kb-chunk-edit-reason").fill("理由");
+  const content = page.getByTestId("kb-chunk-edit-content");
+  await content.fill("```python\nprint(1)\n");
+  await expect(page.getByTestId("kb-chunk-edit-precheck")).toContainText("围栏未闭合");
+  await expect(page.getByTestId("kb-chunk-edit-submit")).toBeDisabled();
+  await content.fill("安装步骤说明，需要修正错别字。");
+  await expect(page.getByTestId("kb-chunk-edit-precheck")).toHaveCount(0);
+  await page.getByTestId("kb-chunk-edit-reason").fill("");
+  await expect(page.getByTestId("kb-chunk-edit-submit")).toBeDisabled();
+});
+
+test("KB-10B 同块重复提交 409：对话框回填错误不关闭（部分唯一镜像）", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: KB10B_EDIT_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkEditDocument()],
+    chunksByVersion: { [KB10B_VERSION_ID]: [chunkDocParent, chunkDocChild] },
+    chunkEditsByVersion: {
+      [KB10B_VERSION_ID]: {
+        edits: [
+          {
+            chunk_id: KB10B_CHILD_ID,
+            source_version_id: KB10B_VERSION_ID,
+            status: "submitted",
+            before_hash: "b".repeat(64),
+            after_hash: "f".repeat(64),
+            new_content: "第一次提交。",
+            reason: "第一次",
+            derived_version_id: null,
+          },
+        ],
+        derived: [],
+      },
+    },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "编辑样例");
+  await drawer.getByTestId("kb-chunks-open").first().click();
+  // 提交记录区已显示预置记录
+  await expect(drawer.getByTestId("kb-chunk-edits")).toContainText("待派生");
+  await drawer.getByTestId("kb-chunk-edit-open").click();
+  await submitEdit(page, "第二次提交。", "第二次");
+  await expect(page.getByTestId("kb-chunk-edit-error")).toContainText("待派生的编辑提交");
+  await expect(page.getByTestId("kb-chunk-edit-dialog")).toBeVisible();
+});
+
+test("KB-10B diff 摘要展开：一删一增纯文本", async ({ page }) => {
+  const { drawer } = await openChunkView(page, KB10B_EDIT_PERMS);
+  await drawer.getByTestId("kb-chunk-edit-open").click();
+  await submitEdit(page, "安装步骤说明，已修正错别字。", "修正");
+  await drawer.getByTestId("kb-chunk-edit-diff").click();
+  const diffView = drawer.getByTestId("kb-chunk-edit-diff-view");
+  await expect(diffView).toBeVisible();
+  await expect(diffView).toContainText("- 安装步骤说明，需要修正错别字。");
+  await expect(diffView).toContainText("+ 安装步骤说明，已修正错别字。");
+});
+
+test("KB-10B confirm 码+role 双判：派生 201 翻转 confirmed；无 role 无派生列", async ({ page }) => {
+  // 码+role 双全：编辑（子视图）→ 返回主体 → 派生 201 → edits 翻 confirmed + derived 记录
+  const ok = await openChunkView(page, KB10B_CONFIRM_PERMS);
+  await ok.drawer.getByTestId("kb-chunk-edit-open").click();
+  await submitEdit(page, "安装步骤说明，已修正错别字。", "修正");
+  await ok.drawer.getByTestId("kb-chunks-back").click(); // 派生按钮在文档主体版本表
+  await expect(ok.drawer.getByTestId("kb-derive-open")).toBeVisible();
+  await ok.drawer.getByTestId("kb-derive-open").click();
+  const state = ok.mock.state.chunkEditsByVersion[KB10B_VERSION_ID];
+  await expect(state.derived).toHaveLength(1);
+  // 卡 E6：派生后再开编辑对话框 → 横幅引导（防静默搁浅）
+  await ok.drawer.getByTestId("kb-chunks-open").first().click();
+  await ok.drawer.getByTestId("kb-chunk-edit-open").first().click();
+  await expect(page.getByTestId("kb-chunk-edit-derived-warn")).toBeVisible();
+  await page.getByTestId("kb-chunk-edit-cancel").click();
+  expect(state.derived[0]?.parent_version_id).toBe(KB10B_VERSION_ID);
+  expect(state.derived[0]?.edited_chunks).toBe(1);
+  await expect(state.edits[0]?.status).toBe("confirmed");
+
+  // 有码无 role（school_admin）：派生列不出现（回主体看版本表）
+  const noRole = await openChunkView(page, KB10B_CONFIRM_PERMS, ["school_admin"]);
+  await noRole.drawer.getByTestId("kb-chunks-back").click();
+  await expect(noRole.drawer.getByTestId("kb-derive-open")).toHaveCount(0);
+
+  // 无码有 role：派生列同样不出现
+  const noCode = await openChunkView(page, KB10B_EDIT_PERMS, ["school_super_admin"]);
+  await noCode.drawer.getByTestId("kb-chunks-back").click();
+  await expect(noCode.drawer.getByTestId("kb-derive-open")).toHaveCount(0);
+});
+
+test("KB-10B 已派生版本再点派生：409 CHUNK_EDIT_STATE 警示引导（卡 E6）", async ({ page }) => {
+  await mockAuth(page, { authenticated: true, user: { permissions: KB10B_CONFIRM_PERMS } });
+  await mockKbApi(page, {
+    documents: [chunkEditDocument()],
+    chunksByVersion: { [KB10B_VERSION_ID]: [chunkDocParent, chunkDocChild] },
+    chunkEditsByVersion: {
+      [KB10B_VERSION_ID]: {
+        edits: [
+          {
+            chunk_id: KB10B_CHILD_ID,
+            source_version_id: KB10B_VERSION_ID,
+            status: "confirmed",
+            before_hash: "b".repeat(64),
+            after_hash: "f".repeat(64),
+            new_content: "已派生内容。",
+            reason: "历史提交",
+            derived_version_id: "71000000-0000-0000-0000-0000000000f1",
+          },
+        ],
+        derived: [
+          {
+            version_id: "71000000-0000-0000-0000-0000000000f1",
+            parent_version_id: KB10B_VERSION_ID,
+            edited_chunks: 1,
+          },
+        ],
+      },
+    },
+  });
+  await page.goto("/kb/documents");
+  const drawer = await openDrawer(page, "编辑样例");
+  await drawer.getByTestId("kb-derive-open").click(); // 派生按钮在主体版本表（无需进子视图）
+  // 409 → warning toast（服务端 message 优先：mock 文案含「派生」）
+  await expect(page.locator(".el-message")).toContainText("派生");
+});

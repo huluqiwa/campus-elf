@@ -10,11 +10,18 @@ import {
   aclVisible,
   audienceEditError,
   audienceTypeLabel,
+  chunkConfirmGate,
+  chunkEditActionMessage,
+  chunkEditError,
+  chunkEditGate,
+  chunkEditMaxChars,
+  CHUNK_EDIT_MIN_CAP,
   chunkFilterError,
   chunkTypeLabel,
   chunksGate,
   embeddingStatusMeta,
   formatChunkStats,
+  formatEditDiff,
   formatScore,
   KB_CHUNKS_CODE,
   KB_DELETE_CODE,
@@ -726,5 +733,102 @@ describe("KB-09C 确认态文案与 token 展示", () => {
   it("tokenLabel：all→全体；type:<id> 原样展示（诊断面不美化 id）", () => {
     expect(tokenLabel("all")).toBe("全体");
     expect(tokenLabel("department:d-1")).toBe("department:d-1");
+  });
+});
+
+describe("chunkEditGate / chunkConfirmGate（KB-10B 卡 E3）", () => {
+  it("edit 门禁单码 chunk.edit", () => {
+    expect(chunkEditGate(["school.kb.chunk.edit"])).toBe(true);
+    expect(chunkEditGate(["school.kb.view"])).toBe(false);
+    expect(chunkEditGate([])).toBe(false);
+  });
+
+  it("confirm 门禁 = chunk.confirm 码 + school_super_admin role 双判（derive 后端双重门禁镜像）", () => {
+    expect(chunkConfirmGate(["school.kb.chunk.confirm"], ["school_super_admin"])).toBe(true);
+    expect(chunkConfirmGate(["school.kb.chunk.confirm"], ["school_admin"])).toBe(false);
+    expect(chunkConfirmGate(["school.kb.view"], ["school_super_admin"])).toBe(false);
+    expect(chunkConfirmGate([], [])).toBe(false);
+  });
+});
+
+describe("chunkEditMaxChars（KB-10B 卡 E5-A / TD-320）", () => {
+  it("短块下限 500", () => {
+    expect(chunkEditMaxChars(120)).toBe(CHUNK_EDIT_MIN_CAP);
+    expect(chunkEditMaxChars(CHUNK_EDIT_MIN_CAP)).toBe(CHUNK_EDIT_MIN_CAP);
+  });
+
+  it("超长原子块 = 原块码点（同长度修正可过）", () => {
+    expect(chunkEditMaxChars(946)).toBe(946);
+    expect(chunkEditMaxChars(1200)).toBe(1200);
+  });
+});
+
+describe("chunkEditError（镜像后端 validate_edit_content 422 族）", () => {
+  it("空内容拒绝", () => {
+    expect(chunkEditError("   ", 500)).toContain("不能为空");
+    expect(chunkEditError("", 500)).toContain("CHUNK_CONTENT_INVALID");
+  });
+
+  it("超长拒绝且文案含动态上限", () => {
+    const err = chunkEditError("字".repeat(601), 600);
+    expect(err).toContain("601 > 600");
+    expect(chunkEditError("字".repeat(600), 600)).toBeNull();
+  });
+
+  it("代码围栏奇数拒绝、偶数放行（```python 带语言标记同算）", () => {
+    expect(chunkEditError("```python\nprint(1)\n", 500)).toContain("围栏未闭合");
+    expect(chunkEditError("```python\nprint(1)\n```", 500)).toBeNull();
+    expect(chunkEditError("```\na\n```\n```\nb\n```", 500)).toBeNull();
+  });
+
+  it("表格行组首尾管道齐备校验（单行组亦校验，审查 N7 口径）", () => {
+    expect(chunkEditError("| 完整 | 行 |", 500)).toBeNull();
+    expect(chunkEditError("| 表头 |\n| --- |\n| 断裂行", 500)).toContain("表格结构不完整");
+    expect(chunkEditError("| 表头 |\n| --- |\n| 尾 |", 500)).toBeNull();
+    expect(chunkEditError("正文段落，无表格。", 500)).toBeNull();
+  });
+
+  it("trim 规范化与上限联动（与后端一致：先 trim 再比长度）", () => {
+    expect(chunkEditError("  ok  ", 500)).toBeNull();
+  });
+});
+
+describe("chunkEditActionMessage（409/422/403 族码→指引；服务端 message 优先）", () => {
+  const apiError = (code: string, message?: string) =>
+    new ApiError("请求失败", 409, { code, ...(message ? { message } : {}) });
+
+  it("服务端 message 优先", () => {
+    expect(chunkEditActionMessage(apiError("CHUNK_CONFLICT", "服务端文案"), "兜底")).toBe(
+      "服务端文案",
+    );
+  });
+
+  it("按码给指引", () => {
+    expect(chunkEditActionMessage(apiError("CHUNK_CONFLICT"), "兜底")).toContain("base_hash");
+    expect(chunkEditActionMessage(apiError("CHUNK_EDIT_STATE"), "兜底")).toContain("派生版本");
+    expect(chunkEditActionMessage(apiError("DERIVE_NO_EDITS"), "兜底")).toContain("编辑提交");
+    expect(chunkEditActionMessage(apiError("CHUNK_CONFIRM_FORBIDDEN"), "兜底")).toContain("超管");
+  });
+
+  it("未知码退 fallback", () => {
+    expect(chunkEditActionMessage(apiError("WEIRD_CODE"), "兜底")).toBe("兜底");
+  });
+});
+
+describe("formatEditDiff（卡 E3 纯文本逐行摘要）", () => {
+  it("无变更 = 空", () => {
+    expect(formatEditDiff("同文", "同文")).toEqual({ added: [], removed: [] });
+  });
+
+  it("单行修改 = 一删一增", () => {
+    const diff = formatEditDiff("第一行\n第二行", "第一行\n第二行改");
+    expect(diff.removed).toEqual(["第二行"]);
+    expect(diff.added).toEqual(["第二行改"]);
+  });
+
+  it("多行增删对齐（重复行按 multiset 计数）", () => {
+    const diff = formatEditDiff("a\nb\nb", "a\nc\nb");
+    expect(diff.removed).toEqual(["b"]);
+    expect(diff.added).toEqual(["c"]);
   });
 });

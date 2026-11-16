@@ -35,7 +35,7 @@ export interface KbVersionFixture {
   created_at: string;
 }
 
-/** 分块夹具（KB-06B；字段与后端 `KbChunkResponse`（school_kb.py:1064-1096）一致，KB-10 三列不出现）。 */
+/** 分块夹具（KB-06B；字段与后端 `KbChunkResponse` 一致——KB-10A 三列 + KB-10B `chunk_hash` 已含）。 */
 export interface KbChunkFixture {
   id: string;
   chunk_type: "parent" | "child";
@@ -50,6 +50,12 @@ export interface KbChunkFixture {
   char_count: number;
   embedding_status: string;
   created_at: string;
+  /** KB-10A：人工编辑三列（spec :328）。 */
+  is_human_edited: boolean;
+  edited_by: string | null;
+  edited_at: string | null;
+  /** KB-10B（卡 E2）：编辑提交 base_hash 供给。 */
+  chunk_hash: string;
 }
 
 export interface KbDocumentFixture {
@@ -75,6 +81,8 @@ export interface KbUploadCapture {
 export interface KbVersionActionCapture {
   method: string;
   path: string;
+  /** KB-10B：请求体原文（编辑提交用；其余动作空串）。 */
+  body?: string;
 }
 
 export interface KbMockCaptures {
@@ -87,12 +95,31 @@ export interface KbMockCaptures {
   chunkUrls: string[];
   /** KB-09C：人群配置请求路径（GET/PUT/confirm 走 document-versions 路由）。 */
   aclActions: KbVersionActionCapture[];
+  /** KB-10B：编辑提交/派生动作捕获（method + path + body 原文）。 */
+  chunkEditActions: KbVersionActionCapture[];
 }
 
 /** KB-09C：版本人群状态（有状态 mock；PUT 全量替换 + confirm 置确认）。 */
 export interface KbAudienceStateFixture {
   audiences: { audience_type: string; audience_id: string | null }[];
   acl_confirmed: boolean;
+}
+
+/** KB-10B：版本块编辑状态（有状态 mock；POST edits 记录 + derive 翻转 confirmed）。 */
+export interface KbChunkEditStateFixture {
+  /** 提交记录（POST edits 追加；derive 把 submitted 翻 confirmed 并回填 derived_version_id）。 */
+  edits: {
+    chunk_id: string;
+    source_version_id: string;
+    status: string;
+    before_hash: string;
+    after_hash: string;
+    new_content: string;
+    reason: string;
+    derived_version_id: string | null;
+  }[];
+  /** 派生产物（POST derive 追加；>0 = 该版本已派生 → 后续 derive 409 CHUNK_EDIT_STATE）。 */
+  derived: { version_id: string; parent_version_id: string; edited_chunks: number }[];
 }
 
 export interface KbMockOptions {
@@ -127,6 +154,8 @@ export interface KbMockOptions {
   audiencesByVersion?: Record<string, KbAudienceStateFixture>;
   /** KB-09C：PUT audiences 固定返回错误（验证「服务端唯一门禁」422 兜底路径——审查 m3）。 */
   aclPutError?: { status: number; body: unknown };
+  /** KB-10B：版本块编辑状态（versionId → edits/derived）；缺省 = 空态（无提交无派生）。 */
+  chunkEditsByVersion?: Record<string, KbChunkEditStateFixture>;
 }
 
 export interface KbMock {
@@ -137,6 +166,8 @@ export interface KbMock {
     chunksByVersion: Record<string, KbChunkFixture[]>;
     /** KB-09C：按 versionId 存取的人群状态（PUT/confirm 就地改——断言走这里）。 */
     audiencesByVersion: Record<string, KbAudienceStateFixture>;
+    /** KB-10B：按 versionId 存取的块编辑状态（edits/derive 就地改——断言走这里）。 */
+    chunkEditsByVersion: Record<string, KbChunkEditStateFixture>;
   };
 }
 
@@ -195,6 +226,10 @@ export function kbChunk(overrides: Partial<KbChunkFixture> = {}): KbChunkFixture
     char_count: 20,
     embedding_status: "ready",
     created_at: "2026-11-10T00:00:00Z",
+    is_human_edited: false,
+    edited_by: null,
+    edited_at: null,
+    chunk_hash: "a".repeat(64),
     ...overrides,
   };
 }
@@ -377,6 +412,7 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     versionActions: [],
     chunkUrls: [],
     aclActions: [],
+    chunkEditActions: [],
   };
   /** KB-09C：按 versionId 存取的人群状态（PUT/confirm 直接改这里——断言走 state）。 */
   const audiencesByVersion: Record<string, KbAudienceStateFixture> = {};
@@ -385,6 +421,21 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
       audiences: state.audiences.map((item) => ({ ...item })),
       acl_confirmed: state.acl_confirmed,
     };
+  }
+  /** KB-10B：按 versionId 存取的块编辑状态（POST edits/derive 直接改这里——断言走 state）。 */
+  const chunkEditsByVersion: Record<string, KbChunkEditStateFixture> = {};
+  for (const [versionId, state] of Object.entries(options.chunkEditsByVersion ?? {})) {
+    chunkEditsByVersion[versionId] = {
+      edits: state.edits.map((item) => ({ ...item })),
+      derived: state.derived.map((item) => ({ ...item })),
+    };
+  }
+  /** KB-10B：块编辑状态读取（缺省空态）。 */
+  function chunkEditStateFor(versionId: string): KbChunkEditStateFixture {
+    if (chunkEditsByVersion[versionId] === undefined) {
+      chunkEditsByVersion[versionId] = { edits: [], derived: [] };
+    }
+    return chunkEditsByVersion[versionId] as KbChunkEditStateFixture;
   }
   const replayByKey = new Map<string, { batch_id: string; documents: KbDocumentFixture[] }>();
   /** KB-05B：每文档活跃发布（mock 的 alias 行，含首次发布时间——重放保留原值，service.py:2577）；夹具不预置——「已发布但无指针」的重放拒绝路径因此可测。 */
@@ -1075,6 +1126,58 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     const request = route.request();
     const path = new URL(request.url()).pathname;
     captures.chunkUrls.push(path);
+    // KB-10B（卡 E1）：POST /chunks/{id}/edits——乐观锁 409（base_hash 对不上）/ 201 记录；
+    // 结构/长度 422 族由前端预检拦，mock 不复刻（服务端唯一门禁口径，09C 先例）。
+    const editMatch = path.match(/\/school\/kb\/chunks\/([^/]+)\/edits$/);
+    if (editMatch !== null && request.method() === "POST") {
+      const chunkId = editMatch[1] ?? "";
+      const owner = Object.keys(chunksByVersion).find((versionId) =>
+        (chunksByVersion[versionId] ?? []).some((chunk) => chunk.id === chunkId),
+      );
+      if (owner === undefined) {
+        return json(route, 404, { detail: { code: "CHUNK_NOT_FOUND", message: "分块不存在" } });
+      }
+      const chunkRow = (chunksByVersion[owner] ?? []).find((chunk) => chunk.id === chunkId);
+      if (chunkRow === undefined || chunkRow.chunk_type !== "child") {
+        return json(route, 422, {
+          detail: { code: "CHUNK_EDIT_TARGET_INVALID", message: "仅子块文本可编辑" },
+        });
+      }
+      captures.chunkEditActions.push({
+        method: "POST",
+        path,
+        body: typeof request.postData() === "string" ? (request.postData() ?? "") : "",
+      });
+      const body = (request.postDataJSON() ?? {}) as {
+        base_hash?: string;
+        new_content?: string;
+        reason?: string;
+      };
+      if (body.base_hash !== chunkRow.chunk_hash) {
+        return json(route, 409, {
+          detail: { code: "CHUNK_CONFLICT", message: "分块内容已被他人编辑（base_hash 过期）" },
+        });
+      }
+      const state = chunkEditStateFor(owner);
+      // 镜像后端部分唯一语义（uq_kb_chunk_edits_source_chunk_submitted）：同块已有
+      // submitted → 409 CHUNK_CONFLICT（KB-10A N1 口径）。
+      if (state.edits.some((edit) => edit.chunk_id === chunkId && edit.status === "submitted")) {
+        return json(route, 409, {
+          detail: { code: "CHUNK_CONFLICT", message: "该分块已有待派生的编辑提交" },
+        });
+      }
+      state.edits.push({
+        chunk_id: chunkId,
+        source_version_id: owner,
+        status: "submitted",
+        before_hash: chunkRow.chunk_hash,
+        after_hash: "f".repeat(64),
+        new_content: body.new_content ?? "",
+        reason: body.reason ?? "",
+        derived_version_id: null,
+      });
+      return json(route, 201, state.edits[state.edits.length - 1]);
+    }
     const chunkId = path.match(/\/school\/kb\/chunks\/([^/]+)$/)?.[1] ?? "";
     const owner = Object.keys(chunksByVersion).find((versionId) =>
       (chunksByVersion[versionId] ?? []).some((chunk) => chunk.id === chunkId),
@@ -1127,8 +1230,56 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
     const path = new URL(request.url()).pathname;
     const method = request.method();
     captures.aclActions.push({ method, path });
+    const editListMatch = path.match(/\/school\/kb\/document-versions\/([^/]+)\/chunk-edits$/);
+    if (editListMatch !== null && request.method() === "GET") {
+      const versionId = editListMatch[1] ?? "";
+      if (findVersion(versionId) === null) {
+        return json(route, 404, {
+          detail: { code: "VERSION_NOT_FOUND", message: "文档版本不存在" },
+        });
+      }
+      return json(route, 200, chunkEditStateFor(versionId).edits);
+    }
+    const deriveMatch = path.match(/\/school\/kb\/document-versions\/([^/]+)\/derive$/);
+    if (deriveMatch !== null && request.method() === "POST") {
+      const versionId = deriveMatch[1] ?? "";
+      if (findVersion(versionId) === null) {
+        return json(route, 404, {
+          detail: { code: "VERSION_NOT_FOUND", message: "文档版本不存在" },
+        });
+      }
+      captures.chunkEditActions.push({ method: "POST", path, body: "" });
+      const state = chunkEditStateFor(versionId);
+      const submitted = state.edits.filter((edit) => edit.status === "submitted");
+      if (state.derived.length > 0) {
+        return json(route, 409, {
+          detail: { code: "CHUNK_EDIT_STATE", message: "该版本已派生——请到派生版本继续" },
+        });
+      }
+      if (submitted.length === 0) {
+        return json(route, 409, {
+          detail: { code: "DERIVE_NO_EDITS", message: "该版本没有待派生的编辑提交" },
+        });
+      }
+      const derivedVersionId = `7${versionId.slice(1)}`;
+      for (const edit of submitted) {
+        edit.status = "confirmed";
+        edit.derived_version_id = derivedVersionId;
+      }
+      state.derived.push({
+        version_id: derivedVersionId,
+        parent_version_id: versionId,
+        edited_chunks: submitted.length,
+      });
+      return json(route, 201, {
+        version_id: derivedVersionId,
+        parent_version_id: versionId,
+        derivation_type: "chunk_edit",
+        edited_chunks: submitted.length,
+      });
+    }
     const match = path.match(/\/school\/kb\/document-versions\/([^/]+)(\/audiences)(\/confirm)?$/);
-    if (!match) return json(route, 404, { detail: "未 mock 的人群路径" });
+    if (!match) return json(route, 404, { detail: "未 mock 的 document-versions 路径" });
     const versionId = match[1] ?? "";
     const action = match[3];
     const found = findVersion(versionId);
@@ -1180,6 +1331,6 @@ export async function mockKbApi(page: Page, options: KbMockOptions = {}): Promis
 
   return {
     captures,
-    state: { documents, chunksByVersion, audiencesByVersion },
+    state: { documents, chunksByVersion, audiencesByVersion, chunkEditsByVersion },
   };
 }

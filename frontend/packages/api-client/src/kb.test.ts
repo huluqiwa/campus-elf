@@ -272,6 +272,10 @@ const CHUNK: KbChunkView = {
   char_count: 24,
   embedding_status: "ready",
   created_at: "2026-11-10T00:00:00Z",
+  is_human_edited: false,
+  edited_by: null,
+  edited_at: null,
+  chunk_hash: "a".repeat(64),
 };
 
 const CHUNK_DETAIL: KbChunkDetailView = {

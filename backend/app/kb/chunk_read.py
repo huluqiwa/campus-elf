@@ -83,7 +83,11 @@ def decode_chunk_cursor(cursor: str) -> tuple[int, UUID]:
 
 @dataclass(frozen=True, slots=True)
 class ChunkView:
-    """分块列表/详情行（KB-10A：is_human_edited 三列透出，spec :328）。"""
+    """分块列表/详情行（KB-10A：is_human_edited 三列透出，spec :328）。
+
+    KB-10B（卡 E2）：`chunk_hash` 透出——前端编辑提交 `base_hash` 的唯一供给来源
+    （乐观锁判据与提交端点同源，前端不复刻 hash 算法）。
+    """
 
     id: UUID
     chunk_type: str
@@ -101,6 +105,7 @@ class ChunkView:
     is_human_edited: bool
     edited_by: UUID | None
     edited_at: datetime | None
+    chunk_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +204,7 @@ def _chunk_view(chunk: KbChunk) -> ChunkView:
         is_human_edited=chunk.is_human_edited,
         edited_by=chunk.edited_by,
         edited_at=chunk.edited_at,
+        chunk_hash=chunk.chunk_hash,
     )
 
 

@@ -102,6 +102,15 @@ def check_optimistic_lock(base_hash: str, current_hash: str) -> str | None:
     return None if base_hash == current_hash else CHUNK_CONFLICT
 
 
+def edit_max_chars(original_text: str) -> int:
+    """编辑内容长度上限（TD-320 拍板，2026-11-17；spec :329 校验行回写）：
+    `max(CHUNK_CONTENT_MAX_CHARS, 原块码点)`——chunker 对表格/代码原子块不拆，源块
+    原文可超 500，硬上限会让「保持原长度的修正」必 422（内容丢失诱因）；动态上限
+    保留短块下限 500（短块不允许膨胀超过默认口径）。"""
+
+    return max(CHUNK_CONTENT_MAX_CHARS, len(original_text))
+
+
 def derive_gate(submitted_count: int, already_confirmed: bool) -> str | None:
     """派生判据（spec :326-327）：已确认过派生 → `CHUNK_EDIT_STATE`（优先——重复派生
     检测不被提交数掩盖）；0 个提交 → `DERIVE_NO_EDITS`；放行返回 None。"""
@@ -267,7 +276,8 @@ async def submit_chunk_edit(
             )
             raise KbError(conflict, "分块内容已被他人编辑（base_hash 过期），请刷新后重试", 409)
         try:
-            normalized = validate_edit_content(new_content)
+            # TD-320（卡 E5-A）：上限 = max(500, 原块码点)——超长原子块同长度修正可过
+            normalized = validate_edit_content(new_content, max_chars=edit_max_chars(chunk.text))
         except ChunkEditValidationError as exc:
             raise KbError(exc.code, str(exc), 422) from exc
         submitted = (

@@ -134,7 +134,7 @@ async def _db_chunks(version_id: UUID) -> list[dict[str, Any]]:
 
     return await rows(
         "select id, chunk_type, chunk_index, parent_id, text, text_markdown, section_path, "
-        "page_start, page_end, token_count, char_count, embedding_status "
+        "page_start, page_end, token_count, char_count, embedding_status, chunk_hash "
         "from kb_chunks where document_version_id = :v order by chunk_index",
         v=str(version_id),
     )
@@ -486,6 +486,27 @@ async def test_get_chunk_detail_returns_fields_and_family(
     child_detail = resp.json()
     assert child_detail["parent"] == {"id": fat_parent, "chunk_index": parent_row["chunk_index"]}
     assert child_detail["children"] == []
+
+
+async def test_chunk_hash_exposed_for_edit_base_hash(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """KB-10B（卡 E2）：列表/详情回包透出 chunk_hash——前端 base_hash 供给唯一来源
+    （值与库内一致；与编辑端点乐观锁判据同源，前端不复刻 hash 算法）。"""
+
+    _, version_id = await _seed_rich_version(env, monkeypatch)
+    headers = await _chunk_viewer(client)
+    rows = await _db_chunks(version_id)
+    child = next(row for row in rows if row["chunk_type"] == "child")
+
+    resp = await client.get(LIST_URL.format(version_id=version_id), headers=headers)
+    assert resp.status_code == 200, resp.text
+    by_id = {item["id"]: item for item in resp.json()["items"]}
+    assert by_id[str(child["id"])]["chunk_hash"] == child["chunk_hash"]
+
+    detail = await client.get(DETAIL_URL.format(chunk_id=str(child["id"])), headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["chunk_hash"] == child["chunk_hash"]
 
 
 async def test_get_chunk_404_chain_does_not_leak_existence(
