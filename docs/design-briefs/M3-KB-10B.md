@@ -111,3 +111,17 @@ submit 409 `CHUNK_EDIT_STATE` → 前端调 `GET chunk-edits` 取 `derived_versi
 - 权限/role 判（卡 E3 首个 role 判）与 409/422 族映射——已按推荐拍板。
 - 后端触碰面（E2/E5）不涉及租户边界/状态机/加密——E2 是只读列透出、E5 是校验上限放宽（`max` 下限仍 500），均无新增红线面。
 - 本简报确认后开始编码（2026-11-17 用户「确认」）。
+
+## 8. KB-10B 实现注记（2026-11-17，实现期偏离/细化登记）
+
+1. **卡 E6 落地面（对拍板文本的诚实修正）**：拍板 E6-A 原文「submit 收到 409 CHUNK_EDIT_STATE 时前端引导」——核实后端 submit 对已派生版本**仍接受提交**（TD-321 原始缺陷行为，hotfix 明确不动），submit 路径不会 409。实际落地两面：(a) 编辑对话框按 chunk-edits 回包 `derived_version_id` 检测已派生 → 横幅引导「本次提交不会纳入现有派生」（防静默搁浅，TD-321 核心诉求）；(b) 派生入口对已派生版本 409 → toast 指引（真实路径）；submit 的 409 CHUNK_EDIT_STATE 分支保留为并发派生冲突防御。TD-321 处置改「已完成」并如实留痕未实现「submit 409」口径。
+2. **首个 role 判**（卡 E3）：`chunkConfirmGate(permissions, roles)` 消费 `AuthUser.roles`（api-client 已有字段此前无人用）；mock E2E 断言码/role 四象限（双全/有码无 role/无码有 role）。
+3. **Element Plus attrs 透传**：el-input 的 data-testid 落在**原生 textarea/input 本体**（非包装 div）——mock E2E 定位用 `getByTestId("kb-chunk-edit-content")` 直取元素（踩坑留痕）。
+4. **chunk_hash 透出**（卡 E2）：`KbChunkView`/`_chunk_view`/`KbChunkResponse` 三处加列 + api-client `KbChunkView` 补四列（KB-10A 三列 + chunk_hash）；api-client 单测夹具同步。
+5. **E5 动态上限**：`edit_max_chars(original)` 纯函数（单测 4 条）+ submit 接线；集成用例「超长表同长度修正 201 + 超动态上限 422」；spec :329 校验行回写。前端 `chunkEditMaxChars` 镜像 + 对话框动态上限显示。
+6. **派生按钮位置**：文档主体版本表行操作列（分块/人群入口旁）——子视图内无版本表；mock E2E 先回主体再点派生（流程注记）。
+7. **链④发布前置**：派生版本走完整沙箱（CSV 上传 → 运行 → TEST_PASSED，链② API 同构）后才可发布——TEST_PASSED 门禁对派生版本同形（KB-05 门禁链路）。
+8. **TD-320/321/322 台账**：TD-320/321 改已完成（本 PR 回写处置）；TD-322 维持延后并补 KB-10B 评估结论（卡 E8）。
+9. **契约偏离登记（复审 m5）**：(a) 简报 §3 命名 `chunkEditConflictMessage(code)` → 实现为 `chunkEditActionMessage(error, fallback)`（支持服务端 message 优先，与 kbPublishActionMessage 同型）；(b) 简报「派生按钮禁用态=已派生/无提交由数据推导」→ 实现为按钮恒可点 + 服务端 409 toast 引导（每版本编辑态需 N 次请求；服务端裁决口径）。
+10. **乐观锁 mock 分支取舍（复审 m3）**：kb-mock 乐观锁 409（base_hash 不符）分支在 mock E2E 中不可达——UI 层 base_hash 恒取自列表快照（与 mock 校验同源），无法经 UI 发出错误 hash；该路径由 KB-10A 后端集成用例（stale base_hash 409 + 真并发恰一胜者）钉住，消息 map 有 kb-logic 单测。mock 分支保留（镜像完整性），不补不可达用例。
+11. **复审 m6 落地**：理由长度前端预检（`CHUNK_EDIT_REASON_MAX_CHARS=500` 镜像后端 reason max_length）+ `editReasonCheck` 提交禁用绑定；submit 的 CHUNK_EDIT_STATE catch 注释如实化（当前后端不可达，仅防御）。

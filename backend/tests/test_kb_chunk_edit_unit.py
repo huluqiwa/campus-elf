@@ -3,10 +3,12 @@
 import pytest
 
 from app.kb.chunk_edit import (
+    CHUNK_CONTENT_MAX_CHARS,
     ChunkEditValidationError,
     check_optimistic_lock,
     derive_gate,
     derive_target_version_no,
+    edit_max_chars,
     validate_edit_content,
 )
 
@@ -104,3 +106,25 @@ class TestDeriveTargetVersionNo:
 
     def test_empty_versions_starts_at_1(self) -> None:
         assert derive_target_version_no([]) == 1
+
+
+class TestEditMaxChars:
+    """TD-320 拍板（2026-11-17）：上限 = max(500, 原块码点)——超长原子块（表格/代码
+    不拆）可保持原长度修正；短块下限仍 500（不允许膨胀超过默认上限）。"""
+
+    def test_short_original_gets_default_cap(self) -> None:
+        assert edit_max_chars("短内容") == CHUNK_CONTENT_MAX_CHARS
+
+    def test_long_original_allows_same_length(self) -> None:
+        assert edit_max_chars("长" * 600) == 600
+
+    def test_long_table_block_is_not_rejected(self) -> None:
+        # 超长表格原子块的同长度修正可过（此前 500 硬上限直接 422 的场景）
+        row = "| 字段 | " + "长" * 600 + " |"
+        assert validate_edit_content(row, max_chars=edit_max_chars(row)) == row
+
+    def test_still_rejected_over_dynamic_cap(self) -> None:
+        original = "长" * 600
+        with pytest.raises(ChunkEditValidationError) as exc:
+            validate_edit_content("长" * 601, max_chars=edit_max_chars(original))
+        assert exc.value.code == "CHUNK_CONTENT_INVALID"

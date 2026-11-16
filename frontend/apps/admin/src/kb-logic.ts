@@ -714,3 +714,130 @@ export function audienceTypeLabel(audienceType: string): string {
 export function tokenLabel(token: string): string {
   return token === "all" ? "全体" : token;
 }
+
+// ---------------------------------------------------------------------------
+// KB-10B：切块编辑与派生重建（K5 前端半；后端契约 school_kb.py:1458-1597、
+// chunk_edit.py 纯函数镜像；简报 docs/design-briefs/M3-KB-10B.md 卡 E1-E6）
+// ---------------------------------------------------------------------------
+
+/** 权限码：子块编辑提交（POST /chunks/{id}/edits 单码）。 */
+export const KB_CHUNK_EDIT_CODE = "school.kb.chunk.edit";
+/** 权限码：派生确认（POST derive 码半；叠加校方超管 role 双重门禁）。 */
+export const KB_CHUNK_CONFIRM_CODE = "school.kb.chunk.confirm";
+/** 校方超管 role（后端 derive 二重门禁 403 `CHUNK_CONFIRM_FORBIDDEN`；AuthUser.roles 消费起点）。 */
+export const SCHOOL_SUPER_ADMIN_ROLE = "school_super_admin";
+/** 编辑长度下限（TD-320 卡 E5-A：上限 = max(500, 原块码点)；与后端 CHUNK_CONTENT_MAX_CHARS 同源）。 */
+export const CHUNK_EDIT_MIN_CAP = 500;
+
+/** 编辑理由长度上限（镜像后端 KbChunkEditRequest.reason max_length=500，school_kb.py:1462）。 */
+export const CHUNK_EDIT_REASON_MAX_CHARS = 500;
+
+/** 编辑按钮门禁（`school.kb.chunk.edit`；服务端仍是唯一门禁）。 */
+export function chunkEditGate(permissions: readonly string[]): boolean {
+  return permissions.includes(KB_CHUNK_EDIT_CODE);
+}
+
+/**
+ * 派生按钮门禁（卡 E3）：`chunk.confirm` 码 + `school_super_admin` role 双判——
+ * 后端 `ChunkConfirmerDep` + role 校验的双重门禁镜像（前端首个 role 判，
+ * AuthUser.roles 自 api-client 已存在、此前无人消费）。
+ */
+export function chunkConfirmGate(
+  permissions: readonly string[],
+  roles: readonly string[],
+): boolean {
+  return permissions.includes(KB_CHUNK_CONFIRM_CODE) && roles.includes(SCHOOL_SUPER_ADMIN_ROLE);
+}
+
+/** 编辑内容长度上限（卡 E5-A）：`max(500, 原块码点)`——与后端 `edit_max_chars` 同构。 */
+export function chunkEditMaxChars(originalCharCount: number): number {
+  return Math.max(CHUNK_EDIT_MIN_CAP, originalCharCount);
+}
+
+/**
+ * 编辑内容预检（镜像后端 `validate_edit_content` 422 族，`chunk_edit.py:52-96`；
+ * 服务端仍是唯一门禁——前端拦明显错误，crafty 输入吃后端 422）。
+ * 返回 null = 合法；否则人读文案（内嵌错误码，`audienceEditError` 同款）。
+ */
+export function chunkEditError(newContent: string, maxChars: number): string | null {
+  const trimmed = newContent.trim();
+  if (!trimmed) return "编辑内容不能为空（CHUNK_CONTENT_INVALID）";
+  if (codePointLength(trimmed) > maxChars) {
+    return `编辑内容超出长度上限（${codePointLength(trimmed)} > ${maxChars} 码点）（CHUNK_CONTENT_INVALID）`;
+  }
+  if ((trimmed.match(/```/g) ?? []).length % 2 !== 0) {
+    return "代码围栏未闭合（``` 开合不配对）（CHUNK_CONTENT_INVALID）";
+  }
+  // 表格组 = 以 `|` 开头的连续行块（组内每行首尾管道齐备；单行组亦校验——审查 N7 口径；
+  // 围栏内管道行不排除——轻量校验边界 TD-322）
+  const runs: string[][] = [];
+  let current: string[] = [];
+  for (const line of trimmed.split("\n")) {
+    if (line.trimStart().startsWith("|")) {
+      current.push(line);
+    } else if (current.length > 0) {
+      runs.push(current);
+      current = [];
+    }
+  }
+  if (current.length > 0) runs.push(current);
+  for (const run of runs) {
+    if (!run.every((row) => row.trimStart().startsWith("|") && row.trimEnd().endsWith("|"))) {
+      return "表格结构不完整（管道行未以 | 起止）（CHUNK_CONTENT_INVALID）";
+    }
+  }
+  return null;
+}
+
+/** 编辑/派生 409/422/403 族码 → 可执行指引（每条都给下一步）。 */
+const CHUNK_EDIT_ACTION_HINTS: Record<string, string> = {
+  CHUNK_CONFLICT: "分块内容已被他人编辑（base_hash 过期），请关闭对话框并刷新分块后重试",
+  CHUNK_CONTENT_INVALID: "编辑内容未通过结构校验（非空/长度上限/表格与代码闭合）",
+  CHUNK_EDIT_TARGET_INVALID: "仅子块文本可编辑（父块/结构性改动走重传+重审）",
+  CHUNK_EDIT_STATE: "该版本已有待派生的编辑或已派生——请到派生版本继续编辑",
+  DERIVE_NO_EDITS: "该版本还没有待派生的编辑提交，请先编辑子块",
+  CHUNK_CONFIRM_FORBIDDEN: "派生确认仅限校方超管",
+};
+
+/**
+ * 编辑/派生动作错误的人话文案：后端 `detail.message` 是主文案（已是可执行中文），
+ * 缺失/泛化时按码给指引，再退调用方 fallback（`kbPublishActionMessage` 同型）。
+ */
+export function chunkEditActionMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    const detail = error.detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const serverMessage = (detail as Record<string, unknown>).message;
+      if (typeof serverMessage === "string" && serverMessage) return serverMessage;
+      return CHUNK_EDIT_ACTION_HINTS[kbPublishErrorCode(error) ?? ""] ?? fallback;
+    }
+  }
+  return toUserMessage(error, fallback);
+}
+
+/** 编辑 diff 摘要（卡 E3）：逐行 multiset 对比——纯文本不引第三方 diff 库（TD-1）。 */
+export interface ChunkEditDiffSummary {
+  added: string[];
+  removed: string[];
+}
+
+export function formatEditDiff(before: string, after: string): ChunkEditDiffSummary {
+  const beforeLines = before.split("\n");
+  const afterLines = after.split("\n");
+  const remain = new Map<string, number>();
+  for (const line of beforeLines) remain.set(line, (remain.get(line) ?? 0) + 1);
+  const added: string[] = [];
+  for (const line of afterLines) {
+    const count = remain.get(line) ?? 0;
+    if (count > 0) {
+      remain.set(line, count - 1);
+    } else {
+      added.push(line);
+    }
+  }
+  const removed: string[] = [];
+  for (const [line, count] of remain) {
+    for (let i = 0; i < count; i += 1) removed.push(line);
+  }
+  return { added, removed };
+}

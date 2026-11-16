@@ -1162,6 +1162,8 @@ class KbChunkResponse(BaseModel):
     is_human_edited: bool
     edited_by: UUID | None
     edited_at: datetime | None
+    # KB-10B（卡 E2）：chunk_hash 透出——前端编辑提交 base_hash 的唯一供给来源
+    chunk_hash: str
 
 
 class KbChunkRef(BaseModel):
@@ -1217,6 +1219,7 @@ def _chunk_response(view: ChunkView) -> KbChunkResponse:
         is_human_edited=view.is_human_edited,
         edited_by=view.edited_by,
         edited_at=view.edited_at,
+        chunk_hash=view.chunk_hash,
     )
 
 

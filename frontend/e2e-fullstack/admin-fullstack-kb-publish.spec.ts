@@ -683,3 +683,214 @@ test("发布链③：发布响应契约 + UI 删除（软删终态）", async ({
   );
   expect((document.json as KbDocument).status).toBe("DELETED");
 });
+
+test("KB-10B 链④：UI 编辑子块 → confirmer UI 派生 → 构建 READY → 沙箱 TEST_PASSED → 发布派生版本 → 源版本 chunks 不漂移", async ({
+  page,
+}) => {
+  // 600s：双构建 + TEI CPU 嵌入 + 两次沙箱判分拖慢（链② 同量级）。
+  test.setTimeout(600_000);
+  const accounts = loadAccounts();
+  const editor = accounts.kb_chunk_editor;
+  const confirmer = accounts.kb_chunk_confirmer;
+  const publisher = accounts.kb_publisher;
+  const adminToken = await loginTenant(accounts, accounts.kb_admin);
+  const publisherToken = await loginTenant(accounts, publisher);
+  const runId = Date.now();
+  const mdName = `kb-edit-${runId}.md`;
+  const title = `E2E 块编辑 ${runId}`;
+
+  // ---------- 前置（接口速通，链② 同构）：上传 → 提交审批 → 审批 → ACL → 构建 → READY ----------
+  const form = new FormData();
+  form.append("files", new Blob([mdBody("块编辑", runId)], { type: "text/markdown" }), mdName);
+  form.append("metadata", JSON.stringify([{ title }]));
+  const upload = await fetch(`${accounts.e2e_base_url}${API}/school/kb/documents`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${adminToken}`, "Idempotency-Key": `kb-edit-${runId}` },
+    body: form,
+  });
+  expect(upload.status).toBe(201);
+  const uploaded = (await upload.json()) as { documents: KbDocument[] };
+  const documentId = uploaded.documents[0]?.id;
+  const sourceVersionId = uploaded.documents[0]?.current_version?.id;
+  expect(documentId).toBeTruthy();
+  const submit = await apiPost(
+    accounts,
+    `${API}/school/kb/document-versions/${sourceVersionId ?? ""}/submit-approval`,
+    adminToken,
+  );
+  expect(submit.status).toBe(201);
+  const approverToken = await loginTenant(accounts, accounts.kb_approver);
+  const todo = await apiGet(accounts, `${API}/school/approvals/todo?limit=20`, approverToken);
+  const request = (todo.json as KbPage<{ id: string; title: string }>).items.find((item) =>
+    item.title.includes(title),
+  );
+  expect(request, `审批待办里应有 ${title}`).toBeTruthy();
+  const approve = await apiPost(
+    accounts,
+    `${API}/school/approvals/${request?.id}/approve`,
+    approverToken,
+  );
+  expect(approve.status).toBe(200);
+  await configureAcl(accounts, publisherToken, sourceVersionId ?? "");
+  const build = await apiPost(
+    accounts,
+    `${API}/school/kb/document-versions/${sourceVersionId ?? ""}/build`,
+    publisherToken,
+  );
+  expect(build.status).toBe(201);
+  await waitForDocumentStatus(accounts, publisherToken, documentId ?? "", "READY");
+  // 源版本分块基线（编辑前快照，收尾断言零漂移）
+  const sourceChunksBefore = await apiGet(
+    accounts,
+    `${API}/school/kb/versions/${sourceVersionId ?? ""}/chunks?limit=100`,
+    publisherToken,
+  );
+  expect(sourceChunksBefore.status).toBe(200);
+  const beforeTexts = (sourceChunksBefore.json as KbPage<{ text: string }>).items.map(
+    (row) => row.text,
+  );
+
+  // ---------- UI：编辑提交（chunk.edit 码；KB-10B 卡 E1） ----------
+  await loginViaUi(page, editor);
+  await page.getByRole("menuitem", { name: "知识库" }).click();
+  const editorDrawer = await openDrawer(page, title);
+  await editorDrawer.getByTestId("kb-chunks-open").first().click();
+  await expect(editorDrawer.getByTestId("kb-chunks-view")).toBeVisible();
+  await editorDrawer.getByTestId("kb-chunk-edit-open").first().click();
+  await page
+    .getByTestId("kb-chunk-edit-content")
+    .fill("校园陪伴精灵知识库全栈验收正文，用于切块与向量索引。（KB-10B 人工校正版）");
+  await page.getByTestId("kb-chunk-edit-reason").fill("链④人工校正");
+  await page.getByTestId("kb-chunk-edit-submit").click();
+  // 提交记录区出现（待派生）
+  await expect(editorDrawer.getByTestId("kb-chunk-edits")).toBeVisible();
+  await expect(editorDrawer.getByTestId("kb-chunk-edits")).toContainText("待派生");
+  // 关抽屉再登出（模态遮罩会挡侧栏退出按钮；链② 先例）
+  await page.locator(".el-drawer__close-btn").click();
+  await expect(page.getByTestId("kb-document-drawer")).toBeHidden();
+  await logoutViaUi(page);
+
+  // ---------- UI：派生确认（chunk.confirm 码 + school_super_admin role 双判；卡 E3） ----------
+  await loginViaUi(page, confirmer);
+  await page.getByRole("menuitem", { name: "知识库" }).click();
+  const confirmerDrawer = await openDrawer(page, title);
+  await expect(confirmerDrawer.getByTestId("kb-derive-open")).toBeVisible();
+  await confirmerDrawer.getByTestId("kb-derive-open").click();
+  await expect(page.getByText("派生版本已创建并排队构建")).toBeVisible();
+
+  // ---------- 轮询派生版本 READY（文档状态不跟随派生构建——KB-10A M3 口径） ----------
+  const deadline = Date.now() + 240_000;
+  let derivedVersionId: string | null = null;
+  while (Date.now() < deadline) {
+    const versions = await apiGet(
+      accounts,
+      `${API}/school/kb/documents/${documentId ?? ""}/versions?limit=20`,
+      publisherToken,
+    );
+    expect(versions.status).toBe(200);
+    const items = (versions.json as KbPage<KbVersion>).items;
+    const derived = items.find((row) => row.version_no === 2);
+    if (derived !== undefined && derived.status === "READY") {
+      derivedVersionId = derived.id;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
+  expect(derivedVersionId, "派生版本应在时限内 READY").toBeTruthy();
+
+  // ---------- 业务断言：派生 chunks 含编辑内容；源版本 chunks 零漂移 ----------
+  const derivedChunks = await apiGet(
+    accounts,
+    `${API}/school/kb/versions/${derivedVersionId ?? ""}/chunks?limit=100`,
+    publisherToken,
+  );
+  expect(derivedChunks.status).toBe(200);
+  const derivedTexts = (derivedChunks.json as KbPage<{ text: string; is_human_edited: boolean }>)
+    .items;
+  expect(
+    derivedTexts.some((row) => row.text.includes("KB-10B 人工校正版")),
+    "派生版本应包含编辑后文本",
+  ).toBe(true);
+  expect(
+    derivedTexts.some((row) => row.is_human_edited),
+    "派生版本改动块应携带人工编辑标记（payload/详情透出）",
+  ).toBe(true);
+  const sourceChunksAfter = await apiGet(
+    accounts,
+    `${API}/school/kb/versions/${sourceVersionId ?? ""}/chunks?limit=100`,
+    publisherToken,
+  );
+  expect(sourceChunksAfter.status).toBe(200);
+  const afterTexts = (sourceChunksAfter.json as KbPage<{ text: string }>).items.map(
+    (row) => row.text,
+  );
+  expect(afterTexts).toEqual(beforeTexts); // 源版本分块零漂移（spec :327）
+
+  // ---------- 沙箱（派生版本）：CSV 上传 → 运行 → TEST_PASSED（链② 同构 API 直驱） ----------
+  const testSetForm = new FormData();
+  testSetForm.append(
+    "file",
+    new Blob([`question\n块编辑验证问题 ${runId} 的内容是什么？\n`], { type: "text/csv" }),
+    `kb-edit-cases-${runId}.csv`,
+  );
+  testSetForm.append("name", `kb-edit-cases-${runId}`);
+  const testSet = await fetch(
+    `${accounts.e2e_base_url}${API}/school/kb/versions/${derivedVersionId}/test-sets`,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${publisherToken}` },
+      body: testSetForm,
+    },
+  );
+  const testSetBody: unknown = await testSet.json();
+  expect(testSet.status, `上传测试集异常：${JSON.stringify(testSetBody)}`).toBe(201);
+  const testSetId = (testSetBody as { test_set_id: string }).test_set_id;
+  const runForm = new FormData();
+  runForm.append("test_set_id", testSetId);
+  const run = await fetch(
+    `${accounts.e2e_base_url}${API}/school/kb/versions/${derivedVersionId}/tests`,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${publisherToken}` },
+      body: runForm,
+    },
+  );
+  const runBody: unknown = await run.json();
+  expect(run.status, `发起测试运行异常：${JSON.stringify(runBody)}`).toBe(201);
+  const runId0 = (runBody as { run_id: string }).run_id;
+  const sandboxDeadline = Date.now() + 240_000;
+  let sandboxPassed = false;
+  while (Date.now() < sandboxDeadline) {
+    const detail = await apiGet(accounts, `${API}/school/kb/test-runs/${runId0}`, publisherToken);
+    expect(detail.status).toBe(200);
+    if ((detail.json as { status: string }).status === "TEST_PASSED") {
+      sandboxPassed = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
+  expect(sandboxPassed, "派生版本沙箱应在时限内通过").toBe(true);
+
+  // ---------- 发布派生版本（TEST_PASSED 门禁链路对派生版本同形） ----------
+  const publishDerived = await apiPost(
+    accounts,
+    `${API}/school/kb/versions/${derivedVersionId ?? ""}/publish`,
+    publisherToken,
+  );
+  expect(publishDerived.status).toBe(200);
+  const detail = await apiGet(
+    accounts,
+    `${API}/school/kb/documents/${documentId ?? ""}`,
+    publisherToken,
+  );
+  expect((detail.json as KbDocument).active_version_id).toBe(derivedVersionId);
+  // 源版本 collection 不漂移（旧会话不漂移，spec :328）：源版本 chunks 仍可读且未变
+  const sourceAgain = await apiGet(
+    accounts,
+    `${API}/school/kb/versions/${sourceVersionId ?? ""}/chunks?limit=100`,
+    publisherToken,
+  );
+  expect((sourceAgain.json as KbPage<{ text: string }>).items.map((row) => row.text)).toEqual(
+    beforeTexts,
+  );
+});

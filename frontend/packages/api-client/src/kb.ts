@@ -101,6 +101,38 @@ export interface KbChunkView {
   char_count: number;
   embedding_status: string;
   created_at: string;
+  /** KB-10A：人工编辑三列（spec :328「is_human_edited 写入 payload 与分块详情」）。 */
+  is_human_edited: boolean;
+  edited_by: string | null;
+  edited_at: string | null;
+  /** KB-10B（卡 E2）：前端编辑提交 base_hash 的唯一供给来源（与乐观锁判据同源）。 */
+  chunk_hash: string;
+}
+
+/** KB-10B：块编辑提交记录（后端 `KbChunkEditResponse`，school_kb.py:1469-1479）。 */
+export interface KbChunkEditRequest {
+  new_content: string;
+  reason: string;
+  base_hash: string;
+}
+
+export interface KbChunkEditResponse {
+  chunk_id: string;
+  source_version_id: string;
+  status: string;
+  before_hash: string;
+  after_hash: string;
+  new_content: string;
+  reason: string;
+  derived_version_id: string | null;
+}
+
+/** KB-10B：派生版本响应（后端 `KbDeriveResponse`，school_kb.py:1482-1488）。 */
+export interface KbDeriveResponse {
+  version_id: string;
+  parent_version_id: string;
+  derivation_type: string;
+  edited_chunks: number;
 }
 
 /** 父/子块引用（详情家族导航）。 */
@@ -275,6 +307,14 @@ export interface KbApi {
   ): Promise<KbAudienceView>;
   /** 确认版本人群（`school.kb.acl.manage`；空集 409 `ACL_REQUIRED`、已确认 409）。 */
   confirmAudiences(versionId: string): Promise<KbAudienceView>;
+  /** KB-10B：提交子块编辑（`school.kb.chunk.edit`；乐观锁 409 `CHUNK_CONFLICT`、结构/长度 422、
+   * 父块 422 `CHUNK_EDIT_TARGET_INVALID`、范围外 404 同文不泄露）。 */
+  submitChunkEdit(chunkId: string, input: KbChunkEditRequest): Promise<KbChunkEditResponse>;
+  /** KB-10B：版本编辑提交记录（`school.kb.view`——GET 挂 ViewerDep；404 同文）。 */
+  listChunkEdits(versionId: string): Promise<KbChunkEditResponse[]>;
+  /** KB-10B：派生版本（`school.kb.chunk.confirm` + 校方超管；无提交 409 `DERIVE_NO_EDITS`、
+   * 重复/并发 409 `CHUNK_EDIT_STATE`）。 */
+  deriveVersion(versionId: string): Promise<KbDeriveResponse>;
 }
 
 export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
@@ -387,6 +427,27 @@ export function createKbApi(session: { request: AuthSessionRequest }): KbApi {
         `/api/v1/school/kb/document-versions/${versionId}/audiences/confirm`,
         { method: "POST" },
       );
+    },
+    async submitChunkEdit(chunkId, input) {
+      return request<KbChunkEditResponse>(`/api/v1/school/kb/chunks/${chunkId}/edits`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          new_content: input.new_content,
+          reason: input.reason,
+          base_hash: input.base_hash,
+        }),
+      });
+    },
+    async listChunkEdits(versionId) {
+      return request<KbChunkEditResponse[]>(
+        `/api/v1/school/kb/document-versions/${versionId}/chunk-edits`,
+      );
+    },
+    async deriveVersion(versionId) {
+      return request<KbDeriveResponse>(`/api/v1/school/kb/document-versions/${versionId}/derive`, {
+        method: "POST",
+      });
     },
   };
 }

@@ -96,6 +96,12 @@ KB_APPROVER_LOGIN_ID = "e2e-kb-approver"
 KB_APPROVER_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
 KB_PUBLISHER_LOGIN_ID = "e2e-kb-publisher"
 KB_PUBLISHER_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
+# KB-10B 全栈专用：块编辑提交人（chunk.edit）与派生确认人（chunk.confirm + school_super_admin
+# 内置角色——derive 双重门禁的真实 user_roles 链路）。口令同 KB-01C 随机生成。
+KB_CHUNK_EDITOR_LOGIN_ID = "e2e-kb-chunk-editor"
+KB_CHUNK_EDITOR_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
+KB_CHUNK_CONFIRMER_LOGIN_ID = "e2e-kb-chunk-confirmer"
+KB_CHUNK_CONFIRMER_PASSWORD = f"Kb-{secrets.token_urlsafe(18)}"
 
 PDF_BYTES = b"%PDF-1.4\n% e2e seed qualification\n%%EOF\n"
 
@@ -249,7 +255,9 @@ async def main() -> None:
             json={"realm": "platform", "account": PLATFORM_ACCOUNT, "password": PLATFORM_PASSWORD},
         )
         if response.status_code != 200:
-            raise SystemExit(f"[e2e-seed] 平台登录失败: {response.status_code} {response.text[:200]}")
+            raise SystemExit(
+                f"[e2e-seed] 平台登录失败: {response.status_code} {response.text[:200]}"
+            )
         platform_headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
 
         # 3) 真实注册 → 审核 → 开通（BS-M1-B 同链路）
@@ -360,6 +368,39 @@ async def main() -> None:
                 "school.kb.acl.manage",
             ),
             scope_types=("school",),
+        )
+        # KB-10B：块编辑提交人 / 派生确认人（码分授；确认人挂 school_super_admin 内置角色）
+        _chunk_editor_tenant_id, _chunk_editor_user_id = await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=KB_CHUNK_EDITOR_LOGIN_ID,
+            password=KB_CHUNK_EDITOR_PASSWORD,
+            user_type="school_admin",
+            permissions=(
+                "school.kb.view",
+                "school.kb.view_chunks",
+                "school.kb.chunk.edit",
+            ),
+            scope_types=("school",),
+        )
+        chunk_confirmer_tenant_id, chunk_confirmer_user_id = await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=KB_CHUNK_CONFIRMER_LOGIN_ID,
+            password=KB_CHUNK_CONFIRMER_PASSWORD,
+            user_type="school_admin",
+            permissions=(
+                "school.kb.view",
+                "school.kb.view_chunks",
+                "school.kb.chunk.confirm",
+            ),
+            scope_types=("school",),
+        )
+        await _bind_builtin_role(
+            engine,
+            chunk_confirmer_tenant_id,
+            chunk_confirmer_user_id,
+            "school_super_admin",
         )
         await seed_tenant_user(
             engine,
@@ -558,6 +599,16 @@ async def main() -> None:
             "school_code": school_code,
             "login_id": KB_PUBLISHER_LOGIN_ID,
             "password": KB_PUBLISHER_PASSWORD,
+        },
+        "kb_chunk_editor": {
+            "school_code": school_code,
+            "login_id": KB_CHUNK_EDITOR_LOGIN_ID,
+            "password": KB_CHUNK_EDITOR_PASSWORD,
+        },
+        "kb_chunk_confirmer": {
+            "school_code": school_code,
+            "login_id": KB_CHUNK_CONFIRMER_LOGIN_ID,
+            "password": KB_CHUNK_CONFIRMER_PASSWORD,
         },
         "role_admin": {
             "school_code": school_code,
