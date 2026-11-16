@@ -50,6 +50,9 @@ KB_ACL_UNFILTERED = "kb-acl-unfiltered"
 KB_TEST_RUNNER = "kb-test-runner"
 # KB-10A：块编辑提交人 / 派生确认人（school.kb.chunk.edit / chunk.confirm 分授）
 KB_CHUNK_EDITOR = "kb-chunk-editor"
+# KB-10A（审查 M1）：self/空数据范围编辑者——同租范围外 chunk 编辑必须 404
+KB_CHUNK_EDITOR_SELF = "kb-chunk-editor-self"
+KB_CHUNK_EDITOR_EMPTY = "kb-chunk-editor-empty"
 KB_CHUNK_CONFIRMER = "kb-chunk-confirmer"
 KB_CHUNK_SELF = "kb-chunk-self"
 KB_B_CHUNK_VIEWER = "kb-b-chunk-viewer"
@@ -170,6 +173,23 @@ async def _seed_data(engine: AsyncEngine) -> tuple[UUID, UUID]:
         password=PASSWORD,
         permissions=("school.kb.chunk.edit", "school.kb.view"),
         scope_types=("school",),
+    )
+    # KB-10A（审查 M1）：self/空数据范围编辑者——同租范围外 chunk 编辑 404 负例
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_CHUNK_EDITOR_SELF,
+        password=PASSWORD,
+        permissions=("school.kb.chunk.edit", "school.kb.view"),
+        scope_types=("self",),
+    )
+    await seed_tenant_user(
+        engine,
+        school_code=SCHOOL_A,
+        login_id=KB_CHUNK_EDITOR_EMPTY,
+        password=PASSWORD,
+        permissions=("school.kb.chunk.edit", "school.kb.view"),
+        scope_types=(),
     )
     await seed_tenant_user(
         engine,

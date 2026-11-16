@@ -25,8 +25,11 @@ from app.kb.indexer import collection_name
 from tests.support.db import upgrade_test_database
 from tests.support.dsn import assert_test_database_dsn
 from tests.support.kb_env import (
+    KB_BUILDER,
     KB_CHUNK_CONFIRMER,
     KB_CHUNK_EDITOR,
+    KB_CHUNK_EDITOR_EMPTY,
+    KB_CHUNK_EDITOR_SELF,
     NO_PERM,
     UPLOADER,
     KbEnv,
@@ -295,6 +298,66 @@ async def test_submit_edit_cross_tenant_chunk_404(
         headers=headers,
     )
     assert resp.status_code == 404, resp.text
+
+
+async def test_submit_edit_out_of_scope_chunk_404_same_code(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """审查 M1：同租 self/空数据范围编辑者对他人 chunk 提交 → 404 与不存在/跨租
+    同码同文，不泄露存在性；无成功 edit 行、无成功审计。"""
+
+    _doc, _version_id, chunks = await _seed_built_version(env, monkeypatch)
+    target = chunks[0]
+
+    codes: list[str] = []
+    messages: list[str] = []
+    for editor_login in (KB_CHUNK_EDITOR_SELF, KB_CHUNK_EDITOR_EMPTY):
+        headers = await login(client, editor_login)
+        resp = await client.post(
+            EDITS_URL.format(chunk_id=str(target["id"])),
+            json={
+                "new_content": target["text"] + "（越权）",
+                "reason": "范围外编辑",
+                "base_hash": target["chunk_hash"],
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 404, f"{editor_login}: {resp.text}"
+        codes.append(resp.json()["detail"]["code"])
+        messages.append(resp.json()["detail"]["message"])
+
+    # 对照：不存在 chunk（school 编辑者）同码同文
+    headers = await login(client, KB_CHUNK_EDITOR)
+    missing = await client.post(
+        EDITS_URL.format(chunk_id=str(uuid4())),
+        json={"new_content": "x", "reason": "不存在", "base_hash": "a" * 64},
+        headers=headers,
+    )
+    assert missing.status_code == 404, missing.text
+    codes.append(missing.json()["detail"]["code"])
+    messages.append(missing.json()["detail"]["message"])
+
+    assert set(codes) == {"CHUNK_NOT_FOUND"}
+    assert set(messages) == {messages[0]}, "三态必须同一文案，否则泄露存在性"
+
+    # 零副作用：无提交行、无成功审计、无拒绝审计（拒绝审计若写在本范围门之前，
+    # 会反证 chunk 存在——存在性泄露挪到审计面）
+    edit_rows = await rows(
+        "select id from kb_chunk_edits where chunk_id = :c", c=str(target["id"])
+    )
+    assert edit_rows == []
+    success_audits = await rows(
+        "select event_id from audit_logs where action = 'school.kb.chunk.edited' "
+        "and resource_id = :c",
+        c=str(target["id"]),
+    )
+    assert success_audits == []
+    denial_audits = await rows(
+        "select event_id from audit_logs where action = 'school.kb.chunk.edit_denied' "
+        "and resource_id = :c",
+        c=str(target["id"]),
+    )
+    assert denial_audits == []
 
 
 async def test_submit_edit_without_permission_403(
@@ -632,13 +695,141 @@ async def test_derived_version_without_confirmed_acl_build_409(
         "where id = :v",
         v=str(derived_version_id),
     )
-    builder = await login(client, UPLOADER)
-    # UPLOADER 无 build 码——用 KB_BUILDER？kb_env 有 KB_BUILDER（build+view）
-    from tests.support.kb_env import KB_BUILDER
-
     builder = await login(client, KB_BUILDER)
     resp = await client.post(
         f"/api/v1/school/kb/document-versions/{derived_version_id}/build", headers=builder
     )
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"]["code"] == "ACL_UNCONFIRMED"
+
+
+# ---------------------------------------------------------------------------
+# 复审回归：M1 范围负例 / M2 真并发唯一冲突 / M4 二次派生 provenance
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_same_base_hash_exactly_one_winner(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """审查 M2：两个并发提交均过预检（同 base_hash）→ 恰一个 201/一个 409，
+    一条 submitted 行 + 成功审计 + 拒绝审计各一条（真并发唯一索引路径）。"""
+
+    import asyncio
+
+    _doc, _version_id, chunks = await _seed_built_version(env, monkeypatch)
+    target = chunks[0]
+    editor = await login(client, KB_CHUNK_EDITOR)
+
+    async def submit(suffix: str) -> Any:
+        return await client.post(
+            EDITS_URL.format(chunk_id=str(target["id"])),
+            json={
+                "new_content": target["text"] + suffix,
+                "reason": f"并发{suffix}",
+                "base_hash": target["chunk_hash"],
+            },
+            headers=editor,
+        )
+
+    resp1, resp2 = await asyncio.gather(submit("甲"), submit("乙"))
+    codes = sorted([resp1.status_code, resp2.status_code])
+    assert codes == [201, 409], f"{resp1.status_code}/{resp2.status_code}"
+
+    rows_ = await rows(
+        "select status from kb_chunk_edits where chunk_id = :c", c=str(target["id"])
+    )
+    assert len(rows_) == 1
+    assert rows_[0]["status"] == "submitted"
+
+    success = await rows(
+        "select event_id from audit_logs where action = 'school.kb.chunk.edited' and resource_id = :c",
+        c=str(target["id"]),
+    )
+    denial = await rows(
+        "select event_id from audit_logs where action = 'school.kb.chunk.edit_denied' and resource_id = :c",
+        c=str(target["id"]),
+    )
+    assert len(success) == 1
+    assert len(denial) == 1
+
+
+async def test_second_derivation_preserves_human_edited_provenance(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """审查 M4：V1 编辑 A → V2；V2 编辑 B → V3。V3 的 PG 与 Qdrant 双侧：
+    A 保留人工标记（继承），B 新标记，未编辑块 False。"""
+
+    _doc, version1, chunks1 = await _seed_built_version(env, monkeypatch)
+    from app.kb import build_task
+
+    # V1 编辑 A → derive V2（沿用 _derive_and_build 模式：API 派生 + patch embedder + 直调构建）
+    await _submit_edit(client, chunks1[0], "（A 校正）")
+    confirmer = await login(client, KB_CHUNK_CONFIRMER)
+    resp = await client.post(DERIVE_URL.format(version_id=str(version1)), headers=confirmer)
+    assert resp.status_code == 201, resp.text
+    version2 = UUID(resp.json()["version_id"])
+    counter2 = TokenOverlapEmbedder()
+    monkeypatch.setattr(build_task, "_build_embedder", lambda settings: counter2)
+    result = await build_kb_version({}, str(env.tenant_a), str(version2))
+    assert result["status"] == "ready", result
+
+    # V2 编辑 B（不同块）→ derive V3
+    chunks2 = await _child_chunks(version2)
+    chunk_b = next(
+        c for c in chunks2 if c["chunk_index"] != chunks1[0]["chunk_index"]
+    )
+    await _submit_edit(client, chunk_b, "（B 校正）")
+    resp = await client.post(DERIVE_URL.format(version_id=str(version2)), headers=confirmer)
+    assert resp.status_code == 201, resp.text
+    version3 = UUID(resp.json()["version_id"])
+    counter3 = TokenOverlapEmbedder()
+    monkeypatch.setattr(build_task, "_build_embedder", lambda settings: counter3)
+    result = await build_kb_version({}, str(env.tenant_a), str(version3))
+    assert result["status"] == "ready", result
+
+    # PG 侧：A 继承标记 + B 新标记 + 未编辑块 False；edited_by/edited_at 保留（N5）
+    pg_flags = await rows(
+        "select id, text, is_human_edited, edited_by, edited_at from kb_chunks "
+        "where document_version_id = :v and chunk_type = 'child'",
+        v=str(version3),
+    )
+    assert len(pg_flags) == len(chunks2)
+    row_a = next(r for r in pg_flags if r["text"].endswith("（A 校正）"))
+    row_b = next(r for r in pg_flags if r["text"].endswith("（B 校正）"))
+    assert row_a["is_human_edited"] is True, "二次派生必须继承一代编辑标记（M4 核心）"
+    assert row_b["is_human_edited"] is True
+    assert row_a["edited_by"] is not None and row_a["edited_at"] is not None
+    assert row_b["edited_by"] is not None and row_b["edited_at"] is not None
+    unedited = [
+        r for r in pg_flags if r["id"] not in (row_a["id"], row_b["id"])
+    ]
+    assert unedited, "应存在未编辑块"
+    assert all(r["is_human_edited"] is False for r in unedited)
+
+    # Qdrant 侧：payload is_human_edited 与 PG 一致（M4——此前只按本轮编辑标记）
+    from qdrant_client import AsyncQdrantClient
+
+    from app.config import get_settings
+
+    settings = get_settings()
+    client_q = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        points, _ = await client_q.scroll(
+            collection_name(env.tenant_a, version3),
+            limit=100,
+            with_payload=True,
+            with_vectors=False,
+        )
+    finally:
+        await client_q.close()
+    qdrant_edited = {
+        str((p.payload or {}).get("chunk_id")): bool(
+            (p.payload or {}).get("is_human_edited")
+        )
+        for p in points
+    }
+    for row in pg_flags:
+        assert qdrant_edited.get(str(row["id"])) is row["is_human_edited"], (
+            f"chunk {row['id']}: PG={row['is_human_edited']} "
+            f"Qdrant={qdrant_edited.get(str(row['id']))}（M4 双事实源不一致）"
+        )

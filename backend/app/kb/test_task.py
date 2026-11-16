@@ -103,7 +103,10 @@ async def _claim_test(
             return None
         assert_transition(version.status, KB_STATUS_TESTING)
         version.status = KB_STATUS_TESTING
-        document.status = KB_STATUS_TESTING
+        # KB-10A（审查 M3 同族）：派生版本测试不跟随共享文档状态（源文档可能
+        # PUBLISHED 在线，spec :327）——与构建 watchdog/_finish 同规则
+        if version.derivation_type != "chunk_edit":
+            document.status = KB_STATUS_TESTING
         run.started_at = datetime.now(UTC)
         await session.flush()
         return run, version, document
@@ -151,7 +154,9 @@ async def _finish_test(
         assert_transition(version.status, target)
         now = datetime.now(UTC)
         version.status = target
-        document.status = target
+        # KB-10A（审查 M3 同族）：派生版本测试不跟随共享文档状态
+        if version.derivation_type != "chunk_edit":
+            document.status = target
         run.status = TEST_RUN_STATUS_PASSED if passed else TEST_RUN_STATUS_FAILED
         run.metrics_json = metrics
         run.finished_at = now

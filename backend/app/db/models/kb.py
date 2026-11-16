@@ -161,6 +161,11 @@ class KbDocumentVersion(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, 
             "version_no",
             name="uq_kb_document_versions_tenant_document_version",
         ),
+        # KB-10A（审查 N6 adjacent）：ORM metadata 与迁移 c7e9f1a3b5d7 的 CHECK 对齐
+        CheckConstraint(
+            "derivation_type IN ('initial', 'chunk_edit')",
+            name="ck_kb_document_versions_derivation_type_valid",
+        ),
         Index("ix_kb_document_versions_document_id", "document_id"),
         Index("ix_kb_document_versions_tenant_status_updated", "tenant_id", "status", "updated_at"),
         ForeignKeyConstraint(
