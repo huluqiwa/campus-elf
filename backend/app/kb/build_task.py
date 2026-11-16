@@ -996,8 +996,10 @@ async def _run_derived_pipeline(
                 overlap_prev=source_chunk.overlap_prev,
                 overlap_next=source_chunk.overlap_next,
                 metadata={
-                    "table": "table" in (source_chunk.metadata_json or {}),
-                    "code": "code" in (source_chunk.metadata_json or {}),
+                    # N2 adjacent（审查）：保留源布尔值而非 key membership——
+                    # 初始落库恒写两键（含 False），key 判断会把 False 变 True
+                    "table": bool((source_chunk.metadata_json or {}).get("table")),
+                    "code": bool((source_chunk.metadata_json or {}).get("code")),
                 },
             )
         else:
@@ -1010,8 +1012,8 @@ async def _run_derived_pipeline(
                 overlap_prev=source_chunk.overlap_prev,
                 overlap_next=source_chunk.overlap_next,
                 metadata={
-                    "table": "table" in (source_chunk.metadata_json or {}),
-                    "code": "code" in (source_chunk.metadata_json or {}),
+                    "table": bool((source_chunk.metadata_json or {}).get("table")),
+                    "code": bool((source_chunk.metadata_json or {}).get("code")),
                 },
             )
         derived.append((uuid4(), chunk, source_chunk))
@@ -1130,7 +1132,8 @@ async def _run_derived_pipeline(
             text_hash=chunk.chunk_hash,
             dense=dense_by_position[position],
             sparse=sparse_vectors_all[position],
-            is_human_edited=source_chunk.id in edits_by_chunk,
+            # M4（审查）：payload 标记 = 本轮编辑 或 历史人工编辑（二次派生不丢溯源）
+            is_human_edited=source_chunk.id in edits_by_chunk or source_chunk.is_human_edited,
         )
         for position, (new_id, chunk, source_chunk) in enumerate(derived)
         if chunk.chunk_type == CHUNK_TYPE_CHILD
@@ -1336,7 +1339,10 @@ async def _mark_stale_in_tenant(tenant_id: UUID, cutoff: datetime) -> int:
             assert_transition(version.status, KB_STATUS_FAILED)
             now = datetime.now(UTC)
             version.status = KB_STATUS_FAILED
-            document.status = KB_STATUS_FAILED
+            # KB-10A（审查 M3）：派生构建 stale 不改共享文档状态（源文档可能
+            # PUBLISHED 在线，spec :327「失败不影响源版本」）——与 _finish 同规则
+            if version.derivation_type != "chunk_edit":
+                document.status = KB_STATUS_FAILED
             job.status = JOB_STATUS_FAILED
             job.error_code = "BUILD_STALE"
             job.message = "构建心跳超时（worker 中断或任务丢失），已标记失败；可重试"

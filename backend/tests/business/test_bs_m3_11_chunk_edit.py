@@ -418,3 +418,187 @@ async def test_bs_m3_11_concurrent_edit_and_derive_409_family(
         await client_q.delete_collection(collection_name(env.tenant_a, UUID(version_id)))
     finally:
         await client_q.close()
+
+
+async def test_bs_m3_11_published_source_derive_fail_retry_no_drift(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """审查 M3 业务面：已发布在线源 → 派生构建失败 → 源文档状态/current pointer/
+    源 collection/源分块零漂移（spec :327）；retry → READY → 发布派生 → 源版本
+    collection 仍完整（旧会话不漂移，spec :328）。"""
+
+    from app.kb import build_task
+    from app.kb.embedding import EmbeddingError
+    from app.kb.indexer import collection_name
+
+    uploader = await login(client, UPLOADER)
+    approver = await login(client, KB_APPROVER)
+    builder = await login(client, KB_BUILDER)
+    editor = await login(client, KB_CHUNK_EDITOR)
+    confirmer = await login(client, KB_CHUNK_CONFIRMER)
+    publisher = await login(client, KB_PUBLISHER)
+    acl_manager = await login(client, KB_ACL_MANAGER)
+
+    # 1) 源版本：上传 → 审批 → 人群 → 构建 READY → 发布（在线源）
+    response = await upload(
+        client,
+        uploader,
+        key=f"bs11f-{uuid4().hex[:16]}",
+        files=[("chunk-edit-fail.md", MULTI_CHUNK_MARKDOWN.encode("utf-8"), "text/markdown")],
+    )
+    assert response.status_code == 201, response.text
+    document = response.json()["documents"][0]
+    version_id = document["current_version"]["id"]
+    await _wait_scan_pending(client, uploader, str(document["id"]), version_id)
+    submit = await client.post(
+        f"/api/v1/school/kb/document-versions/{version_id}/submit-approval", headers=uploader
+    )
+    assert submit.status_code == 201, submit.text
+    approve = await client.post(
+        f"/api/v1/school/approvals/{submit.json()['request_id']}/approve",
+        headers=approver,
+        json={},
+    )
+    assert approve.status_code == 200, approve.text
+    put = await client.put(
+        f"/api/v1/school/kb/document-versions/{version_id}/audiences",
+        headers=acl_manager,
+        json={"audiences": [{"audience_type": "all", "audience_id": None}]},
+    )
+    assert put.status_code == 200, put.text
+    confirm = await client.post(
+        f"/api/v1/school/kb/document-versions/{version_id}/audiences/confirm", headers=acl_manager
+    )
+    assert confirm.status_code == 200, confirm.text
+    build = await client.post(BUILD_URL.format(version_id=version_id), headers=builder)
+    assert build.status_code == 201, build.text
+    patch_ports(monkeypatch, FakeParser(ParsedDocument(markdown=MARKDOWN)))
+    monkeypatch.setattr(build_task, "_build_embedder", lambda s: TokenOverlapEmbedder())
+    result = await build_kb_version({}, str(env.tenant_a), version_id)
+    assert result["status"] == "ready", result
+    await execute(
+        "update kb_document_versions set status = 'TEST_PASSED' where id = :id", id=version_id
+    )
+    await execute(
+        "update kb_documents set status = 'TEST_PASSED' where id = :doc and "
+        "current_version_id = :vid",
+        doc=document["id"],
+        vid=version_id,
+    )
+    publish = await client.post(PUBLISH_URL.format(version_id=version_id), headers=publisher)
+    assert publish.status_code == 200, publish.text
+    source_doc = await rows(
+        "select status, current_version_id from kb_documents where id = :d",
+        d=str(document["id"]),
+    )
+    assert source_doc[0]["status"] == "PUBLISHED"
+
+    # 2) 快照源状态（collection 向量 + 分块数）
+    source_collection = collection_name(env.tenant_a, UUID(version_id))
+    source_vectors = await _scroll_payload_vectors(source_collection)
+    assert source_vectors
+    chunks_before = await rows(
+        "select count(*) as n from kb_chunks where document_version_id = :v", v=version_id
+    )
+
+    # 3) 编辑 + 派生
+    target = (
+        await rows(
+            "select id, text, chunk_hash from kb_chunks where document_version_id = :v "
+            "and chunk_type = 'child' order by chunk_index limit 1",
+            v=version_id,
+        )
+    )[0]
+    edit_resp = await client.post(
+        EDITS_URL.format(chunk_id=str(target["id"])),
+        json={
+            "new_content": target["text"] + "（失败场景校正）",
+            "reason": "BS-11 失败重试",
+            "base_hash": target["chunk_hash"],
+        },
+        headers=editor,
+    )
+    assert edit_resp.status_code == 201, edit_resp.text
+    derive = await client.post(DERIVE_URL.format(version_id=version_id), headers=confirmer)
+    assert derive.status_code == 201, derive.text
+    derived_version_id = derive.json()["version_id"]
+    derived_job = (
+        await rows(
+            "select id from kb_build_jobs where version_id = :v order by created_at limit 1",
+            v=derived_version_id,
+        )
+    )[0]
+
+    # 4) 派生构建失败（嵌入上游抛 EmbeddingError → FAILED 可重试）
+    class BoomEmbedder(TokenOverlapEmbedder):
+        async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+            raise EmbeddingError("TEI_EMBED_HTTP", "派生嵌入上游失败（模拟）")
+
+    monkeypatch.setattr(build_task, "_build_embedder", lambda s: BoomEmbedder())
+    result = await build_kb_version({}, str(env.tenant_a), derived_version_id)
+    assert result["status"] == "failed", result
+    assert result["error_code"] == "TEI_EMBED_HTTP", result
+
+    # 5) 业务断言：源零漂移 + 派生收口 FAILED
+    doc_now = await rows(
+        "select status, current_version_id from kb_documents where id = :d",
+        d=str(document["id"]),
+    )
+    assert doc_now[0]["status"] == "PUBLISHED", "派生失败不得污染在线源文档状态（M3）"
+    assert str(doc_now[0]["current_version_id"]) == str(version_id), "current pointer 不得漂移"
+    chunks_now = await rows(
+        "select count(*) as n from kb_chunks where document_version_id = :v", v=version_id
+    )
+    assert chunks_now[0]["n"] == chunks_before[0]["n"], "源分块不得被派生失败增删"
+    assert await _scroll_payload_vectors(source_collection) == source_vectors, "源 collection 向量漂移"
+    derived_status = await rows(
+        "select status from kb_document_versions where id = :v", v=derived_version_id
+    )
+    assert derived_status[0]["status"] == "FAILED"
+    job_status = await rows(
+        "select status, error_code from kb_build_jobs where id = :id", id=str(derived_job["id"])
+    )
+    assert job_status[0]["status"] == "FAILED"
+    assert job_status[0]["error_code"] == "TEI_EMBED_HTTP"
+
+    # 6) retry → attempt 2 → READY；源依旧零漂移
+    retry = await client.post(
+        f"/api/v1/school/kb/build-jobs/{derived_job['id']}/retry", headers=builder
+    )
+    assert retry.status_code == 200, retry.text
+    monkeypatch.setattr(build_task, "_build_embedder", lambda s: TokenOverlapEmbedder())
+    result = await build_kb_version({}, str(env.tenant_a), derived_version_id)
+    assert result["status"] == "ready", result
+    doc_retry = await rows(
+        "select status, current_version_id from kb_documents where id = :d",
+        d=str(document["id"]),
+    )
+    assert doc_retry[0]["status"] == "PUBLISHED"
+    assert str(doc_retry[0]["current_version_id"]) == str(version_id)
+
+    # 7) 发布派生版本 → 200；源版本 collection 仍完整（旧会话不漂移，spec :328）
+    # 发布门禁只看版本状态（KB-05 已验）；发布动作自身推进文档状态/current pointer
+    await execute(
+        "update kb_document_versions set status = 'TEST_PASSED' where id = :id",
+        id=derived_version_id,
+    )
+    publish2 = await client.post(
+        PUBLISH_URL.format(version_id=derived_version_id), headers=publisher
+    )
+    assert publish2.status_code == 200, publish2.text
+    assert await _scroll_payload_vectors(source_collection) == source_vectors, (
+        "派生发布后源版本 collection 被污染（旧会话漂移）"
+    )
+
+    # 清理（测试 collection 不残留）
+    from qdrant_client import AsyncQdrantClient
+
+    from app.config import get_settings
+
+    settings_q = get_settings()
+    client_q = AsyncQdrantClient(url=settings_q.qdrant_url)
+    try:
+        await client_q.delete_collection(source_collection)
+        await client_q.delete_collection(collection_name(env.tenant_a, UUID(derived_version_id)))
+    finally:
+        await client_q.close()

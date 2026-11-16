@@ -529,12 +529,157 @@ async def test_watchdog_marks_stale_building_failed(env: KbEnv) -> None:
         "select status from kb_document_versions where id = :id", id=str(version_id)
     )
     assert version[0]["status"] == "FAILED"
+    doc_row = await rows(
+        "select status from kb_documents where current_version_id = :id", id=str(version_id)
+    )
+    assert doc_row[0]["status"] == "FAILED"  # 初始构建 stale 仍联动文档（豁免仅派生）
     stale_audits = await rows(
         "select metadata_json from audit_logs where action = 'school.kb.build.failed' "
         "and tenant_id = :tid and metadata_json->>'stale' = 'true'",
         tid=str(env.tenant_a),
     )
     assert len(stale_audits) >= 1
+
+
+async def test_watchdog_derived_stale_source_document_untouched(
+    env: KbEnv, monkeypatch: pytest.MonkeyPatch, client: AsyncClient
+) -> None:
+    """审查 M3：派生构建 stale → 派生 job/版本 FAILED（可重试），共享源文档
+    状态/current pointer/源 collection 不动（spec :327「失败不影响源版本」）；
+    retry 后派生 READY，源依旧不动。"""
+
+    from qdrant_client import AsyncQdrantClient
+
+    from app.kb import build_task
+    from app.kb.build_task import retry_stale_build_jobs
+    from app.kb.indexer import collection_name
+
+    # 1) 源版本真实构建 READY（源 collection 在位）
+    markdown = "# 手册\n\n## 第一章\n\n" + "。".join(f"第{n}句有内容" for n in range(30)) + "。"
+    _patch_ports(monkeypatch, FakeParser([ParsedDocument(markdown=markdown)]))
+    _job_id, doc_id, version_id = await _seed_approved_version(env)
+    result = await build_kb_version({}, str(env.tenant_a), str(version_id))
+    assert result["status"] == "ready", result
+
+    # 2) 模拟源文档在线（PUBLISHED，current 指向源版本）
+    await execute(
+        "update kb_documents set status = 'PUBLISHED' where id = :d", d=str(doc_id)
+    )
+    settings = get_settings()
+    source_client = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        source_points, _ = await source_client.scroll(
+            collection_name(env.tenant_a, version_id), limit=100, with_vectors=False
+        )
+    finally:
+        await source_client.close()
+    assert source_points
+
+    # 3) 手工落派生版本（BUILDING）+ confirmed 编辑 + 心跳超时任务——聚焦 watchdog
+    creator = await _user_id("kb-uploader")
+    derived_id = uuid_module.uuid4()
+    source_chunk = (
+        await rows(
+            "select id, chunk_hash from kb_chunks where document_version_id = :v "
+            "and chunk_type = 'child' order by chunk_index limit 1",
+            v=str(version_id),
+        )
+    )[0]
+    await execute(
+        """
+        insert into kb_document_versions (id, tenant_id, document_id, version_no,
+                                          source_object_key, source_filename, source_hash,
+                                          mime, size_bytes, status, scan_engine, scanned_at,
+                                          created_by, parent_version_id, derivation_type)
+        select :id, tenant_id, document_id, 2, source_object_key, source_filename,
+               source_hash, mime, size_bytes, 'BUILDING', scan_engine, scanned_at,
+               :creator, :parent, 'chunk_edit'
+        from kb_document_versions where id = :parent
+        """,
+        id=str(derived_id),
+        creator=str(creator),
+        parent=str(version_id),
+    )
+    await execute(
+        """
+        insert into kb_chunk_edits (id, tenant_id, source_version_id, chunk_id,
+                                    before_hash, after_hash, new_content, reason,
+                                    status, derived_version_id, edited_by)
+        values (gen_random_uuid(), :tenant, :sv, :chunk, :before, :after,
+                '改动内容。', '派生失败场景', 'confirmed', :derived, :creator)
+        """,
+        tenant=str(env.tenant_a),
+        sv=str(version_id),
+        chunk=str(source_chunk["id"]),
+        before=str(source_chunk["chunk_hash"]),
+        after="c" * 64,
+        derived=str(derived_id),
+        creator=str(creator),
+    )
+    job_id = uuid_module.uuid4()
+    await execute(
+        """
+        insert into kb_build_jobs (id, tenant_id, version_id, status, attempt, retry_count,
+                                   stage, started_at, heartbeat_at, created_by)
+        values (:id, :tenant, :version, 'BUILDING', 1, 0, 'CHUNKING',
+                now() - interval '1 hour', now() - interval '1 hour', :creator)
+        """,
+        id=str(job_id),
+        tenant=str(env.tenant_a),
+        version=str(derived_id),
+        creator=str(creator),
+    )
+    from tests.support.kb_audience_seed import configure_audiences
+
+    await configure_audiences(env.tenant_a, derived_id)
+
+    # 4) watchdog：派生 job/版本 FAILED（STALE 可重试）；源文档/PUBLISHED/current 不动
+    stale_result = await retry_stale_build_jobs({})
+    assert stale_result["stale"] >= 1
+    job = await rows(
+        "select status, error_code from kb_build_jobs where id = :id", id=str(job_id)
+    )
+    assert job[0]["status"] == "FAILED"
+    assert job[0]["error_code"] == "BUILD_STALE"
+    derived_row = await rows(
+        "select status, derivation_type from kb_document_versions where id = :id",
+        id=str(derived_id),
+    )
+    assert derived_row[0]["status"] == "FAILED"
+    assert derived_row[0]["derivation_type"] == "chunk_edit"
+    doc_row = await rows(
+        "select status, current_version_id from kb_documents where id = :d", d=str(doc_id)
+    )
+    assert doc_row[0]["status"] == "PUBLISHED"  # M3 核心：源文档不被派生失败污染
+    assert str(doc_row[0]["current_version_id"]) == str(version_id)
+
+    # 5) retry → 派生 READY；源文档与源 collection 依旧不动
+    headers = await login(client, KB_BUILDER)
+    response = await client.post(
+        f"/api/v1/school/kb/build-jobs/{job_id}/retry", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["attempt"] == 2
+    monkeypatch.setattr(build_task, "_build_embedder", lambda settings_: FakeEmbedder())
+    second = await build_kb_version({}, str(env.tenant_a), str(derived_id))
+    assert second["status"] == "ready", second
+    doc_row2 = await rows(
+        "select status, current_version_id from kb_documents where id = :d", d=str(doc_id)
+    )
+    assert doc_row2[0]["status"] == "PUBLISHED"
+    assert str(doc_row2[0]["current_version_id"]) == str(version_id)
+    derived_client = AsyncQdrantClient(url=settings.qdrant_url)
+    try:
+        derived_points, _ = await derived_client.scroll(
+            collection_name(env.tenant_a, derived_id), limit=100, with_vectors=False
+        )
+        source_after, _ = await derived_client.scroll(
+            collection_name(env.tenant_a, version_id), limit=100, with_vectors=False
+        )
+    finally:
+        await derived_client.close()
+    assert derived_points  # 派生 collection 已建成
+    assert len(source_after) == len(source_points)  # 源 collection 点数不变
 
 
 async def test_docx_pptx_build_fails_honestly(env: KbEnv, monkeypatch: pytest.MonkeyPatch) -> None:

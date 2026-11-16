@@ -29,7 +29,7 @@ from app.db.models.kb import (
 )
 from app.db.repository import ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
-from app.kb.service import KbError
+from app.kb.service import KbError, _integrity_constraint_name
 from app.rbac.scopes import DataScopeContext
 
 CHUNK_CONTENT_MAX_CHARS = 500  # 与 chunker 子块默认目标长度同源（TD-294 实验口径）
@@ -235,6 +235,13 @@ async def submit_chunk_edit(
         ).get(chunk_id)
         if chunk is None:
             raise KbError("CHUNK_NOT_FOUND", "分块不存在", 404)
+        # M1：编辑必须先通过所属版本的数据范围校验；仅 tenant/RLS 不足以
+        # 防止同租 self/空范围主体拿到 chunk_id 后越权提交。
+        version_repository = TenantScopedRepository(
+            session, KbDocumentVersion, tenant_id, scope=scope, owner_attr="created_by"
+        )
+        if await version_repository.get(chunk.document_version_id) is None:
+            raise KbError("CHUNK_NOT_FOUND", "分块不存在", 404)
         # M1（spec :323 仅子块文本）：父块编辑 = 结构性改动，走重传+重审——服务端拦截。
         # 拒绝审计走独立事务（同乐观锁 409：主事务 raise 回滚主事务内审计写入）
         if chunk.chunk_type != "child":
@@ -294,11 +301,15 @@ async def submit_chunk_edit(
             status="submitted",
             edited_by=user_id,
         )
-        await _reader_repository(session, tenant_id).add(row)
+        # M2（审查）：唯一冲突在 repository.add() 的内部 flush 抛出——必须把 add
+        # 本身放进 try，并只映射预期约束名；非预期 IntegrityError 原样上抛。
         try:
-            await session.flush()
+            await _reader_repository(session, tenant_id).add(row)
         except IntegrityError as exc:
-            # N1（审查）：并发同块提交兜底——部分唯一索引触发，映射 409 + 拒绝审计
+            constraint = _integrity_constraint_name(exc)
+            if constraint != "uq_kb_chunk_edits_source_chunk_submitted":
+                raise
+            # 失败主事务回滚后写独立拒绝审计（所需 id 先于 flush 捕获）
             await _audit_edit_denied_standalone(
                 tenant_id=tenant_id,
                 chunk_id=chunk_id,
@@ -459,9 +470,20 @@ async def derive_version(
             acl_confirmed_at=source.acl_confirmed_at,
             created_by=user_id,
         )
-        await TenantScopedRepository(
-            session, KbDocumentVersion, tenant_id, scope=ScopeBypass(reason=_AUDIT_REASON)
-        ).add(derived_version)
+        # M2（审查）：version_no 唯一冲突在 repository.add() 的内部 flush 抛出——
+        # 把 add 本身放进 try，只映射预期约束名；失败事务回滚（无半成品），独立审计在
+        # 事务退出后写。非预期 IntegrityError 原样上抛。
+        try:
+            await TenantScopedRepository(
+                session, KbDocumentVersion, tenant_id, scope=ScopeBypass(reason=_AUDIT_REASON)
+            ).add(derived_version)
+        except IntegrityError as exc:
+            constraint = _integrity_constraint_name(exc)
+            if constraint != "uq_kb_document_versions_tenant_document_version":
+                raise
+            raise KbError(
+                "CHUNK_EDIT_STATE", "该文档正有并发派生（版本号冲突），请刷新后重试", 409
+            ) from exc
 
         # ACL 继承（D3-A）：复制源版本人群行 + 确认态列
         audience_scope = ScopeBypass(reason="人群行随派生版本复制，系统判据")
@@ -524,13 +546,9 @@ async def derive_version(
             },
             request_id=request_id,
         )
-        try:
-            await session.flush()
-        except IntegrityError as exc:
-            # N6（审查）：同文档两个源版本并发派生 → version_no 唯一冲突，映射 409
-            raise KbError(
-                "CHUNK_EDIT_STATE", "该文档正有并发派生（版本号冲突），请刷新后重试", 409
-            ) from exc
+        # version_no 唯一冲突已在 add(derived_version) 处按约束名映射 409（M2）；
+        # 此处收尾 flush 的意外完整性错误不再伪装成业务冲突——原样上抛（宁可 500）。
+        await session.flush()
 
     from app.kb.service import _enqueue_build
 
