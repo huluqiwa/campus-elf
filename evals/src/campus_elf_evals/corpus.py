@@ -32,7 +32,7 @@ class Doc:
     sections: tuple[Section, ...]
     table: tuple[str, ...] | None = None  # GFM 表行（首行表头，含分隔行自动补）
     table_section: str | None = None  # 表格归属章节（None=末尾追加独立章节）
-    table_is_long_atomic: bool = False  # True=长原子表（单行 >500 码点，表格不拆语义验证）
+    table_is_long_atomic: bool = False  # True=整表原子块 >500 码点（表格不拆语义验证；表行最长 258）
     code: tuple[str, ...] | None = None  # 代码块行（归属最后章节）
 
     @property

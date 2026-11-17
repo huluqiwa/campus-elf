@@ -34,6 +34,8 @@ EXPECTED_CATEGORIES: dict[str, int | None] = {
     "capability_fallback": MIN_ADVERSARIAL,
     "multi_intent": MIN_ADVERSARIAL,
     "leave_navigation": MIN_ADVERSARIAL,
+    # 检索直评估类（TD-294）：无对抗维度（确定性命中判定），对抗要求豁免（-1 哨兵）
+    "chunk_grid": -1,
 }
 
 
@@ -109,6 +111,8 @@ def main() -> int:
         if count < MIN_CASES_PER_CATEGORY:
             problems.append(f"类别 {category} 仅 {count} 条（要求 ≥{MIN_CASES_PER_CATEGORY}）")
         minimum = EXPECTED_CATEGORIES[category]
+        if minimum == -1:
+            continue  # 检索直评估类：无对抗要求（TD-294 简报 F3 口径）
         required_adversarial = minimum if minimum is not None else count
         if adversarial[category] < required_adversarial:
             problems.append(

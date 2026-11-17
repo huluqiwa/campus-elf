@@ -63,13 +63,17 @@ def mrr(retrieved: Sequence[RetrievedChunk], expected_citations: Sequence[str]) 
 def context_coverage(
     retrieved: Sequence[RetrievedChunk], expected_points: Sequence[str], k: int = 8
 ) -> float:
-    """top-k 块文本覆盖 expected_points 关键短语的比例（包含近似，TD-294a）。"""
+    """top-k 块文本覆盖 expected_points 关键短语的比例（包含近似，TD-294a）。
+
+    空白 point 不可覆盖——排除出分母（复审 m12；31 条用例无空白 point，边界防御）。
+    """
     window = retrieved[:k]
-    if not expected_points:
+    judged = [point for point in expected_points if point.strip()]
+    if not judged:
         return 0.0
     haystack = "\n".join(chunk.text for chunk in window)
-    covered = sum(1 for point in expected_points if point.strip() and point.strip() in haystack)
-    return covered / len(expected_points)
+    covered = sum(1 for point in judged if point in haystack)
+    return covered / len(judged)
 
 
 @dataclass

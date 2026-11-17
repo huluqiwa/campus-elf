@@ -57,3 +57,22 @@ def test_evaluate_case_and_aggregate() -> None:
     assert agg["recall_rate"] == 0.5
     assert agg["cases"] == 2.0
     assert agg["mrr"] == 0.5
+
+
+def test_coverage_blank_points_excluded_from_denominator() -> None:
+    hit = _chunk("奖学金评定办法", "奖学金评定办法 > 申请条件", text="平均绩点 3.5")
+    points = ["平均绩点 3.5", "  ", ""]
+    assert context_coverage([hit], points, k=8) == 1.0
+
+
+def test_recall_any_of_multiple_citations() -> None:
+    hit_a = _chunk("奖学金评定办法", "奖学金评定办法 > 申请条件")
+    hit_b = _chunk("图书馆借阅规则", "图书馆借阅规则 > 赔偿标准")
+    cites = ["奖学金评定办法#申请条件", "图书馆借阅规则#赔偿标准"]
+    assert recall_at_k([hit_a], cites, k=5) is True
+    assert recall_at_k([hit_b], cites, k=5) is True
+    assert precision_at_k([hit_a, hit_b], cites, k=2) == 1.0
+
+
+def test_coverage_with_empty_retrieved() -> None:
+    assert context_coverage([], ["要点"], k=8) == 0.0

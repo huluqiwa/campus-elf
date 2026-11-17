@@ -15,7 +15,9 @@ import pathlib
 import time
 
 from app.kb.embedding import TEIEmbedder
-from grid_runner import (  # type: ignore[import-not-use]
+
+# 脚本方式运行依赖 sys.path[0] 同目录导入；-m 方式需先挂 src 路径（跑批口径）
+from grid_runner import (
     QDRANT_URL,
     TEI_EMBED_URL,
     _cell_collection,

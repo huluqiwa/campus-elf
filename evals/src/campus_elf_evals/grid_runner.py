@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import pathlib
 import sys
@@ -111,7 +112,8 @@ async def index_cell(
 ) -> int:
     """单格：真实 chunker 切块 → TEI 嵌入 → BM25 → Qdrant 写入（子块 only——只索子块）。"""
     await ensure_collection(client, collection=collection, dense_dim=1024)
-    texts: list[str] = []
+    dense_texts: list[str] = []
+    raw_texts: list[str] = []
     metas: list[tuple[str, str | None]] = []
     for doc in docs:
         chunks = chunk_markdown(
@@ -120,13 +122,17 @@ async def index_cell(
         for chunk in chunks:
             if chunk.chunk_type != "child":
                 continue
-            texts.append(
+            # dense 输入 = 生产 EMBED 语义（embed_input_text 前缀拼接，build_task EMBED 阶段）；
+            # sparse 输入 = 子块原文（生产 build_task:712 `version_sparse_weights([chunk.text])`）；
+            # payload text = 原文（生产 payload 无 text、文本在 PG——rerank/coverage 消费原文）。
+            dense_texts.append(
                 embed_input_text(document_title=doc.title, section_path=chunk.section_path, chunk_text=chunk.text)
             )
+            raw_texts.append(chunk.text)
             metas.append((doc.title, chunk.section_path))
-    dense_vectors = await embedder.embed(texts)
-    sparse_vectors = version_sparse_weights(texts)
-    point_ids = [str(uuid4()) for _ in texts]
+    dense_vectors = await embedder.embed(dense_texts)
+    sparse_vectors = version_sparse_weights(raw_texts)
+    point_ids = [str(uuid4()) for _ in raw_texts]
     points = [
         qmodels.PointStruct(
             id=point_id,
@@ -134,14 +140,23 @@ async def index_cell(
                 "dense": dense,
                 "sparse": qmodels.SparseVector(indices=sparse.indices, values=sparse.values),
             },
-            payload={"doc_title": title, "section_path": section_path, "text": text},
+            payload={"doc_title": title, "section_path": section_path, "text": raw_text},
         )
-        for point_id, dense, sparse, (title, section_path), text in zip(
-            point_ids, dense_vectors, sparse_vectors, metas, texts, strict=True
+        for point_id, dense, sparse, (title, section_path), raw_text in zip(
+            point_ids, dense_vectors, sparse_vectors, metas, raw_texts, strict=True
         )
     ]
     await client.upsert(collection, points=points, wait=True)
     return len(points)
+
+
+def _stable_hits(hits: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    """生产同款并列稳定化（retrieval_test.py:246 `_stable_hits`：score 降序 + chunk_id 升序）
+    ——消除 Qdrant 并列排序不稳定（简报 §9 噪声 ±0.011 的根因）。"""
+    return sorted(
+        hits,
+        key=lambda h: (-float(h["score"]), str(h["chunk_id"])),  # type: ignore[union-attr,index]
+    )
 
 
 def _to_retrieved(hits: Sequence[dict[str, object]]) -> list[RetrievedChunk]:
@@ -167,7 +182,9 @@ async def evaluate_cell(
     for case in cases:
         dense = (await embedder.embed([case.question]))[0]
         sparse = version_sparse_weights([case.question])[0]
-        hits = await search_points(client, collection=collection, dense=dense, sparse=sparse, top_k=8)
+        hits = _stable_hits(
+            await search_points(client, collection=collection, dense=dense, sparse=sparse, top_k=8)
+        )
         results.append(
             evaluate_case(
                 case.case_id,
@@ -186,7 +203,7 @@ async def evaluate_cell_with_rerank(
     cases: list[Case],
     embedder: TEIEmbedder,
     rerank_pool: int = 20,
-) -> list[CaseResult]:
+) -> tuple[list[CaseResult], list[str]]:
     """rerank 对照组：检索 top-20 候选 → TEI rerank → 重排后取 8。"""
     from app.kb.rerank import RerankError, TEIReranker
 
@@ -198,8 +215,10 @@ async def evaluate_cell_with_rerank(
     for case in cases:
         dense = (await embedder.embed([case.question]))[0]
         sparse = version_sparse_weights([case.question])[0]
-        hits = await search_points(
-            client, collection=collection, dense=dense, sparse=sparse, top_k=rerank_pool
+        hits = _stable_hits(
+            await search_points(
+                client, collection=collection, dense=dense, sparse=sparse, top_k=rerank_pool
+            )
         )
         query = case.question
         try:
@@ -275,10 +294,12 @@ async def run_grid(
     client = AsyncQdrantClient(url=QDRANT_URL)
     # 与生产 kb_embed_batch_size=8 同口径（TEI max-client-batch-size）
     embedder = TEIEmbedder(base_url=TEI_EMBED_URL, timeout_seconds=300, batch_size=8)
+    created: list[str] = []
     try:
         # 网格主跑（chunk_size × overlap）
         for index, (chunk_size, overlap) in enumerate(cells):
             collection = _cell_collection(client, "grid", index)
+            created.append(collection)
             points = await index_cell(
                 client,
                 collection=collection,
@@ -309,6 +330,7 @@ async def run_grid(
         if not smoke:
             for index, parent_size in enumerate(PARENT_SIZES):
                 collection = _cell_collection(client, "parent", index)
+                created.append(collection)
                 chunk_size, overlap = PARENT_BASE
                 points = await index_cell(
                     client,
@@ -336,46 +358,63 @@ async def run_grid(
                     f"p@3={summary['precision']:.3f} mrr={summary['mrr']:.3f} cov={summary['coverage']:.3f}"
                 , flush=True)
 
-        # rerank 对照（最优格重跑；smoke 同样跑以验证管线）
-        best = max(
-            (cell for cell in report["cells"]),  # type: ignore[union-attr]
-            key=lambda c: (c["recall_rate"], c["mrr"]),  # type: ignore[index]
-        )
-        collection = _cell_collection(client, "rerank", 0)
-        points = await index_cell(
-            client,
-            collection=collection,
-            docs=docs,
-            chunk_size=best["chunk_size"],  # type: ignore[index]
-            overlap_ratio=best["overlap_ratio"],  # type: ignore[index]
-            parent_size=best["parent_size"],  # type: ignore[index]
-            embedder=embedder,
-        )
-        if with_rerank:
-            rerank_results, degraded = await evaluate_cell_with_rerank(
-                client, collection=collection, cases=cases, embedder=embedder
+        # rerank 对照（M2 修复：双组显式对照——默认格 500/0.15 + 网格最优格（p@3 最高），
+        # 不再按 (recall, mrr) 选格——recall 饱和 + mrr 并列会误选（首轮复审 M2a 教训））
+        grid_cells = [c for c in report["cells"] if "rerank" not in c]  # type: ignore[union-attr]
+        best = max(grid_cells, key=lambda c: (c["precision"], c["mrr"]))  # type: ignore[index]
+        rerank_targets = [
+            (500, 0.15, 1000, "default"),
+            (best["chunk_size"], best["overlap_ratio"], best["parent_size"], "best"),  # type: ignore[index]
+        ]
+        seen: set[tuple[int, float, int]] = set()
+        for rerank_index, (cs, ov, ps, tag) in enumerate(rerank_targets):
+            key = (cs, ov, ps)
+            if key in seen:
+                continue
+            seen.add(key)
+            collection = _cell_collection(client, "rerank", rerank_index)
+            created.append(collection)
+            points = await index_cell(
+                client,
+                collection=collection,
+                docs=docs,
+                chunk_size=cs,
+                overlap_ratio=ov,
+                parent_size=ps,
+                embedder=embedder,
             )
-            if degraded:
-                report["notes"].append(f"rerank 降级 case：{degraded}")  # type: ignore[union-attr]
-        else:
-            rerank_results = await evaluate_cell(client, collection=collection, cases=cases, embedder=embedder)
-        rerank_summary = aggregate(rerank_results)
-        report["cells"].append(  # type: ignore[union-attr]
-            {
-                "chunk_size": best["chunk_size"],  # type: ignore[index]
-                "overlap_ratio": best["overlap_ratio"],  # type: ignore[index]
-                "parent_size": best["parent_size"],  # type: ignore[index]
-                "rerank": with_rerank,
-                "indexed_children": points,
-                **rerank_summary,
-            }
-        )
-        await client.delete_collection(collection)
-        print(
-            f"[rerank={with_rerank}] best-cell rerun: recall@5={rerank_summary['recall_rate']:.3f} "
-            f"p@3={rerank_summary['precision']:.3f} mrr={rerank_summary['mrr']:.3f}"
-        , flush=True)
+            if with_rerank:
+                rerank_results, degraded = await evaluate_cell_with_rerank(
+                    client, collection=collection, cases=cases, embedder=embedder
+                )
+                if degraded:
+                    report["notes"].append(f"rerank[{tag}] 降级 case：{degraded}")  # type: ignore[union-attr]
+            else:
+                rerank_results = await evaluate_cell(client, collection=collection, cases=cases, embedder=embedder)
+            rerank_summary = aggregate(rerank_results)
+            report["cells"].append(  # type: ignore[union-attr]
+                {
+                    "chunk_size": cs,
+                    "overlap_ratio": ov,
+                    "parent_size": ps,
+                    "rerank": with_rerank,
+                    "rerank_tag": tag,
+                    "indexed_children": points,
+                    **rerank_summary,
+                }
+            )
+            await client.delete_collection(collection)
+            print(
+                f"[rerank={with_rerank} {tag}] cs={cs} ov={ov}: "
+                f"recall@5={rerank_summary['recall_rate']:.3f} p@3={rerank_summary['precision']:.3f} "
+                f"mrr={rerank_summary['mrr']:.3f}",
+                flush=True,
+            )
     finally:
+        # 中途异常也不泄漏临时 collection（复审 m10）
+        for name in created:
+            with contextlib.suppress(Exception):
+                await client.delete_collection(name)
         await client.close()
     return report
 

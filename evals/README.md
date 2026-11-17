@@ -10,7 +10,8 @@ evals/
 ├─ README.md
 ├─ rubric.md
 ├─ fixtures/
-│  └─ sample_kb.md          # 合成学校知识库，供评估用例引用
+│  ├─ sample_kb.md          # 合成学校知识库，供评估用例引用
+│  └─ corpus/               # TD-294 实验语料（10 文档 70KB，corpus.py 种子化生成入库）
 ├─ scripts/
 │  └─ langfuse_smoke.py     # 观测栈连通性冒烟（写 trace 后经 v2 observations 复查）
 ├─ cases/
@@ -22,7 +23,8 @@ evals/
 │  ├─ sensitive_content.jsonl
 │  ├─ capability_fallback.jsonl
 │  ├─ multi_intent.jsonl
-│  └─ leave_navigation.jsonl
+│  ├─ leave_navigation.jsonl
+│  └─ chunk_grid.jsonl         # TD-294 检索直评估专用（与 fixtures/corpus 章节对齐）
 └─ reports/                 # 评估报告（git 忽略）
 ```
 
@@ -59,8 +61,9 @@ evals/
 | capability_fallback | 20 | 3 |
 | multi_intent | 20 | 3 |
 | leave_navigation | 20 | 3 |
+| chunk_grid（TD-294 检索直评估） | 20 | 豁免（确定性命中判定，无对抗维度） |
 
-> 当前 seed 已按每类 20 条落盘；新增需求时先扩评估集，再改实现。
+> 当前 seed 已按每类 20 条落盘（chunk_grid 32 条与 `fixtures/corpus/` 章节对齐）；新增需求时先扩评估集，再改实现。检索直评估类（chunk_grid）对抗维度豁免（checker `-1` 哨兵口径）。
 
 ## 4. 指标与阈值
 
