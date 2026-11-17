@@ -920,7 +920,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 
 - 设计支持父子块：`parent_id`、`chunk_type`、`overlap_prev/next`、`section_path`、`page_start/end`。
 - 候选取值：子块 300/500/800 字、重叠 10/15/20%；父块 800–1200 字；表格/代码不拆。
-- M3 必须用评估集比较 recall/faithfulness/citation precision 后定参数，回写设计。
+- **M3 实验结论（2026-11-18，TD-294 检索直评估，31 case × 12 格 + rerank/分词器对照；报告 `evals/reports/td294-grid-20261118.json`）**：recall@5 全格饱和 1.000（主题区分度高的校务语料上召回对切块参数不敏感，dense 主导）；唯一区分指标 citation precision@3——**300 组均值 0.767 > 500 组 0.738 > 800 组 0.376（显著劣化，超出 ≥2 case 判据）**；重叠比例与父块尺寸（800–1200）影响弱（差 <1 case 当量）；**rerank 是 p@3 最大杠杆**（500/0.15 上 0.710→0.871）。**参数维持默认 500/15%/1000**（300 与 500 差异未达显著判据，取块数更少/嵌入成本更低的现默认；800 排除）；faithfulness（生成侧）随 M4 ragas 批次补跑（TD-294a）。state-machines 不变量不变（表格/代码不拆、父块聚合规则原样）。
 - 每个子块嵌入前加“文档名+章节路径”上下文。
 
 ### 7.3 嵌入 / 稀疏
