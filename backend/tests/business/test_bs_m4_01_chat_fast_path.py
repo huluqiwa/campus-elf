@@ -102,9 +102,20 @@ def migrated_database() -> Iterator[None]:
 
 @pytest.fixture
 async def env(
-    migrated_database: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    engines_available: bool,
+    migrated_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> AsyncIterator[KbEnv]:
-    async with kb_env(monkeypatch, tmp_path, overrides={"QDRANT_URL": "http://127.0.0.1:56333"}) as value:
+    async with kb_env(
+        monkeypatch,
+        tmp_path,
+        overrides={
+            "QDRANT_URL": "http://127.0.0.1:56333",
+            # 扫描跳过仅测试编排（KB-01C/e2e 先例；生产校验红线不变）——CI 无 ClamAV 也能走通链
+            "DEV_SKIP_FILE_SCAN": "true",
+        },
+    ) as value:
         yield value
 
 
@@ -138,12 +149,9 @@ async def _chain_to_published(
     )
     assert uploaded.status_code == 201, uploaded.text
     document = uploaded.json()["documents"][0]
+    assert document["status"] == "PENDING_APPROVAL"  # DEV_SKIP_FILE_SCAN=true 直置待审
     doc_id = UUID(document["id"])
     version_id = UUID(document["current_version"]["id"])
-    # 扫描内联直调（模拟 arq 消费；skip 开关下免 ClamAV 直置 PENDING_APPROVAL）
-    from app.kb.scan_task import scan_kb_version
-
-    await scan_kb_version({}, str(env.tenant_a), str(version_id))
 
     submitted = await client.post(
         f"/api/v1/school/kb/document-versions/{version_id}/submit-approval",
