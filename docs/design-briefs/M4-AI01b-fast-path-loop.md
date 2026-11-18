@@ -179,4 +179,41 @@ AI 域功能点，按 §11.7 从严：**简报经用户确认后再编码**。�
 
 ## §10 实现注记（编码后回填）
 
-（待实现 PR 回填：落地差异、读数、审查处置。）
+### 10.1 落地文件
+
+- `app/harness/loop.py`：`FastPathLoop`（六段显式状态机 + AgentEvent 产出 + 兜底链 + 首 token 前 30s 硬超时 + spans 内嵌 TraceRecord）
+- `app/kb/chat_retrieval.py`：`ChatRetriever.search_hits`（发现→人群 fail-closed→embed→fanout 归并）+ `load_texts`（证据回查，两段式——卡 3-A）；`merge_hits` 确定性归并
+- `app/harness/chat_tools.py`：三工具 spec/handler + `TurnToolState`（kb.read_chunk 证据白名单）
+- `app/harness/audit_db.py`：`DbAuditSink`（同步 append 缓冲 + `flush()` 落库；result 词表映射 error→failure）
+- `app/harness/prompt_files/kb_qa_v1.md` + `app/harness/prompt_loading.py`（Git 版本化 prompt 首落点）
+- `app/harness/chat_assembly.py`：`build_chat_loop`（create_app 缺省装配）
+- `app/api/campus_chat.py` 重写；`app/main.py` 新增 `chat_loop` 参数与装配；`config.py` 删空壳开关 + 新增 `kb_chat_top_k`
+- 测试：harness 三文件（loop 11/tools 7/prompt 5）+ chat_retrieval 单元 5 + 集成 6 + audit_db 2 + SSE 端点 5 + BS-M4-01/02（3）+ 既有三文件改造（bs_m0_01/sql_baseline/chat_rbac）
+
+### 10.2 与简报的偏离（全登记）
+
+1. **VERIFY 改写语义**（§2 默认口径「超出即剔除」→「告警不改写」）：delta 流式发出不可撤回，改写需缓冲式生成与流式 TTFT 冲突——本点只做检测+guard 告警（logger `LLM_GUARD_REF_OUT_OF_RANGE`），全量输出护栏归 AI-09/TD-332。
+2. **回合超时作用域**（D5 的落地细化，审查 M3 后修正表述）：`asyncio.timeout(30s)` 只包 **LLM 建流+首事件**；RETRIEVE 段由工具级 5s 超时（kb.search）+ 证据回查 `asyncio.wait_for(5s)`（审查 M3 新增）覆盖——三层各管一段，不重复计时；delta 开始后按客户端节奏消费。`first_token_ms` 口径=回合起点（审查 m2 修正，两路径统一；对齐 P95 门禁按完整回合计）。
+3. **kb.search 工具回包含原始 payload**（卡 3-A 细化）：工具面无证据文本，但命中 payload 内嵌（loop 内部流转用于证据回查）；SSE tool_result 只出计数，payload 不外发。
+4. **langgraph 未使用**（D1）：快路径纯显式状态机；依赖保留在 pyproject（ReAct 点引入）。
+
+### 10.3 本地门禁读数（2026-11-19）
+
+- `ruff check app tests alembic`：0 错误；`mypy --no-incremental app`（7 个新增/改动模块）0 错误 + `mypy --no-incremental tests`（162 文件）0 错误
+- `bandit -r app -x tests` / `bandit -r alembic -s B608`：0 issue；`alembic check`：无漂移（本点零迁移）
+- 受影响全子集 **201 passed**（终态读数，含审查修复新增 3 条 loop 用例：harness 全部 + chat_retrieval 单元/集成 + audit_db + SSE 端点 + config + 装配 + chat_rbac + bs_m0_01 + sql_baseline + BS-M4-01/02）
+- 实现期发现并修正：①`hit_without_payload` 假定扁平形状而真实 `search_points` 命中 payload 嵌套（KeyError→工具 TOOL_ERROR）——适配器改读 payload、两处 stub 改真实形状（判例：测试假端口形状偏离真实实现=假绿最难查的一类）；②`ToolExecutor` 的 `AuditSink` 协议为同步——采用 append 缓冲+flush 落库（取消路径不 flush，TD-018 口径）；③`audit_logs.result` 词表 failure（harness "error"→DB "failure" 映射在适配器）；④`dev_skeleton_loop_enabled` 全仓清零（TD-059 收口，6 文件+开关字段+校验分支）
+
+### 10.4 审查处置（2026-11-19，独立审查第 1 轮：0B/3M/7m + 第 2 轮复审：0B/0M/3m）
+
+- **M1（取消弧零测试）**：补 `test_client_disconnect_records_user_cancelled`（消费到首 delta 后 aclose → trace USER_CANCELLED）；复审 m-N1 补 `assert audit.flushed == 0`（取消路径 audit 不 flush 口径钉住）。
+- **M2（超时弧零测试）**：补 `test_turn_timeout_yields_llm_timeout`（turn_timeout_s=0.2 + 首 token 前 sleep 1s stub → error(LLM_TIMEOUT)+trace TIMEOUT）——真走 asyncio.timeout 分支（区别于 FakeLlm 直接抛 LlmError 的旧用例）。
+- **M3（超时作用域失真 + load_texts 无界，选②）**：`load_texts` 包 `asyncio.wait_for(5s)`（新构造参数 `retrieve_timeout_s`），超时→error(RETRIEVAL_FAILED, retryable=True)；简报 §10.2-2 与 loop docstring 措辞同步修正为「timeout 只包 LLM 建流+首事件；RETRIEVE 由工具 5s + 回查 wait_for(5s) 覆盖——三层各管一段」；补第三例 `test_load_texts_timeout_yields_retrieval_failed`。
+- **m1** requirements §5.1 补 MVP 边界注记；**m2** first_token_ms 统一回合起点（generate 路径两处）；**m3** audit_sink 类型改 AuditSink 删 ignore；**m4** TD-330 补 span 时间基统一要求；**m5** TD-334 登记（ReAct 点 ctx 从 principal 派生）；**m6** handoff :208 随收口 commit；**m7** design §7.5 加 chat 落地口径注记；复审 m-N1/m-N2/m-N3 当场处置（flush 断言/docstring/计数回填）。
+- 复测终态：loop 单测 11 passed；受影响全子集 **201 passed**；ruff/mypy（app 7 模块+tests 162 文件）0 错误。
+
+### 10.5 判例沉淀
+
+1. **测试假端口的形状必须与真实实现回包同构**（本点扁平 stub vs 真实 payload 嵌套 → KeyError→TOOL_ERROR 假绿；KB-10B multipart 字段名判例同类）。
+2. **「登记失真」也是缺陷**（审查 M3：简报 §10.2-2 回填文字与实现不符按 Major 处理）——偏离登记必须在编码后核对实现。
+3. **流式场景的「改写」类护栏与 TTFT 冲突**：超范围引用只能告警不能撤回，全量改写归 AI-09 时需重新设计（缓冲/哨兵），已登记 TD-332。

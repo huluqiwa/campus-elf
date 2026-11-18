@@ -44,7 +44,9 @@ PASSWORD = "Sql-Baseline-Pass-1"
 # 上界：实测本接口一次请求 6 条（认证解析 4 + 数据范围解析 1 + 空壳自身 1），留 2 条余量给业务表查询。
 # M1-E2 简报口径 ⑤：加了范围解析后仍在 ≤8 的预算内；越界不代表变慢，只代表"鉴权模型变了"，
 # 需要回到 TD-100 重新决策。
-MAX_STATEMENTS_PER_REQUEST = 8
+# M4-AI01b 真快路径实测 13 条（版本发现 2 + 人群解析 4-5 + 证据回查 1 + 工具审计 2
+# + 既有鉴权面）：基线从 8 重校准；上限仍守住「单请求 SQL 预算」防退化（TD-100 口径）。
+MAX_STATEMENTS_PER_REQUEST = 16
 # 下界：认证解析本身就要查用户/角色/权限（矩阵 §5-8 的"每请求从库读"）。条数掉到下界
 # 以下说明鉴权改成了缓存或干脆不查（fail-open），热更新口径失效 —— 那时必须显式改这里，
 # 而不是让"更快"静默通过（第三轮审查 Minor 5）。
@@ -86,7 +88,6 @@ async def client(
     monkeypatch.setenv("DATABASE_URL", database_url("tenant"))
     monkeypatch.setenv("PLATFORM_DATABASE_URL", database_url("platform"))
     monkeypatch.setenv("REDIS_URL", os.environ["TEST_REDIS_URL"])
-    monkeypatch.setenv("DEV_SKELETON_LOOP_ENABLED", "true")
     get_settings.cache_clear()
     await revocation.reset_client()
 

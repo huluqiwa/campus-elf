@@ -627,6 +627,7 @@ data: {"code":"LLM_TIMEOUT","message":"生成超时，请重试","retryable":tru
 - 思考摘要只在高层次；不发送原始 CoT/系统提示词/工具参数。
 - 用户停止：客户端 abort；服务端取消下游 LLM/工具任务。
 - 断线重连：客户端可用 turn_id 查询最终状态；不支持续传无限 token 流，重连后展示已完成部分/重试。
+- 兜底链（M4-AI01b 落地）：检索零命中/人群空集 → 兜底话术 delta + done(CAPABILITY_FALLBACK)，不提示「存在但无权」；LLM 未配置 → error(LLM_NOT_CONFIGURED) 无 done；LLM 失败按已发 delta 标 partial；客户端断开 → trace USER_CANCELLED。引用校验的解释口径：存在性/归属落在 RETRIEVE 的证据文本 PG 回查（检索结果本就租户+版本定域），VERIFY=引用序号一致性。
 
 ### 5.9 学校注册与审核（M1-B）
 
@@ -848,7 +849,10 @@ GET  /api/v1/platform/tenants/{id}/review-records
 ### 6.2 状态与预算
 
 ```text
-Fast Path:  INPUT_GUARD → ROUTE → RETRIEVE → GENERATE → VERIFY → OUTPUT_GUARD → DONE
+Fast Path（M4-AI01b 落地）：输入轻检 → ROUTE（规则直通单意图，零 LLM 调用）→
+RETRIEVE（kb.search 工具 + 证据文本 PG 回查）→ GENERATE（LLM 流式）→
+VERIFY（引用序号一致性；超范围告警不改写——delta 已发不可撤回，全量改写归 AI-09）→
+输出轻检（占位，AI-09）→ DONE
 ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
             → GENERATE → VERIFY → OUTPUT_GUARD → DONE
 ```
@@ -861,9 +865,11 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 
 | 工具 | 权限 | 说明 |
 |---|---|---|
-| `kb.search` | `campus.kb.qa` | 混合检索；只读 |
-| `kb.read_chunk` | `campus.kb.qa` | 读取证据；只读 |
+| `kb.search` | `campus.chat.use`（MVP，M4-AI01b） | 混合检索（人群过滤）；只读；工具面无证据文本 |
+| `kb.read_chunk` | `campus.chat.use`（MVP） | 读取本轮证据集内分块（白名单守卫，防 ACL 旁路）；只读 |
 | `campus.navigate` | `campus.nav` | 返回前端路由/入口；不写 |
+
+> 权限注记（M4-AI01b D2）：`campus.kb.qa` 独立码延后 ReAct 点随权限目录扩展（新码=目录+落库迁移+角色授予）；MVP 三工具挂既有码（端点已强制 `campus.chat.use`，工具内同码纵深断言）。
 
 - `ToolExecutor`：schema 校验 → 权限/租户/数据范围 → 超时 → 执行 → 审计/trace → 类型化结果。
 - 二期写工具必须 `side_effect=true` + 确认卡片 + 幂等 + 审批 + 沙箱 + 审计；MVP 不注册。
@@ -949,6 +955,11 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 - collection 数量增长：定期清理 retired collection；监控磁盘/内存。
 
 ### 7.5 检索 / 重排 / 引用
+
+> **chat 快路径落地口径（M4-AI01b）**：无 rerank（CPU 推理延迟不可进 chat——TD-056/331）；
+> 跨活跃版本 fan-out 后按 RRF 分数全局归并 `kb_chat_top_k`（默认 5）；无相邻块拼装与
+> 6k 预算（归 ReAct 点/压测批）；引用校验=序号一致性（语义相关性归 AI-04/TD-332）。
+> 以下为通用 QA 管线设计（ReAct/后续点对齐）。
 
 1. Query 预处理（可选改写）。
 2. Dense top50 + sparse top50。
@@ -1080,7 +1091,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 | ADR | 决策 | 理由 | 代价 |
 |---|---|---|---|
 | ADR-001 | 模块化单体 + Worker | 单人开发、事务简单、部署轻 | 未来拆分需边界纪律 |
-| ADR-002 | LangGraph + 自定义 Harness | 框架可替换；产品约束集中 | 自建契约/观测代码 |
+| ADR-002 | LangGraph + 自定义 Harness | 框架可替换；产品约束集中 | 自建契约/观测代码。M4-AI01b 注记：快路径为显式 async 状态机（线性管道无需图执行），LangGraph 延后 ReAct 点（循环/条件边）引入；依赖保留 |
 | ADR-003 | Qdrant 替代 pgvector | dense+sparse、collection/alias 适合蓝绿 | 多一个服务 |
 | ADR-004 | MinerU 4.0.12 + tier 降级 | 最新稳定、V1 API、质量档位 | 6GB 显存需降级验证 |
 | ADR-005 | C 端 H5，不做小程序 | POST 流式简单、无审核/域名白名单 | 微信生态触达弱 |

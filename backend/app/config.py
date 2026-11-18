@@ -64,8 +64,6 @@ class Settings(BaseSettings):
     migration_database_url: SecretStr | None = None
     qdrant_url: str | None = None
 
-    # 开发/测试专用：空壳 Loop SSE（无 LLM）；生产默认关闭，开启也仅用于联调。
-    dev_skeleton_loop_enabled: bool = False
     # 开发/测试专用：跳过学校资质审核（直接开通）；生产必须为 false（强制校验）。
     dev_skip_school_review: bool = False
 
@@ -200,6 +198,8 @@ class Settings(BaseSettings):
     # 检索测试 rerank 候选池：with_rerank=true 时融合查询扩量到 pool 再重排，
     # 最终引用 = 重排后前 top_k（简报 `docs/design-briefs/M3-KB-07.md` 卡 2）。
     kb_retrieval_test_rerank_pool: int = Field(default=20, ge=1, le=50)
+    # chat 快路径最终引用条数（M4-AI01b：跨版本 fan-out 全局归并后的 top_k）。
+    kb_chat_top_k: int = Field(default=5, ge=1, le=20)
 
     # ---------- LLM（M4-AI01a：OpenAI 兼容适配器，design §6） ----------
     # API key 只从 .env/密钥管理注入：不入库、不入日志/审计/trace、不回显（红线）。
@@ -338,10 +338,6 @@ class Settings(BaseSettings):
             return self
 
         # 开发专用开关在非开发环境一律禁止（staging 也按真实部署对待）
-        if self.dev_skeleton_loop_enabled:
-            raise ValueError(
-                f"{self.app_env} 环境禁止开启 DEV_SKELETON_LOOP_ENABLED（空壳 Loop 无认证）"
-            )
         if self.dev_skip_school_review:
             raise ValueError(
                 f"{self.app_env} 环境禁止开启 DEV_SKIP_SCHOOL_REVIEW（学校资质必须审核）"
