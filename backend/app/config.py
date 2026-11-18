@@ -201,6 +201,27 @@ class Settings(BaseSettings):
     # 最终引用 = 重排后前 top_k（简报 `docs/design-briefs/M3-KB-07.md` 卡 2）。
     kb_retrieval_test_rerank_pool: int = Field(default=20, ge=1, le=50)
 
+    # ---------- LLM（M4-AI01a：OpenAI 兼容适配器，design §6） ----------
+    # API key 只从 .env/密钥管理注入：不入库、不入日志/审计/trace、不回显（红线）。
+    # 三项必须成组出现（见 _validate_llm_config）；全部缺省 = LLM 未配置
+    # （chat 未上线前生产允许，调用期 fail-closed，不做启动阻断）。
+    llm_api_key: SecretStr | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_temperature: float | None = Field(default=None, ge=0, le=2)
+    llm_max_tokens: int | None = Field(default=None, ge=1)
+    # A8 映射：连接 5s / 首 token 15s；回合级 30s 总预算由 Loop 层承担（简报 D4）。
+    llm_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    llm_first_token_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    # 首 token 前最大尝试次数 = 1 次初始 + N-1 次重试（A8 口径 = 3）。
+    llm_max_attempts: int = Field(default=3, ge=1, le=5)
+    # 熔断（A8）：窗口内失败阈值 / 窗口秒 / 开路秒；进程内实现（简报 TD-P1）。
+    llm_breaker_failure_threshold: int = Field(default=5, ge=1)
+    llm_breaker_window_seconds: float = Field(default=60.0, gt=0)
+    llm_breaker_open_seconds: float = Field(default=30.0, gt=0)
+    # 429/5xx 重试退避基数（指数：base * 2^attempt）。
+    llm_retry_backoff_seconds: float = Field(default=0.5, gt=0, le=30)
+
     def kb_parser_tiers(self) -> list[str]:
         """解析档位列表（逗号分隔配置 → 有序列表；空串非法由 Field 约束外的校验兜底）。"""
 
@@ -241,6 +262,53 @@ class Settings(BaseSettings):
                     "（生成：openssl rand -base64 32）"
                 )
 
+    def _validate_llm_config(self) -> None:
+        """LLM 配置校验（全环境）：成组出现 + URL 卫生；占位值仅非开发环境拒绝。"""
+
+        key = self.llm_api_key
+        has_key = key is not None and bool(key.get_secret_value().strip())
+        # strip 判空：空白串 `bool(" ")` 为 True 会绕过成组校验（审查 m6）
+        has_base_url = bool((self.llm_base_url or "").strip())
+        has_model = bool((self.llm_model or "").strip())
+        parts = (has_key, has_base_url, has_model)
+        if any(parts) and not all(parts):
+            raise ValueError(
+                "LLM 配置必须成组出现：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL "
+                "要么全部缺省（AI 能力未配置），要么全部提供"
+            )
+        if has_base_url:
+            base_url = (self.llm_base_url or "").strip()
+            url = urlsplit(base_url)
+            if (
+                url.scheme not in {"http", "https"}
+                or not url.netloc
+                or url.username is not None
+                or url.password is not None
+                or url.query
+                or url.fragment
+            ):
+                raise ValueError(
+                    "LLM_BASE_URL 必须是 http(s) 绝对地址，且不能包含凭证/查询串/fragment"
+                    "（URL 中的凭证会进日志与异常文本）"
+                )
+        if self.app_env in {"development", "test"}:
+            return
+        if has_key:
+            lowered = key.get_secret_value().lower() if key is not None else ""
+            markers = ("change-me", "changeme", "placeholder", "example")
+            if any(marker in lowered for marker in markers):
+                raise ValueError(
+                    f"{self.app_env} 环境 LLM_API_KEY 禁止使用占位值"
+                    "（必须配置真实服务密钥）"
+                )
+        if has_base_url and "example.com" in (self.llm_base_url or "").lower():
+            # .env.example 的示例端点；生产/staging 配真实 key 却留着示例 base_url
+            # 会在运行期才失败（审查 m5）——启动即拦。
+            raise ValueError(
+                f"{self.app_env} 环境 LLM_BASE_URL 禁止使用示例端点 api.example.com"
+                "（必须配置真实服务地址）"
+            )
+
     @model_validator(mode="after")
     def _require_production_safety(self) -> "Settings":
         """生产环境必须满足的两类前提，避免带着开发形态上线。
@@ -251,6 +319,7 @@ class Settings(BaseSettings):
         """
 
         self._validate_encryption_kek()
+        self._validate_llm_config()
 
         reset_url = urlsplit(self.password_reset_url_base)
         if (

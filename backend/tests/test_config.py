@@ -358,3 +358,118 @@ def test_production_audit_hash_key_defaults_are_valid() -> None:
 
     assert settings.audit_hash_key is not None
     assert settings.audit_hash_key.get_secret_value() == "production-audit-key-0123456789abcdef"
+
+
+# ---------- LLM（M4-AI01a：OpenAI 兼容适配器） ----------
+
+
+def test_llm_defaults_unset_and_a8_timeouts() -> None:
+    """LLM 缺省未配置；超时/重试/熔断默认值对齐 A8 映射（5s/15s/2 重试/5 次 60s 开 30s）。"""
+
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_api_key is None
+    assert settings.llm_base_url is None
+    assert settings.llm_model is None
+    assert settings.llm_connect_timeout_seconds == 5.0
+    assert settings.llm_first_token_timeout_seconds == 15.0
+    assert settings.llm_max_attempts == 3
+    assert settings.llm_breaker_failure_threshold == 5
+    assert settings.llm_breaker_window_seconds == 60.0
+    assert settings.llm_breaker_open_seconds == 30.0
+    assert settings.llm_retry_backoff_seconds == 0.5
+
+
+def test_llm_config_group_must_be_complete() -> None:
+    """key/base_url/model 必须成组出现：只配 base_url 不配 key 即 fail-fast。"""
+
+    with pytest.raises(ValidationError, match="LLM"):
+        Settings(
+            _env_file=None,
+            llm_base_url="https://api.example.com/v1",
+            llm_model="example-llm",
+        )
+
+
+def test_llm_config_complete_group_accepted() -> None:
+    """成组配置可通过（dev）。"""
+
+    settings = Settings(
+        _env_file=None,
+        llm_api_key="dev-llm-key",
+        llm_base_url="https://api.example.com/v1",
+        llm_model="example-llm",
+    )
+
+    assert settings.llm_api_key is not None
+    assert settings.llm_api_key.get_secret_value() == "dev-llm-key"
+    assert settings.llm_model == "example-llm"
+
+
+def test_non_dev_rejects_placeholder_llm_key() -> None:
+    """staging/production 禁止占位 LLM key（对齐 JWT_SECRET 占位值口径）。"""
+
+    with pytest.raises(ValidationError, match="LLM_API_KEY"):
+        _staging_settings(
+            llm_api_key="change-me",
+            llm_base_url="https://api.example.com/v1",
+            llm_model="example-llm",
+        )
+
+
+def test_non_dev_rejects_llm_base_url_with_credentials() -> None:
+    """LLM_BASE_URL 禁止携带凭证/查询串/fragment（URL 里的 key 会进日志与异常）。"""
+
+    with pytest.raises(ValidationError, match="LLM_BASE_URL"):
+        _staging_settings(
+            llm_api_key="real-key-0123456789",
+            llm_base_url="https://user:pass@api.example.com/v1",
+            llm_model="example-llm",
+        )
+
+
+def test_production_allows_unconfigured_llm() -> None:
+    """chat 未上线前生产允许缺省 LLM 配置（调用期 fail-closed，不做启动阻断）。"""
+
+    settings = _production_settings()
+
+    assert settings.llm_api_key is None
+    assert settings.llm_base_url is None
+
+
+def test_production_accepts_complete_llm_config() -> None:
+    """生产配置完整 LLM（真实端点）时可通过校验。"""
+
+    settings = _production_settings(
+        llm_api_key="production-llm-key-0123456789",
+        llm_base_url="https://api.production-llm.test/v1",
+        llm_model="production-llm",
+    )
+
+    assert settings.llm_api_key is not None
+    assert settings.llm_model == "production-llm"
+
+
+def test_non_dev_rejects_placeholder_llm_base_url() -> None:
+    """staging/production 禁止示例端点 api.example.com（审查 m5：运行期才失败不如启动即拦）。"""
+
+    with pytest.raises(ValidationError, match=r"api\.example\.com"):
+        _staging_settings(
+            llm_api_key="real-llm-key-0123456789",
+            llm_base_url="https://api.example.com/v1",
+            llm_model="example-llm",
+        )
+
+
+def test_llm_blank_strings_do_not_bypass_group_check() -> None:
+    """空白 base_url/model 不得绕过成组校验（审查 m6：bool(" ") 为 True）。"""
+
+    for field, value in (("llm_base_url", "   "), ("llm_model", "\t")):
+        kwargs: dict[str, object] = {
+            "llm_api_key": "dev-llm-key",
+            "llm_base_url": "https://api.example.com/v1",
+            "llm_model": "some-model",
+        }
+        kwargs[field] = value
+        with pytest.raises(ValidationError, match="成组出现"):
+            Settings(_env_file=None, **kwargs)  # type: ignore[arg-type]
