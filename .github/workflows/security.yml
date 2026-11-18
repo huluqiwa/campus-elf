@@ -90,4 +90,8 @@ jobs:
         working-directory: frontend
         run: |
           pnpm install --frozen-lockfile
-          pnpm audit --audit-level high
+          # TD-325：picomatch GHSA-fc5q-39xc-vjpf（ReDoS，high）官方无修复版本
+          # （patched=None，≤4.0.7 全受影响，latest 即 4.0.7）——devDeps 传递依赖
+          # （typescript-eslint/tinyglobby/vue-tsc 链，构建期 lint 场景，非运行时面）。
+          # 豁免先行（镜像后端 --ignore-vuln 先例）；官方发版后解除并收 TD-325。
+          pnpm audit --audit-level high --ignore GHSA-fc5q-39xc-vjpf
