@@ -166,6 +166,7 @@ LLM-05-CampusCompanionElf/
 - MinerU 4.0.12，`mineru[torch]`，GPU 单并发。
 - Langfuse **Server 4.63.0 + Python SDK 5.0.2**，独立主机；锁定 tag，不跟 `latest`。
 - Docker 镜像固定 tag/digest；`uv.lock`、`pnpm-lock.yaml` 入库。
+- LLM 调用层（2026-11-19 决策卡 1）：自建 `LlmPort` 协议 + `OpenAICompatLlm` 适配器（`AsyncOpenAI` 指向 `.env` 的 `LLM_BASE_URL`，SDK 内建重试关闭）；`app/harness/llm.py` 承载契约/错误码/熔断；测试用 `FakeLlm`（`tests/support/llm.py`）。零新增依赖（`openai>=2` M0 已预装）。
 
 ---
 
@@ -876,8 +877,15 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 
 ### 6.5 护栏
 
-- 输入：长度/编码/注入特征/PII/内容安全；输出：跨租 PII、系统提示词、工具/密钥/内网地址、XSS、伪造引用、违法/自伤不当内容。
-- 命中：安全话术 + `guard_events` + 指标；自伤支持性话术+线下求助，不诊断。
+- 输入：长度/编码/注入特征/PII/内容安全；输出按 **A7 七类红线**（2026-11-19 拍板，方案一）逐类判定：
+  1. 跨租/他人隐私与数据泄露（含「同一自然人」跨租关联、其他用户数据）
+  2. 系统提示词/内部指令/原始 CoT 泄露（不伪造思考内容同条）
+  3. 工具参数/内部地址/密钥凭证泄露
+  4. XSS 载荷与注入内容
+  5. 伪造引用（虚构 chunk_id/文档名/页码——引用校验在 AI-04 点，此处为输出层兜底）
+  6. 违法违规内容（犯罪指导/暴恐/色情等）
+  7. 自伤/心理危机不当应答——命中→支持性话术+线下求助资源，不诊断不评判（A24）
+- 落地：双层（系统提示词层红线约束 + 输出规则校验层）；命中→安全话术 + `guard_events` + 指标。
 - 引用校验：chunk_id 存在、属于当前租户/版本、与答案相关；失败修复或降级。
 
 ### 6.6 观测 / Langfuse
@@ -894,7 +902,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 
 ### 6.7 恢复
 
-- LLM：首 token 前最多 2 次重试；流中失败发 error + partial；熔断 5 次/60s 开 30s。
+- LLM（A8 映射，2026-11-19 落定）：单次调用连接 5s / 读（首 token）15s，回合级 30s 总预算由 Loop 层承担；首 token 前最多 2 次重试（超时/429/5xx/连接类，指数退避），401/403 与其他 4xx 不重试；流中失败不重试、发 error + partial；熔断 5 次/60s 开 30s（进程内 `LlmCircuitBreaker`，多 worker 边界见 TD-326）。
 - 嵌入/重排：超时降级；重排 300ms 跳过。
 - 工具：超时/权限/租户失败即返回结构化错误；不重试非幂等工具（MVP 全只读）。
 - 用户取消：取消下游任务；记录 `USER_CANCELLED`。
@@ -1047,6 +1055,8 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 - 分层：global / tenant / user。
 - 配置项：模型/嵌入/重排、切块/检索、限流/配额、功能开关、审批超时、内容安全、Langfuse 场景开关。
 - 密钥：`model_configs.api_key_enc` 信封加密；界面/日志掩码；轮换/撤销。
+  **MVP 阶段（M4）**：LLM 密钥走平台级 `.env` 的 `LLM_*`（`SecretStr`，不入库/不入日志/不回显）；
+  `model_configs` 表 + 信封加密 + 租户级覆盖**顺延 M6**（2026-11-19 决策卡 3，M4 无模型配置 UI，建表无入口）。
 - 变更：审批或双人确认；生产至少两个平台特权账号；单账号 break-glass（原因+审计+事后复核）。
 - 版本化：每次变更生成版本；缓存失效；回滚到上一版本。
 - DB 连接：只从环境变量/密钥管理读取，不进 UI。

@@ -31,6 +31,7 @@ from app.config import get_settings
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.db.selfcheck import verify_runtime_database
+from app.harness.llm import LlmPort, build_llm_port
 from app.harness.trace import InMemoryTraceSink, TraceSink
 from app.tenant.middleware import RequestContextMiddleware
 
@@ -45,8 +46,8 @@ MAX_KB_UPLOAD_BODY_BYTES = 308 * 1024 * 1024
 
 
 @asynccontextmanager
-async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """启动时对预发/生产执行数据库安全自检（TD-073）。"""
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """启动时对预发/生产执行数据库安全自检（TD-073）；shutdown 关闭 LLM 端口。"""
 
     if get_settings().app_env in {"staging", "production"}:
         await verify_runtime_database()
@@ -56,14 +57,23 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
             "METRICS_ENABLED=true：确认 /metrics 只对抓取端可达，禁止经 Nginx 对外暴露"
             "（deploy/observability/README.md）"
         )
-    yield
+    try:
+        yield
+    finally:
+        # LLM 端口持有 SDK/httpx 客户端；FakeLlm 无 aclose，跳过（审查 m7）。
+        llm_port = getattr(app.state, "llm_port", None)
+        aclose = getattr(llm_port, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
-def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
+def create_app(*, trace_sink: TraceSink | None = None, llm_port: LlmPort | None = None) -> FastAPI:
     """构造 FastAPI 应用。
 
     参数:
         trace_sink: 可选 trace sink（测试注入内存实现以断言 trace 落点）。
+        llm_port: 可选 LLM 端口（测试注入 FakeLlm）；缺省按 Settings 构建，
+            未配置 LLM 时为 None（对话链路调用期 fail-closed，M4-AI01a）。
 
     返回值:
         FastAPI 实例。
@@ -81,6 +91,7 @@ def create_app(*, trace_sink: TraceSink | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     application.state.trace_sink = trace_sink if trace_sink is not None else InMemoryTraceSink()
+    application.state.llm_port = llm_port if llm_port is not None else build_llm_port(settings)
 
     @application.exception_handler(RequestValidationError)
     async def _sanitized_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
