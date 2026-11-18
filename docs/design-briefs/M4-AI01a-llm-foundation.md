@@ -219,4 +219,39 @@ AI 护栏类别从严——**简报经用户确认后再编码**。七类红线�
 
 ## §12 实现注记（编码后回填）
 
-（待实现 PR 回填：落地差异、读数、审查处置。）
+### 12.1 落地文件
+
+- `backend/app/harness/llm.py`：`LlmErrorCode`（六码 + 安全话术表）/ `LlmMessage` / `LlmRequest` / `LlmResponse` / `LlmStreamEvent` / `LlmError`（签名级无透传通道）/ `LlmPort`（runtime_checkable Protocol）/ `LlmCircuitBreaker`（注入时钟）/ `OpenAICompatLlm`（complete+stream，SDK `max_retries=0`）/ `build_llm_port`（Settings→适配器装配）
+- `backend/app/config.py`：`LLM_*` 11 字段 + `_validate_llm_config`（成组校验 + URL 卫生 + 占位 key 非开发环境拒绝）
+- `backend/app/main.py`：`create_app(*, llm_port=None)` → `app.state.llm_port`
+- `backend/tests/support/llm.py`：`FakeLlm` + `FAKE_LLM_API_KEY`（TD-052 口径）
+- `backend/tests/harness/`：test_llm_contracts(10) / test_fake_llm(6) / test_llm_breaker(9) / test_llm_adapter(18)
+- `backend/tests/test_config.py` +7；`backend/tests/test_app_llm_assembly.py`（5）
+- `.env.example`：LLM 块增补（A8 默认值注释）
+
+### 12.2 与简报的偏离（全登记）
+
+1. 步 7 校验器比简报口径更严：简报只要求「配了 base_url 缺 key fail-fast」，实现为**全环境**成组校验 + `LLM_BASE_URL` URL 卫生（禁凭证/查询串/fragment——URL 里的凭证会进日志与异常）+ 占位 key 在非开发环境拒绝（对齐 JWT_SECRET 口径）；复审 m5/m6 后再补：非开发环境拒绝示例端点 `api.example.com`、空白串不绕过成组校验。
+2. 简报 D6 说「key 缺失→None，调用期报 LLM_NOT_CONFIGURED」：错误码已在分类中定义，但 `OpenAICompatLlm` 自身不抛它——未配置时 `build_llm_port` 返回 None，由 Loop 层在调用点 fail-closed（本点无 Loop，消费方在后续点接线）。
+3. 测试对 `.env` 干扰的适配：本机 `.env` 已带 `LLM_*` 值，`monkeypatch.delenv` 压不过 dotenv（env 只在「覆盖」时优先）；装配用例改用 `monkeypatch.setenv` 置空三件组（确定性胜出）。
+4. mypy strict 下 pydantic 插件对 Literal 字段的静态口径比运行时松（`role="developer"` 静态通过）——非法 role 的门禁在运行时 ValidationError，用例如实以此为准；extra 字段用 `model_validate` 驱动（静态参数检查本就管不到运行时边界）。
+5. 熔断器 `state` 属性：开路期满但试探未发生时仍报 `open`（试探动作发生在 `before_call`），比简报文字「半开」口径更保守如实。
+6. `tool_specs`/`tool_calls` 用 `tuple[dict[str, Any], ...]`（简报 §4 草图为 `list | None`）——不可变更契约字段用 tuple 更安全（审查员建议登记）。
+7. stream 重试的 `yielded` 只在 delta 产出后置位：provider 已发 finish/usage 后流断再重试成功时，消费方会看到重复 finish/usage——docstring 已钉「Loop 层以后到的 finish 为准」语义（审查 m2），Loop 点补双向用例。
+8. 熔断计失败口径含确定性 4xx（400/401/403）：MVP 平台级单 key 下 fail-fast 可接受；per-tenant key（M6）上线时收紧为只计瞬态类——登记 **TD-329**（审查 m3）。
+
+### 12.3 本地门禁读数（2026-11-19）
+
+- `ruff check app tests alembic`：0 错误
+- `mypy --no-incremental app tests`：285 文件 0 错误；`mypy --no-incremental scripts`：0 错误
+- `bandit -r app -x tests` / `bandit -r alembic -s B608`：0 issue
+- `alembic check`：无漂移（测试栈重启后 DB 落后于 head，先 `upgrade head` 再 check——环境事项，与本点无关）
+- 受影响子集 **164 passed**（审查前基线；harness 全部 + test_config + 装配 + skeleton_loop + body_limit + tenant_middleware + route_permission_manifest）；harness 目录 **91 passed**；审查后修复增量见 §12.4
+- 环境注记：MailHog 58025 被 Hyper-V 保留段占用（坑 #14）——本点无邮件用例未受影响；后续跑全量套件前需按坑 #14 处理
+
+### 12.4 审查处置（2026-11-19，独立审查第 1 轮：0B/2M/7m）
+
+- **M1（熔断半开试探名额在取消路径永久泄漏→熔断卡死）**：新增 `LlmCircuitBreaker.release_trial()`；适配器 complete/stream 增加 `except BaseException` 分支（CancelledError/GeneratorExit 走 release_trial，不记失败、不改开路状态）。修复用例：breaker 释放弧 3 条 + 适配器取消路径 1 条（取消后重新试探成功且状态闭合）。语义取舍：放弃≠失败（客户端取消不是 provider 故障，记失败会因用户断开误开熔断）。
+- **M2（`raise ... from None` 后 `__context__` 仍滞留 provider 异常，其 request/response 链含 Authorization key）**：新增 `_raise_sanitized(err)`（`try: raise err from None / finally: err.__context__ = None`）统一 complete/stream 两处抛错；模块 docstring 如实改写。反证用例补 `assert error.__context__ is None`。
+- **m1** 简报用例计数 10→11；**m2** 见 §12.2 第 7 条；**m3** 见 TD-329；**m4** 补请求体接线断言（model/temperature/max_tokens/tools）；**m5** 非开发环境拒绝示例端点 + 用例；**m6** strip 判空 + 用例；**m7** `OpenAICompatLlm.aclose()` + lifespan shutdown 钩子 + 用例。
+- 复测：ruff/mypy/bandit/受影响子集全绿后，同审查员复审修复增量。
