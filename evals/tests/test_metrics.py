@@ -65,6 +65,12 @@ def test_coverage_blank_points_excluded_from_denominator() -> None:
     assert context_coverage([hit], points, k=8) == 1.0
 
 
+def test_coverage_padded_point_still_matches() -> None:
+    # 复审二轮 m3：judged 存 strip 后值——带首尾空白的 point 仍按去空白匹配
+    hit = _chunk("宿舍管理规定", "宿舍管理规定 > 门禁与晚归", text="门禁时间为 23:00")
+    assert context_coverage([hit], ["  门禁时间为 23:00  "], k=8) == 1.0
+
+
 def test_recall_any_of_multiple_citations() -> None:
     hit_a = _chunk("奖学金评定办法", "奖学金评定办法 > 申请条件")
     hit_b = _chunk("图书馆借阅规则", "图书馆借阅规则 > 赔偿标准")

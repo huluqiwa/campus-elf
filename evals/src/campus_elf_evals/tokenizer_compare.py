@@ -12,12 +12,18 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
+import sys
 import time
 
-from app.kb.embedding import TEIEmbedder
+# 双运行方式兼容：脚本式（python <本文件路径>）靠 sys.path[0]；-m 式（uv run python
+# -m campus_elf_evals.tokenizer_compare）需手动挂同目录（grid_runner 是同目录散脚本
+# 而非包内导出）与 src 路径。grid_runner 导入时注入 BACKEND_ROOT，故 app 导入在其后。
+_HERE = pathlib.Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 
-# 脚本方式运行依赖 sys.path[0] 同目录导入；-m 方式需先挂 src 路径（跑批口径）
-from grid_runner import (
+from app.kb.embedding import TEIEmbedder  # noqa: E402  依赖 grid_runner 的 sys.path 注入
+from grid_runner import (  # noqa: E402
     QDRANT_URL,
     TEI_EMBED_URL,
     _cell_collection,
@@ -27,9 +33,9 @@ from grid_runner import (
     load_corpus,
     use_tokenizer,
 )
-from qdrant_client import AsyncQdrantClient
+from qdrant_client import AsyncQdrantClient  # noqa: E402
 
-from campus_elf_evals.metrics import aggregate
+from campus_elf_evals.metrics import aggregate  # noqa: E402
 
 REPORTS_DIR = EVALS_ROOT = pathlib.Path(__file__).resolve().parents[2] / "reports"
 BEST_CELL = (500, 0.15)  # 首轮网格最优格（报告确认后如不同可改参数重跑）

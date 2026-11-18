@@ -281,6 +281,8 @@ async def run_grid(
     *,
     smoke: bool,
     with_rerank: bool,
+    rerank_case_limit: int = 0,
+    report_path: pathlib.Path | None = None,
 ) -> dict[str, object]:
     docs = load_corpus()
     cases = load_cases(limit=3 if smoke else None)
@@ -291,6 +293,15 @@ async def run_grid(
         "cells": [],
         "notes": [],
     }
+
+    def save_report() -> None:
+        """逐格增量写盘（复审 Major 1：报告只在收尾写盘，中途 kill 即丢格级 JSON）。"""
+        if report_path is None:
+            return
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n"
+        )
+
     client = AsyncQdrantClient(url=QDRANT_URL)
     # 与生产 kb_embed_batch_size=8 同口径（TEI max-client-batch-size）
     embedder = TEIEmbedder(base_url=TEI_EMBED_URL, timeout_seconds=300, batch_size=8)
@@ -321,6 +332,7 @@ async def run_grid(
                 }
             )
             await client.delete_collection(collection)
+            save_report()
             print(
                 f"[grid] cs={chunk_size} ov={overlap}: recall@5={summary['recall_rate']:.3f} "
                 f"p@3={summary['precision']:.3f} mrr={summary['mrr']:.3f} cov={summary['coverage']:.3f}"
@@ -353,6 +365,7 @@ async def run_grid(
                     }
                 )
                 await client.delete_collection(collection)
+                save_report()
                 print(
                     f"[parent] parent={parent_size}: recall@5={summary['recall_rate']:.3f} "
                     f"p@3={summary['precision']:.3f} mrr={summary['mrr']:.3f} cov={summary['coverage']:.3f}"
@@ -383,14 +396,15 @@ async def run_grid(
                 parent_size=ps,
                 embedder=embedder,
             )
+            cases_rr = cases[:rerank_case_limit] if rerank_case_limit else cases
             if with_rerank:
                 rerank_results, degraded = await evaluate_cell_with_rerank(
-                    client, collection=collection, cases=cases, embedder=embedder
+                    client, collection=collection, cases=cases_rr, embedder=embedder
                 )
                 if degraded:
                     report["notes"].append(f"rerank[{tag}] 降级 case：{degraded}")  # type: ignore[union-attr]
             else:
-                rerank_results = await evaluate_cell(client, collection=collection, cases=cases, embedder=embedder)
+                rerank_results = await evaluate_cell(client, collection=collection, cases=cases_rr, embedder=embedder)
             rerank_summary = aggregate(rerank_results)
             report["cells"].append(  # type: ignore[union-attr]
                 {
@@ -404,6 +418,7 @@ async def run_grid(
                 }
             )
             await client.delete_collection(collection)
+            save_report()
             print(
                 f"[rerank={with_rerank} {tag}] cs={cs} ov={ov}: "
                 f"recall@5={rerank_summary['recall_rate']:.3f} p@3={rerank_summary['precision']:.3f} "
@@ -426,16 +441,33 @@ def main() -> None:
     parser.add_argument(
         "--tokenizer", choices=["jieba", "bigram"], default="jieba", help="sparse 分词器对照（TD-041）"
     )
+    parser.add_argument(
+        "--rerank-subset",
+        type=int,
+        default=0,
+        help="rerank 对照组降规模为前 N 个 case（0=全量；CPU rerank 全量双组需小时级——简报 §8 注记）",
+    )
     args = parser.parse_args()
     global _TOKENIZER_NAME
     _TOKENIZER_NAME = args.tokenizer
     use_tokenizer(args.tokenizer)
-    report = asyncio.run(run_grid(smoke=args.smoke, with_rerank=not args.no_rerank))
+    REPORTS_DIR.mkdir(exist_ok=True)
+    report_path = REPORTS_DIR / f"td294-grid-{time.strftime('%Y%m%d')}.json"
+    report = asyncio.run(
+        run_grid(
+            smoke=args.smoke,
+            with_rerank=not args.no_rerank,
+            rerank_case_limit=args.rerank_subset,
+            report_path=None if args.smoke else report_path,
+        )
+    )
+    if not args.smoke:
+        print(f"report written: {report_path}", flush=True)
     if not args.smoke:
         REPORTS_DIR.mkdir(exist_ok=True)
         out = REPORTS_DIR / f"td294-grid-{time.strftime('%Y%m%d')}.json"
         out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
-        print(f"report written: {out}")
+        print(f"report written: {out}", flush=True)
 
 
 if __name__ == "__main__":

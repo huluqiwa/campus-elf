@@ -65,10 +65,11 @@ def context_coverage(
 ) -> float:
     """top-k 块文本覆盖 expected_points 关键短语的比例（包含近似，TD-294a）。
 
-    空白 point 不可覆盖——排除出分母（复审 m12；31 条用例无空白 point，边界防御）。
+    空白 point 不可覆盖——排除出分母；judged 存 strip 后值（复审二轮 m3：带首尾空白的
+    point 仍按去空白匹配）。31 条用例无空白 point，边界防御。
     """
     window = retrieved[:k]
-    judged = [point for point in expected_points if point.strip()]
+    judged = [point.strip() for point in expected_points if point.strip()]
     if not judged:
         return 0.0
     haystack = "\n".join(chunk.text for chunk in window)
