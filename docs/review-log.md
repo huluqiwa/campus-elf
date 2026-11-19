@@ -1093,3 +1093,16 @@
 - **第 2 轮复审（2026-11-19，同审查员，对修复增量）**：**0 Blocker / 0 Major / 3 Minor**，结论「可以提交」。M1/M2 用例真实性核验通过（M1 弧=Starlette 断开同形态；M2 真走 timeout 分支）；M3 wait_for 落点/两个 TimeoutError 分支互不重叠/简报修正全部核验。3 条一行级 Minor 当场处置：取消用例补 `audit.flushed == 0` 断言（TD-018 口径钉住）、loop docstring 超时措辞随 M3 修正、简报 §10.1/§10.3 计数回填终态读数。
 - 修复后复测读数（实现者实测）：loop 单测 **11 passed**（8+3 新增）；受影响全子集 **201 passed**（harness 全部 + chat_retrieval 单元/集成 + audit_db + SSE 端点 + config + 装配 + chat_rbac + bs_m0_01 + sql_baseline + BS-M4-01/02）；ruff 0 / mypy tests 162 文件 0 / bandit×2 0 / alembic check 无漂移。
 - 判例沉淀：①测试假端口形状必须与真实回包同构（本点扁平 stub vs 真实 payload 嵌套 → KeyError→TOOL_ERROR 假绿）；②「登记失真也是缺陷」（简报回填文字与实现不符按 Major 处理——偏离登记必须编码后核对实现）；③流式场景「改写」类护栏与 TTFT 冲突（超范围引用只能告警不能撤回，全量改写归 AI-09 需重新设计——TD-332）；④被删测试的覆盖必须逐弧清点承接（空壳删除后取消/超时两弧漏承接被审查拦下）。
+
+
+### M4 AI01c ReAct 路径（LLM 路由/多意图/预算执行）
+
+- 日期：2026-11-20
+- 范围：分支 `feature/m4-ai01c-react-loop`（简报 commit `13acc47` + 实现 `4a3b668` + 复审修复 `4aa9784`，25 文件 +2466/-48 + 修复增量 3 文件）
+- 对照：简报 `docs/design-briefs/M4-AI01c-react-loop.md`（决策卡五张经用户拍板全按推荐；D1-D5 子决策；§10 实现注记）；design §6.2/§6.3/§7.5/ADR-002；requirements §5.1
+- **第 1 轮独立审查（2026-11-20，对 staged diff）**：**0 Blocker / 1 Major / 7 Minor**，结论「修复后可提交」。审查员实测 153+28 全绿（BS-M4-03 真实栈 30.9s 非 skip）。M1 TD-334 为「纪律性收口」而非「结构性收口」——orchestrator.run permissions 带默认值，漏传即静默越权（fail-open），签名层不强制。7 Minor：m1 requirements/design §6.3 回写缺失；m2 token 预算维度只计数不执行（can_spend_tokens 零调用方）；m3 路由降级矩阵缺 llm_port=None 弧；m4 权限拒绝断言未锚定 PERMISSION_DENIED（SSE 面刻意无 error_code，应走 trace span）；m5 OBSERVE 回喂丢弃 assistant 决策历史未显式登记；m6 ReAct 30s 超时把客户端背压计入预算（与快路径「只包首 chunk await」口径不一致）；m7 while-else 死代码/import re 顶置/docstring 陈旧。
+- **修复**：M1→orchestrator.run 去默认值（签名强制）+ main.py ChatTurnRunner 协议同步必传 + TD-334 处置补注；m1→requirements AI-01c 落地注记 + design §6.3 更新；m2→TD-338；m3→router None 弧单测；m4→PERMISSION_DENIED 锚定；m5→TD-339；m6→TD-340；m7→死代码/顶置/docstring。
+- **修复过程发现**：m4 首次修复的编辑锚点静默失配（replace 无 assert 假成功）——第 2 轮复审抓出「处置记录声称已修、断言实际未改」（**登记失实比未修更危险**，续 AI-01b「登记失真也是缺陷」判例）。真修：两处测试从 trace span 锚定 `attributes["error_code"]=="PERMISSION_DENIED"`；orchestrator 测试工厂改为返回 sink 供断言。
+- **第 2 轮复审（2026-11-20，同审查员，以 commit 4a3b668+增量比对）**：**0 Blocker / 1 Major（m4 处置失实）/ Minor 0**，其余 M1/m1/m2/m3/m5/m6/m7 全部核验落实；BS-M4 断言修正判定合理非放水（零泄漏三断言原样保留）。真修后：router/react/orchestrator **21 passed**、受影响回归 **175 passed**、ruff 0、mypy 307 文件 0。
+- 终态读数：受影响全子集（含 BS-M4-01/02/03 真实栈）**201+28=229→复审后 232 量级**（文件集合口径）；ruff 0 / mypy 307 文件 0 / bandit×2 0 / alembic check 无漂移。
+- 判例沉淀：①**replace 无 assert=静默假成功**——编辑锚点必须 assert 命中（本次 m4 假修复被复审逮住）；②「登记失实比未修更危险」二度成立；③**公共 API 的可选默认值是权限 fail-open 入口**——「统一入口」的签名强制才是结构性收口（TD-334 最终形态）；④协议（Protocol）方法签名必须与 async generator 函数的实际调用形态一致（`def run -> AsyncIterator` 而非 `async def run`）。
