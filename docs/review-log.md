@@ -1106,3 +1106,13 @@
 - **第 2 轮复审（2026-11-20，同审查员，以 commit 4a3b668+增量比对）**：**0 Blocker / 1 Major（m4 处置失实）/ Minor 0**，其余 M1/m1/m2/m3/m5/m6/m7 全部核验落实；BS-M4 断言修正判定合理非放水（零泄漏三断言原样保留）。真修后：router/react/orchestrator **21 passed**、受影响回归 **175 passed**、ruff 0、mypy 307 文件 0。
 - 终态读数：受影响全子集（含 BS-M4-01/02/03 真实栈）**201+28=229→复审后 232 量级**（文件集合口径）；ruff 0 / mypy 307 文件 0 / bandit×2 0 / alembic check 无漂移。
 - 判例沉淀：①**replace 无 assert=静默假成功**——编辑锚点必须 assert 命中（本次 m4 假修复被复审逮住）；②「登记失实比未修更危险」二度成立；③**公共 API 的可选默认值是权限 fail-open 入口**——「统一入口」的签名强制才是结构性收口（TD-334 最终形态）；④协议（Protocol）方法签名必须与 async generator 函数的实际调用形态一致（`def run -> AsyncIterator` 而非 `async def run`）。
+
+### M4 AI09 输入/输出护栏全量（七类红线）
+
+- 日期：2026-11-20
+- 范围：分支 `feature/m4-ai09-guards`（简报 commit `029f2e0` + 实现 `6207fd9` + 复审修复 `d51a445`，25 文件 +1720/-64）
+- 对照：简报 `docs/design-briefs/M4-AI09-guards.md`；design §6.5/§6.2；requirements A7
+- **第 1 轮独立审查（2026-11-20）**：**0 Blocker / 5 Major / 6 Minor**。M1 哨兵 120 字符强制切分可拆载荷穿透（实证）；M2 尾片 blocking 被 loop 丢弃；M3 自伤未放行检索（偏离 D5）；M4 ReactLoop 不 flush guard_events；M5 文档回写缺失。6 Minor 逐类细节略。
+- **修复**：M1→尾部 24 字符重叠 + 修 M1 编辑吃掉 feed return bug；M2→tail.terminated 处置；M3→**产品口径修正**（安全优先 A24：话术+终止不放行检索，§10.4 登记）；M4→react_loop flush；M5→design/TD/requirements 回写；m1~m6 全处置。
+- **修复后复测**：护栏单测 28 + harness **39** + 受影响回归 **175** + BS-M4-04 **四弧全绿** + ruff/mypy/bandit/alembic 全绿。
+- 判例：①复杂多路径编辑必须 import 验证 + 逐用例跑（M1 编辑吃掉 return 导致 5 用例崩）；②自伤场景安全优先（A24 宁枉勿纵）——D5 偏离登记留痕。
