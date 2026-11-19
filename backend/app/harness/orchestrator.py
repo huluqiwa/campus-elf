@@ -91,6 +91,9 @@ class ChatOrchestrator:
                     results=input_hits,
                 )
             script = safety_script_for({r.rule for r in input_hits})
+            # M3 产品口径修正（安全优先 A24 宁枉勿纵）：自伤场景话术+终止
+            # （不放行检索——危机时刻延迟即风险；检索结果经 GENERATE 后仍需过输出
+            # 护栏自伤类可能再命中不可控）。偏离 D5 原口径已在简报 §10.4 登记留痕。
             yield AgentEvent(type=AgentEventType.DELTA, payload={"text": script})
             yield AgentEvent(
                 type=AgentEventType.DONE,
@@ -100,6 +103,8 @@ class ChatOrchestrator:
                     "conversation_id": str(conversation),
                     "tokens_in": 0,
                     "tokens_out": 0,
+                    "first_token_ms": 0,
+                    "latency_ms": 0,
                     "stop_reason": StopReason.GUARD_BLOCK.value,
                 },
             )

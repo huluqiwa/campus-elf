@@ -241,6 +241,17 @@ def parse_sse(text_body: str) -> list[tuple[str, dict[str, Any]]]:
     return events
 
 
+async def _guard_event_rows(env: KbEnv, direction: str) -> list[dict[str, Any]]:
+    """库内 guard_events 行（字段级断言——审查 m5）。"""
+
+    return await rows(
+        "select rule, severity, action, direction, excerpt_redacted "
+        "from guard_events where tenant_id = :t and direction = :d",
+        t=str(env.tenant_a),
+        d=direction,
+    )
+
+
 async def _guard_event_count(env: KbEnv, direction: str) -> int:
     """库内 guard_events 计数（审计纪律断言通道——await 版）。"""
 
@@ -277,7 +288,13 @@ async def test_bs_m4_04_injection_input_blocked(
     assert any("无法回答" in text for text in deltas)
     assert events[-1][1]["stop_reason"] == "GUARD_BLOCK"
     assert all(name != "citation" for name, _ in events)  # 不触检索
-    assert await _guard_event_count(env, "input") >= 1
+    guard_rows = await _guard_event_rows(env, "input")
+    assert any(
+        row["rule"] == "input.injection" and row["action"] == "block"
+        and row["severity"] == "high"
+        for row in guard_rows
+    )
+    assert all("忽略之前" not in row["excerpt_redacted"] for row in guard_rows)  # D3 脱敏
 
 
 async def test_bs_m4_04_xss_output_redacted(
@@ -318,7 +335,12 @@ async def test_bs_m4_04_xss_output_redacted(
     assert "<script" not in full
     assert "[REDACTED:output.xss]" in full
     assert "需要发票" in full  # 干净内容保留
-    assert await _guard_event_count(env, "output") >= 1
+    guard_rows = await _guard_event_rows(env, "output")
+    assert any(
+        row["rule"] == "output.xss" and row["action"] == "redact"
+        for row in guard_rows
+    )
+    assert all("<script" not in row["excerpt_redacted"] for row in guard_rows)  # D3 脱敏
 
 
 async def test_bs_m4_04_self_harm_input_supportive(

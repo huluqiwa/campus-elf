@@ -851,7 +851,7 @@ GET  /api/v1/platform/tenants/{id}/review-records
 ```text
 Fast Path（M4-AI01b 落地）：输入轻检 → ROUTE（规则直通单意图，零 LLM 调用）→
 RETRIEVE（kb.search 工具 + 证据文本 PG 回查）→ GENERATE（LLM 流式）→
-VERIFY（引用序号一致性；超范围告警不改写——delta 已发不可撤回，全量改写归 AI-09）→
+VERIFY（引用序号一致性——AI-09 哨兵接管改写，TD-332 收口）→
 输出轻检（占位，AI-09）→ DONE
 ReAct（M4-AI01c 落地）：`ChatOrchestrator` 统一入口——发 meta/step(route)（首事件立出）
 → LLM 路由（route_v1 分类 → `RouteResult.intents[]`；失败降级单意图）→ 分派：
@@ -898,6 +898,12 @@ navigate 结果作为入口证据并入 citations。ctx 权限从 principal 派�
   6. 违法违规内容（犯罪指导/暴恐/色情等）
   7. 自伤/心理危机不当应答——命中→支持性话术+线下求助资源，不诊断不评判（A24）
 - 落地：双层（系统提示词层红线约束 + 输出规则校验层）；命中→安全话术 + `guard_events` + 指标。
+  **M4-AI09 落地口径**：七类→检测器映射见 `harness/guards/rules.py`（常量内置——D4）；
+  哨兵缓冲（句末标点+120 字符切片，M1 修正后保留尾部 24 字符重叠）；`guard_events` 表
+  落库（FORCE RLS，仅追加；excerpt_redacted 为静态 reason——D3 缩窄登记 §10.4）；
+  Prometheus `campus_guard_hits_total{rule,severity,direction}`；自伤场景=支持性话术
+  +GUARD_BLOCK 终止（M3 偏离 D5「放行检索」——安全优先登记 §10.4）；
+  输入护栏在 orchestrator 层路由之前执行。
 - 引用校验：chunk_id 存在、属于当前租户/版本、与答案相关；失败修复或降级。
 
 ### 6.6 观测 / Langfuse

@@ -34,6 +34,9 @@ def _ends_with_sentence(text: str) -> bool:
     return bool(text) and text[-1] in SENTENCE_ENDINGS
 
 
+_FORCE_SPLIT_OVERLAP = 24  # M1：强制切分保留尾部重叠（防载荷被切点拆散穿透）
+
+
 class StreamSentinel:
     """滚动哨兵缓冲（单回合单实例；纯内存无 IO——处置归 loop）。"""
 
@@ -50,6 +53,12 @@ class StreamSentinel:
         self._pending += delta
         if not (_ends_with_sentence(self._pending) or len(self._pending) >= MAX_SLICE_CHARS):
             return GuardedChunk()
+        if len(self._pending) >= MAX_SLICE_CHARS and not _ends_with_sentence(self._pending):
+            # M1：强制切分保留尾部重叠——载荷可能被切点拆散（`<scr`+`ipt>`）
+            overlap = self._pending[-_FORCE_SPLIT_OVERLAP:]
+            chunk = self._flush_pending()
+            self._pending = overlap
+            return chunk
         return self._flush_pending()
 
     def flush_final(self) -> GuardedChunk:

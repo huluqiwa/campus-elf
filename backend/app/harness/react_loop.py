@@ -291,6 +291,7 @@ class ReactLoop:
                     },
                 )
                 await self._flush_audit()
+                await self._flush_guards()
                 finish_trace(
                     stop_reason=StopReason.CAPABILITY_FALLBACK,
                     error_code="LLM_NOT_CONFIGURED",
@@ -423,6 +424,7 @@ class ReactLoop:
                         },
                     )
                     await self._flush_audit()
+                    await self._flush_guards()
                     finish_trace(
                         stop_reason=StopReason.CAPABILITY_FALLBACK,
                         error_code=None,
@@ -474,6 +476,12 @@ class ReactLoop:
             tail = sentinel.flush_final()
             if tail.results:
                 guard_hits.extend(tail.results)
+            if tail.terminated:
+                # M2：尾片 blocking 命中（flush_final 终止）——同 feed 期处置
+                yield event(
+                    AgentEventType.DELTA,
+                    {"text": tail.replacement_text or ""},
+                )
             if guard_hits:
                 for hit in guard_hits:
                     record_guard_hit(hit.rule, hit.severity, "output")
@@ -496,6 +504,7 @@ class ReactLoop:
                     },
                 )
                 await self._flush_audit()
+                await self._flush_guards()
                 finish_trace(
                     stop_reason=StopReason.GUARD_BLOCK, error_code=None,
                     tokens_in=tokens_in or 0, tokens_out=tokens_out or 0,
@@ -528,6 +537,7 @@ class ReactLoop:
                 },
             )
             await self._flush_audit()
+            await self._flush_guards()
             finish_trace(
                 stop_reason=StopReason.FINAL_ANSWER,
                 error_code=None,
@@ -550,6 +560,7 @@ class ReactLoop:
                 },
             )
             await self._flush_audit()
+            await self._flush_guards()
             finish_trace(
                 stop_reason=None, error_code=exc.code.value, tokens_in=0, tokens_out=0
             )
@@ -564,6 +575,7 @@ class ReactLoop:
                 },
             )
             await self._flush_audit()
+            await self._flush_guards()
             finish_trace(
                 stop_reason=StopReason.TIMEOUT, error_code="LLM_TIMEOUT", tokens_in=0, tokens_out=0
             )
@@ -579,6 +591,7 @@ class ReactLoop:
                 },
             )
             await self._flush_audit()
+            await self._flush_guards()
             finish_trace(stop_reason=None, error_code="STREAM_ERROR", tokens_in=0, tokens_out=0)
 
     async def _stream_with_first(
@@ -589,6 +602,13 @@ class ReactLoop:
         yield first
         async for llm_event in stream:
             yield llm_event
+
+    async def _flush_guards(self) -> None:
+        """M4：ReAct 路径护栏事件落库（与快路径 flush_guards 同款）。"""
+
+        flush = getattr(self._guard_events_sink, "flush", None)
+        if flush is not None:
+            await flush()
 
     async def _flush_audit(self) -> None:
         """回合收尾审计落库（取消路径不 flush——TD-018 口径）。"""

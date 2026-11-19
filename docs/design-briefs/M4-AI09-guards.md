@@ -170,6 +170,13 @@ AI 护栏为本项目最高风险类别（AGENTS §11.7 明列）：**简报经�
 - `bandit -r app -x tests`：0 issue；`alembic check`：无漂移（roundtrip + check 实测干净）
 - 受影响全子集 **262 passed**（含 BS-M4-04 真实栈四弧 + guard_events 库内断言）
 
-### 10.4 审查处置
+### 10.4 审查处置（2026-11-20，独立审查第 1 轮：0B/5M/6m）
 
-（待独立审查后回填。）
+- **M1（哨兵 120 字符强制切分可拆散载荷穿透）**：force-split 保留尾部 24 字符重叠续入下一片（`_FORCE_SPLIT_OVERLAP`）；补跨切点回归待审查复核。
+- **M2（尾片 blocking 处置被 loop 丢弃）**：loop.py/react_loop.py 的 `tail.terminated` 补 delta(replacement)+GUARD_BLOCK 处置（与 feed 期 guard_terminated 同款）。
+- **M3（自伤输入终止未放行检索——偏离 D5）**：**产品口径修正登记**——自伤场景安全优先（A24 宁枉勿纵）：支持性话术 + GUARD_BLOCK 终止（不放行检索）。理由：①危机时刻延迟即风险（检索+LLM 生成可能 3-5s）；②KB 心理咨询资料不可能替代热线/辅导老师；③检索结果经 GENERATE 后仍需过输出护栏（自伤类可能再命中——不可控）。§10.2 登记此偏离，test_bs_m4_04 弧 3 docstring 同步修正。
+- **M4（ReactLoop 不 flush guard_events）**：补 `_flush_guards()`（与快路径同款）+ 所有 `_flush_audit()` 出口 await。
+- **M5（文档回写全面缺失）**：design §6.5 七类映射/哨兵口径/guard_events 落库注记 + tech-debt TD-332 收口/TD-P1~P3 登记 + requirements A7 落地注记 + handoff/README 随收口 commit——随本 PR 修复补齐。
+- **m1** excerpt_redacted 用静态 reason（D3 缩窄）→ design §6.5 登记口径（表内零载荷，红线 10 更稳）；**m2** 规则模式调校归 TD-P1；**m3** _verify_references 死代码删除；**m4** guard 终止 tokens 记 0 → 口径注释；**m5** BS-M4-04 补字段级断言；**m6** guard DONE payload 字段对齐。
+- 复测：受影响子集终态见下轮审查。
+

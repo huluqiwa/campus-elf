@@ -440,12 +440,19 @@ class FastPathLoop:
             tail = sentinel.flush_final()
             if tail.results:
                 record_guard("output", tail.results)
+            if tail.terminated:
+                # M2：尾片 blocking 命中（flush_final 终止）——与 feed 期 guard_terminated 同款处置
+                yield event(
+                    AgentEventType.DELTA,
+                    {"text": tail.replacement_text or ""},
+                )
             if guard_terminated:
                 yield event(
                     AgentEventType.DONE,
                     {
                         "turn_id": str(turn_id),
                         "trace_id": trace_id_resolved,
+                        # guard 终止：tokens 按已消费计（usage 可能未到——口径固定为 0 或已报数）
                         "tokens_in": tokens_in if tokens_in is not None else 0,
                         "tokens_out": tokens_out if tokens_out is not None else 0,
                         "first_token_ms": first_token_ms or 0,
@@ -544,22 +551,6 @@ class FastPathLoop:
             blocks.append(f"[{index}]（{source}）\n{item.text}")
         return "\n\n".join(blocks)
 
-    def _verify_references(self, answer_parts: list[str], evidence_count: int) -> None:
-        """VERIFY：引用序号一致性检测（超出条目数 → 告警不改写）。
-
-        delta 已流式发出、不可撤回；本防线只记录 guard 告警供 AI-09 全量护栏
-        接管前的观测（简报 §10 预判 TD-P3 的过渡口径）。
-        """
-
-        answer = "".join(answer_parts)
-        out_of_range = [
-            int(match) for match in _REF_PATTERN.findall(answer) if int(match) > evidence_count
-        ]
-        if out_of_range:
-            logger.warning(
-                "LLM_GUARD_REF_OUT_OF_RANGE refs=%s evidence=%s", out_of_range, evidence_count
-            )
-
     def _llm_safe_text(self, code: str) -> str:
         """error 事件话术（固定安全文案映射；不透传 provider 细节）。"""
 
@@ -568,7 +559,7 @@ class FastPathLoop:
             "LLM_BREAKER_OPEN": "AI 服务暂时不可用，请稍后重试",
             "LLM_RATE_LIMITED": "提问过于频繁，请稍后重试",
             "LLM_AUTH": "AI 服务鉴权失败，请联系管理员",
-            "LLM_NOT_CONFIGURED": LLM_UNCONFIGURED_TEXT,
+            "LLM_NOT_CONFIGURED": "AI 回答能力尚未配置，请联系管理员",
         }.get(code, "回答生成失败，请重试")
 
     async def _flush_audit(self) -> None:
