@@ -13,9 +13,13 @@ meta 重复）：
 
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 from uuid import UUID, uuid4
 
-from app.harness.contracts import AgentEvent, AgentEventType
+from app.core.metrics import record_guard_hit
+from app.harness.contracts import AgentEvent, AgentEventType, StopReason
+from app.harness.guards.input import detect_input
+from app.harness.guards.scripts import safety_script_for
 from app.harness.loop import FastPathLoop
 from app.harness.react_loop import ReactLoop
 from app.harness.router import LlmRouter
@@ -38,10 +42,12 @@ class ChatOrchestrator:
         router: LlmRouter,
         fast_loop: FastPathLoop,
         react_loop: ReactLoop,
+        guard_events_sink: Any | None = None,
     ) -> None:
         self._router = router
         self._fast_loop = fast_loop
         self._react_loop = react_loop
+        self._guard_events_sink = guard_events_sink
 
     async def run(
         self,
@@ -74,6 +80,33 @@ class ChatOrchestrator:
             type=AgentEventType.STEP,
             payload={"stage": "route", "label": "正在理解问题"},
         )
+        # 输入护栏（AI-09）：路由之前——安全/成本双优（注入/自伤不消耗路由 LLM 调用）
+        input_hits = detect_input(message)
+        if input_hits:
+            for result in input_hits:
+                record_guard_hit(result.rule, result.severity, "input")
+            if self._guard_events_sink is not None:
+                self._guard_events_sink.append(
+                    tenant_id=tenant_id, trace_id=trace_id, direction="input",
+                    results=input_hits,
+                )
+            script = safety_script_for({r.rule for r in input_hits})
+            yield AgentEvent(type=AgentEventType.DELTA, payload={"text": script})
+            yield AgentEvent(
+                type=AgentEventType.DONE,
+                payload={
+                    "turn_id": str(turn_id),
+                    "trace_id": trace_id,
+                    "conversation_id": str(conversation),
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "stop_reason": StopReason.GUARD_BLOCK.value,
+                },
+            )
+            flush = getattr(self._guard_events_sink, "flush", None)
+            if flush is not None:
+                await flush()
+            return
         outcome = await self._router.route(message)
         if outcome.degraded:
             logger.warning("路由降级（simple 兜底）：intent=%s", outcome.route.primary_capability)

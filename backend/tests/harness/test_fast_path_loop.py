@@ -5,7 +5,6 @@
 """
 
 import asyncio
-import logging
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 from uuid import uuid4
@@ -268,7 +267,8 @@ async def test_llm_failure_after_delta_marks_partial() -> None:
     fake = FakeLlm(
         stream_scripts=[
             [
-                LlmStreamEvent(kind="delta", text_delta="部分回答"),
+                LlmStreamEvent(kind="delta", text_delta="部分回答。"),
+                LlmStreamEvent(kind="delta", text_delta="补充"),
                 LlmError(LlmErrorCode.PROVIDER_ERROR, retryable=False),
             ]
         ]
@@ -281,6 +281,7 @@ async def test_llm_failure_after_delta_marks_partial() -> None:
     error = events[-1].payload
     assert events[-1].type.value == "error"
     assert error["code"] == "LLM_PROVIDER_ERROR"
+    # 哨兵缓冲后「partial」= 已发出的 delta（句末切片发出；缓冲中的未计）
     assert error["partial"] is True
     assert error["retryable"] is False
 
@@ -302,10 +303,10 @@ async def test_retrieval_infra_failure_yields_retryable_error() -> None:
     assert fake.requests == []
 
 
-async def test_out_of_range_reference_is_flagged_not_crashing(
+async def test_out_of_range_reference_removed_by_sentinel(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """答案引用超范围：不崩溃、done 正常；guard 告警记录（AI-09 全量护栏前最小防线）。"""
+    """答案引用超范围：哨兵缓冲改写剔除（TD-332 收口）——done 正常、无崩溃。"""
 
     retriever = StubRetriever(
         hits=[hit_meta("c1")], evidence=[evidence("c1", "内容。")]
@@ -319,13 +320,15 @@ async def test_out_of_range_reference_is_flagged_not_crashing(
         ]
     )
     loop, _sink, _audit = build_loop(fake, retriever)
-    with caplog.at_level(logging.WARNING, logger="app.harness.loop"):
-        events = await collect(
-            loop.run(tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(), message="校历")
-        )
+    events = await collect(
+        loop.run(tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(), message="校历")
+    )
 
     assert types_of(events)[-1] == "done"
-    assert "LLM_GUARD_REF_OUT_OF_RANGE" in caplog.text
+    deltas = [event.payload["text"] for event in events if event.type.value == "delta"]
+    full_answer = "".join(deltas)
+    assert "[5]" not in full_answer  # 超范围引用被剔除
+    assert "[1]" in full_answer  # 范围内引用保留
 
 
 async def test_trace_recorded_with_prompt_metadata() -> None:
@@ -358,7 +361,7 @@ async def test_client_disconnect_records_user_cancelled() -> None:
     fake = FakeLlm(
         stream_scripts=[
             [
-                LlmStreamEvent(kind="delta", text_delta="部分"),
+                LlmStreamEvent(kind="delta", text_delta="部分。"),  # 句末标点：哨兵立即发出
                 LlmStreamEvent(kind="delta", text_delta="剩余"),
                 LlmStreamEvent(kind="finish", finish_reason="stop"),
             ]

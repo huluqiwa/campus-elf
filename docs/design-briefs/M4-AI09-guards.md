@@ -142,4 +142,34 @@ AI 护栏为本项目最高风险类别（AGENTS §11.7 明列）：**简报经�
 
 ## §10 实现注记（编码后回填）
 
-（待实现 PR 回填：落地差异、读数、审查处置。）
+### 10.1 落地文件
+
+- `app/harness/guards/rules.py`：注入/违法/自伤输入模式 + 提示词泄露/密钥/内网地址/XSS/身份证/伪造引用输出模式（常量内置——D4）
+- `app/harness/guards/input.py`：`detect_input`（注入/违法 block、自伤标记、自身 PII 放行——卡 4-A）
+- `app/harness/guards/output.py`：`scan_output`（七类 + OutputScan 含 blocking/redacted_text——D3）
+- `app/harness/guards/stream_guard.py`：`StreamSentinel`（滚动缓冲句末标点+120 字符切片/blocking 终止/redact 发出/尾片冲刷——卡 1-A/D1）
+- `app/harness/guards/scripts.py`：安全话术常量（injection/illegal/self_harm/generic）
+- `app/db/models/ai.py`：`GuardEvent` 模型（AI 域首表）
+- `alembic/versions/e9f0a1b2c3d4_*.py`：guard_events 迁移（FORCE RLS + 仅追加不授 update/delete）
+- `app/harness/guard_events_db.py`：`GuardEventsDbSink`（append 缓冲 + async flush 落库）
+- `app/core/metrics.py`：`campus_guard_hits_total`（rule/severity/direction）
+- `app/harness/orchestrator.py`：输入护栏前移（**路由之前**——审查后修正，安全/成本双优）
+- `app/harness/loop.py` + `react_loop.py`：GENERATE 哨兵接线（VERIFY 升级改写——TD-332 收口）+ flush_guards
+- `app/harness/chat_assembly.py`：guard_events_sink 装配传递
+
+### 10.2 与简报的偏离（全登记）
+
+1. **输入护栏从 loop 层前移到 orchestrator 层**（§5 步 5 写「loop 接线」）：orchestrator.run 里路由之前——安全（注入不触路由 LLM）+成本（不消耗路由调用）双优；loop 层的输入护栏段已移除避免重复拦截。
+2. **prompt 三模板外新增第四个模板 `react_think_v1`**（AI-01c §10.2-1 已登记——THINK 指令需独立版本化）。
+3. **flush_guards 为 async + await**（原 ensure_future 不保证落库完成——BS-M4-04 集成实测捕获）。
+4. **快路径 VERIFY 升级**：`_verify_references` 告警方法删除（哨兵接管改写——TD-332 正式收口），`test_out_of_range_reference` 改为断言 [9] 剔除。
+
+### 10.3 门禁读数（2026-11-20，终态）
+
+- `ruff check app tests alembic`：0 错误；`mypy --no-incremental app tests`（319 文件）0 错误
+- `bandit -r app -x tests`：0 issue；`alembic check`：无漂移（roundtrip + check 实测干净）
+- 受影响全子集 **262 passed**（含 BS-M4-04 真实栈四弧 + guard_events 库内断言）
+
+### 10.4 审查处置
+
+（待独立审查后回填。）

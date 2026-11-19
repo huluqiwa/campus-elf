@@ -2,6 +2,7 @@
 
 from app.config import Settings
 from app.harness.audit_db import DbAuditSink
+from app.harness.guard_events_db import GuardEventsDbSink
 from app.harness.llm import LlmPort
 from app.harness.loop import FastPathLoop
 from app.harness.orchestrator import ChatOrchestrator
@@ -37,12 +38,14 @@ def build_chat_loop(
     )
     registry = build_default_registry()
     audit_sink = DbAuditSink(actor_realm="tenant")
+    guard_events_sink = GuardEventsDbSink()
     fast_loop = FastPathLoop(
         llm_port=llm_port,
         retriever=retriever,
         prompt_registry=registry,
         trace_sink=trace_sink,
         audit_sink=audit_sink,
+        guard_events_sink=guard_events_sink,
     )
     react_loop = ReactLoop(
         llm_port=llm_port,
@@ -50,10 +53,14 @@ def build_chat_loop(
         prompt_registry=registry,
         trace_sink=trace_sink,
         audit_sink=audit_sink,
+        guard_events_sink=guard_events_sink,
         max_decisions=settings.react_max_model_decisions,
         max_tool_calls=settings.react_max_tool_calls,
         max_retrievals=settings.react_max_retrievals,
         token_budget=settings.react_token_budget,
     )
     router = LlmRouter(llm_port=llm_port, prompt_registry=registry)
-    return ChatOrchestrator(router=router, fast_loop=fast_loop, react_loop=react_loop)
+    return ChatOrchestrator(
+        router=router, fast_loop=fast_loop, react_loop=react_loop,
+        guard_events_sink=guard_events_sink,
+    )

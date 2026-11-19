@@ -23,19 +23,23 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 from uuid import UUID, uuid4
 
+from app.core.metrics import record_guard_hit
 from app.harness.audit import AuditSink
 from app.harness.chat_tools import KB_SEARCH, TurnToolState, build_turn_tools
 from app.harness.contracts import (
     AgentEvent,
     AgentEventType,
+    GuardResult,
     StopReason,
     TenantContext,
     ToolCall,
     TraceRecord,
     TraceSpan,
 )
+from app.harness.guards.stream_guard import StreamSentinel
 from app.harness.llm import LlmError, LlmMessage, LlmPort, LlmRequest, LlmStreamEvent
 from app.harness.prompts import PromptRegistry
 from app.harness.tools import ToolExecutor
@@ -95,6 +99,7 @@ class FastPathLoop:
         prompt_registry: PromptRegistry,
         trace_sink: TraceSink,
         audit_sink: AuditSink,
+        guard_events_sink: Any | None = None,
         turn_timeout_s: float = 30.0,
         retrieve_timeout_s: float = 5.0,
     ) -> None:
@@ -103,6 +108,7 @@ class FastPathLoop:
         self._prompt_registry = prompt_registry
         self._trace_sink = trace_sink
         self._audit_sink = audit_sink
+        self._guard_events_sink = guard_events_sink
         self._turn_timeout_s = turn_timeout_s
         self._retrieve_timeout_s = retrieve_timeout_s
 
@@ -186,6 +192,24 @@ class FastPathLoop:
         def event(kind: AgentEventType, payload: dict[str, object]) -> AgentEvent:
             return AgentEvent(type=kind, payload=payload)
 
+        def record_guard(direction: str, results: list[GuardResult]) -> None:
+            """护栏命中：metrics + guard_events 缓冲（A5）。"""
+
+            for result in results:
+                record_guard_hit(result.rule, result.severity, direction)
+            if self._guard_events_sink is not None and results:
+                self._guard_events_sink.append(
+                    tenant_id=tenant_id,
+                    trace_id=trace_id_resolved,
+                    direction=direction,
+                    results=results,
+                )
+
+        async def flush_guards() -> None:
+            flush = getattr(self._guard_events_sink, "flush", None)
+            if flush is not None:
+                await flush()
+
         def stream_stage_span(name: str, started_at_ms: int, ok: bool) -> None:
             span = TraceSpan(
                 trace_id=trace_id_resolved,
@@ -243,6 +267,7 @@ class FastPathLoop:
                 )
                 stream_stage_span("retrieve", retrieve_started, ok=False)
                 await self._flush_audit()
+                await flush_guards()
                 finish_trace(stop_reason=None, error_code="RETRIEVAL_FAILED", tokens_in=0, tokens_out=0)
                 return
             hits = result.data.get("hits", [])
@@ -274,6 +299,7 @@ class FastPathLoop:
                 )
                 stream_stage_span("retrieve", retrieve_started, ok=False)
                 await self._flush_audit()
+                await flush_guards()
                 finish_trace(
                     stop_reason=None, error_code="RETRIEVAL_FAILED", tokens_in=0, tokens_out=0
                 )
@@ -300,6 +326,7 @@ class FastPathLoop:
                     },
                 )
                 await self._flush_audit()
+                await flush_guards()
                 finish_trace(
                     stop_reason=StopReason.CAPABILITY_FALLBACK, error_code=None,
                     tokens_in=0, tokens_out=0,
@@ -320,6 +347,7 @@ class FastPathLoop:
                     },
                 )
                 await self._flush_audit()
+                await flush_guards()
                 finish_trace(
                     stop_reason=StopReason.CAPABILITY_FALLBACK,
                     error_code="LLM_NOT_CONFIGURED",
@@ -339,7 +367,8 @@ class FastPathLoop:
             stream = self._llm_port.stream(request)
             tokens_in: int | None = None
             tokens_out: int | None = None
-            answer_parts: list[str] = []
+            sentinel = StreamSentinel(evidence_count=len(evidence))
+            guard_terminated = False
             try:
                 # 首 token 前 30s 硬超时（D5：关键段；delta 后流式按客户端节奏）。
                 async with asyncio.timeout(self._turn_timeout_s):
@@ -351,11 +380,21 @@ class FastPathLoop:
                     if llm_event.kind == "delta":
                         if not yielded_any_delta:
                             first_token_ms = elapsed_ms()
-                        yielded_any_delta = True
-                        answer_parts.append(llm_event.text_delta or "")
-                        yield event(
-                            AgentEventType.DELTA, {"text": llm_event.text_delta or ""}
-                        )
+                        chunk = sentinel.feed(llm_event.text_delta or "")
+                        if chunk.results:
+                            record_guard("output", chunk.results)
+                        if chunk.terminated:
+                            guard_terminated = True
+                            yield event(
+                                AgentEventType.DELTA,
+                                {"text": chunk.replacement_text or ""},
+                            )
+                            break
+                        if chunk.text:
+                            yielded_any_delta = True
+                            yield event(
+                                AgentEventType.DELTA, {"text": chunk.text}
+                            )
                     elif llm_event.kind == "finish":
                         stream_stage_span("generate", generate_started, ok=True)
                     elif llm_event.kind == "usage":
@@ -373,6 +412,7 @@ class FastPathLoop:
                 )
                 stream_stage_span("generate", generate_started, ok=False)
                 await self._flush_audit()
+                await flush_guards()
                 finish_trace(
                     stop_reason=None, error_code=exc.code.value, tokens_in=tokens_in or 0,
                     tokens_out=tokens_out or 0,
@@ -390,13 +430,39 @@ class FastPathLoop:
                 )
                 stream_stage_span("generate", generate_started, ok=False)
                 await self._flush_audit()
+                await flush_guards()
                 finish_trace(
                     stop_reason=StopReason.TIMEOUT, error_code="LLM_TIMEOUT",
                     tokens_in=tokens_in or 0, tokens_out=tokens_out or 0,
                 )
                 return
 
-            self._verify_references(answer_parts, len(evidence))
+            tail = sentinel.flush_final()
+            if tail.results:
+                record_guard("output", tail.results)
+            if guard_terminated:
+                yield event(
+                    AgentEventType.DONE,
+                    {
+                        "turn_id": str(turn_id),
+                        "trace_id": trace_id_resolved,
+                        "tokens_in": tokens_in if tokens_in is not None else 0,
+                        "tokens_out": tokens_out if tokens_out is not None else 0,
+                        "first_token_ms": first_token_ms or 0,
+                        "latency_ms": elapsed_ms(),
+                        "stop_reason": StopReason.GUARD_BLOCK.value,
+                    },
+                )
+                await self._flush_audit()
+                await flush_guards()
+                finish_trace(
+                    stop_reason=StopReason.GUARD_BLOCK, error_code=None,
+                    tokens_in=tokens_in or 0, tokens_out=tokens_out or 0,
+                )
+                return
+            if tail.text:
+                yielded_any_delta = True
+                yield event(AgentEventType.DELTA, {"text": tail.text})
             for index, item in enumerate(evidence, start=1):
                 yield event(
                     AgentEventType.CITATION,
@@ -422,6 +488,7 @@ class FastPathLoop:
                 },
             )
             await self._flush_audit()
+            await flush_guards()
             finish_trace(
                 stop_reason=StopReason.FINAL_ANSWER, error_code=None,
                 tokens_in=tokens_in or 0, tokens_out=tokens_out or 0,
@@ -446,6 +513,7 @@ class FastPathLoop:
                 },
             )
             await self._flush_audit()
+            await flush_guards()
             finish_trace(stop_reason=None, error_code="STREAM_ERROR", tokens_in=0, tokens_out=0)
 
     async def _stream_with_first(

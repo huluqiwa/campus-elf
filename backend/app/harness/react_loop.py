@@ -23,11 +23,12 @@ budget span。
 import asyncio
 import json
 import logging
-import re
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 from uuid import UUID, uuid4
 
+from app.core.metrics import record_guard_hit
 from app.harness.audit import AuditSink
 from app.harness.budget import TurnBudget
 from app.harness.chat_tools import (
@@ -46,6 +47,8 @@ from app.harness.contracts import (
     TraceRecord,
     TraceSpan,
 )
+from app.harness.contracts import GuardResult as GuardResultContract
+from app.harness.guards.stream_guard import StreamSentinel
 from app.harness.llm import LlmError, LlmMessage, LlmPort, LlmRequest, LlmStreamEvent
 from app.harness.loop import format_evidence
 from app.harness.prompts import PromptRegistry
@@ -99,6 +102,7 @@ class ReactLoop:
         prompt_registry: PromptRegistry,
         trace_sink: TraceSink,
         audit_sink: AuditSink,
+        guard_events_sink: Any | None = None,
         turn_timeout_s: float = 30.0,
         retrieve_timeout_s: float = 5.0,
         max_decisions: int = 5,
@@ -111,6 +115,7 @@ class ReactLoop:
         self._registry = prompt_registry
         self._trace_sink = trace_sink
         self._audit_sink = audit_sink
+        self._guard_events_sink = guard_events_sink
         self._turn_timeout_s = turn_timeout_s
         self._retrieve_timeout_s = retrieve_timeout_s
         self._max_decisions = max_decisions
@@ -440,20 +445,65 @@ class ReactLoop:
             first_token_ms = elapsed_ms()
             tokens_in: int | None = None
             tokens_out: int | None = None
-            answer_parts: list[str] = []
+            # 输出哨兵（AI-09 卡 1-A；与快路径同款——VERIFY 升级改写，TD-332 收口）
+            sentinel = StreamSentinel(evidence_count=len(evidence))
+            guard_terminated = False
+            guard_hits: list[GuardResultContract] = []
             async for llm_event in self._stream_with_first(first, stream):
                 if llm_event.kind == "delta":
                     if not yielded_any_delta:
                         first_token_ms = elapsed_ms()
-                    yielded_any_delta = True
-                    answer_parts.append(llm_event.text_delta or "")
-                    yield event(AgentEventType.DELTA, {"text": llm_event.text_delta or ""})
+                    chunk = sentinel.feed(llm_event.text_delta or "")
+                    if chunk.results:
+                        guard_hits.extend(chunk.results)
+                    if chunk.terminated:
+                        guard_terminated = True
+                        yield event(
+                            AgentEventType.DELTA,
+                            {"text": chunk.replacement_text or ""},
+                        )
+                        break
+                    if chunk.text:
+                        yielded_any_delta = True
+                        yield event(AgentEventType.DELTA, {"text": chunk.text})
                 elif llm_event.kind == "finish":
                     stage_span("generate", generate_started, ok=True)
                 elif llm_event.kind == "usage":
                     tokens_in = llm_event.tokens_in
                     tokens_out = llm_event.tokens_out
-            self._verify_references(answer_parts, len(evidence))
+            tail = sentinel.flush_final()
+            if tail.results:
+                guard_hits.extend(tail.results)
+            if guard_hits:
+                for hit in guard_hits:
+                    record_guard_hit(hit.rule, hit.severity, "output")
+                if self._guard_events_sink is not None:
+                    self._guard_events_sink.append(
+                        tenant_id=tenant_id, trace_id=resolved_trace, direction="output",
+                        results=guard_hits,
+                    )
+            if guard_terminated:
+                yield event(
+                    AgentEventType.DONE,
+                    {
+                        "turn_id": str(turn_id),
+                        "trace_id": resolved_trace,
+                        "tokens_in": tokens_in if tokens_in is not None else 0,
+                        "tokens_out": tokens_out if tokens_out is not None else 0,
+                        "first_token_ms": first_token_ms or 0,
+                        "latency_ms": elapsed_ms(),
+                        "stop_reason": StopReason.GUARD_BLOCK.value,
+                    },
+                )
+                await self._flush_audit()
+                finish_trace(
+                    stop_reason=StopReason.GUARD_BLOCK, error_code=None,
+                    tokens_in=tokens_in or 0, tokens_out=tokens_out or 0,
+                )
+                return
+            if tail.text:
+                yielded_any_delta = True
+                yield event(AgentEventType.DELTA, {"text": tail.text})
             for index, item in enumerate(evidence, start=1):
                 yield event(
                     AgentEventType.CITATION,
@@ -539,20 +589,6 @@ class ReactLoop:
         yield first
         async for llm_event in stream:
             yield llm_event
-
-    def _verify_references(self, answer_parts: list[str], evidence_count: int) -> None:
-        """VERIFY：引用序号一致性检测（超范围 → 告警不改写——AI-01b 同口径）。"""
-
-        answer = "".join(answer_parts)
-        out_of_range = [
-            int(match)
-            for match in re.findall(r"\[(\d+)\]", answer)
-            if int(match) > evidence_count
-        ]
-        if out_of_range:
-            logger.warning(
-                "LLM_GUARD_REF_OUT_OF_RANGE refs=%s evidence=%s", out_of_range, evidence_count
-            )
 
     async def _flush_audit(self) -> None:
         """回合收尾审计落库（取消路径不 flush——TD-018 口径）。"""
