@@ -314,6 +314,7 @@
 ### 5.1 Loop Engineering + Harness
 
 - **Loop**：快路径（简单 KB 问答）+ 有界多步 ReAct（复杂问题最多 5 次模型决策、3 次工具、2 次检索、30s、12k token）。
+  **MVP 边界注记（M4-AI01b，2026-11-19）**：快路径已落地为「单意图直通 + kb.search 检索 + LLM 流式 + 引用序号校验」；多意图 `intents[]` 合并作答与多步 ReAct（LLM 路由、工具自主选择、预算执行）归 ReAct 功能点。
 - **Harness 六层**：
   1. 上下文精细化
   2. 工具系统（ToolSpec + ToolExecutor）

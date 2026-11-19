@@ -20,20 +20,6 @@ def test_production_requires_dependencies() -> None:
         )
 
 
-def test_production_rejects_skeleton_loop_switch() -> None:
-    """production 禁止开启空壳 Loop 开关（防止未鉴权入口上线）。"""
-
-    with pytest.raises(ValidationError, match="DEV_SKELETON_LOOP_ENABLED"):
-        Settings(
-            _env_file=None,
-            app_env="production",
-            redis_url="redis://127.0.0.1:6379/0",
-            dev_skeleton_loop_enabled=True,
-            database_url="postgresql+asyncpg://u:p@127.0.0.1:5432/db",
-            qdrant_url="http://127.0.0.1:6333",
-        )
-
-
 def test_development_allows_optional_dependencies_and_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -45,12 +31,10 @@ def test_development_allows_optional_dependencies_and_switch(
         _env_file=None,
         app_env="development",
         redis_url="redis://127.0.0.1:6379/0",
-        dev_skeleton_loop_enabled=True,
     )
 
     assert settings.database_url is None
     assert settings.qdrant_url is None
-    assert settings.dev_skeleton_loop_enabled is True
 
 
 def test_validation_error_does_not_echo_credentials() -> None:

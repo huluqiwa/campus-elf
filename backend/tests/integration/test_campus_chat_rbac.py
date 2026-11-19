@@ -101,7 +101,6 @@ async def chat_env(
     monkeypatch.setenv("DATABASE_URL", database_url("tenant"))
     monkeypatch.setenv("PLATFORM_DATABASE_URL", database_url("platform"))
     monkeypatch.setenv("REDIS_URL", os.environ["TEST_REDIS_URL"])
-    monkeypatch.setenv("DEV_SKELETON_LOOP_ENABLED", "true")
     get_settings.cache_clear()
     await revocation.reset_client()
 

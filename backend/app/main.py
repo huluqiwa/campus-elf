@@ -31,7 +31,9 @@ from app.config import get_settings
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.db.selfcheck import verify_runtime_database
+from app.harness.chat_assembly import build_chat_loop
 from app.harness.llm import LlmPort, build_llm_port
+from app.harness.loop import FastPathLoop
 from app.harness.trace import InMemoryTraceSink, TraceSink
 from app.tenant.middleware import RequestContextMiddleware
 
@@ -67,13 +69,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await aclose()
 
 
-def create_app(*, trace_sink: TraceSink | None = None, llm_port: LlmPort | None = None) -> FastAPI:
+def create_app(
+    *,
+    trace_sink: TraceSink | None = None,
+    llm_port: LlmPort | None = None,
+    chat_loop: FastPathLoop | None = None,
+) -> FastAPI:
     """构造 FastAPI 应用。
 
     参数:
         trace_sink: 可选 trace sink（测试注入内存实现以断言 trace 落点）。
         llm_port: 可选 LLM 端口（测试注入 FakeLlm）；缺省按 Settings 构建，
             未配置 LLM 时为 None（对话链路调用期 fail-closed，M4-AI01a）。
+        chat_loop: 可选快路径 Loop（测试注入）；缺省按 Settings + trace_sink +
+            llm_port 装配（M4-AI01b）。
 
     返回值:
         FastAPI 实例。
@@ -92,6 +101,13 @@ def create_app(*, trace_sink: TraceSink | None = None, llm_port: LlmPort | None 
     )
     application.state.trace_sink = trace_sink if trace_sink is not None else InMemoryTraceSink()
     application.state.llm_port = llm_port if llm_port is not None else build_llm_port(settings)
+    application.state.chat_loop = (
+        chat_loop
+        if chat_loop is not None
+        else build_chat_loop(
+            settings, trace_sink=application.state.trace_sink, llm_port=application.state.llm_port
+        )
+    )
 
     @application.exception_handler(RequestValidationError)
     async def _sanitized_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

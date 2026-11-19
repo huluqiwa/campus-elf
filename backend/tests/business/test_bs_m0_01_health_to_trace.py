@@ -87,7 +87,6 @@ def service_env(
     monkeypatch.setenv("PLATFORM_DATABASE_URL", os.environ["TEST_PLATFORM_DATABASE_URL"])
     monkeypatch.setenv("REDIS_URL", redis_url)
     monkeypatch.setenv("QDRANT_URL", os.environ["TEST_QDRANT_URL"])
-    monkeypatch.setenv("DEV_SKELETON_LOOP_ENABLED", "true")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -203,12 +202,15 @@ async def test_bs_m0_01_turn_streams_events_and_records_trace(
     text_body = response.text
     assert "event: meta" in text_body
     assert "event: done" in text_body
-    assert f'"stop_reason":"{StopReason.FINAL_ANSWER.value}"' in text_body
+    # M4-AI01b 真快路径：测试租户无发布知识库 → 真实「零命中兜底」链路
+    # （CAPABILITY_FALLBACK 话术 delta + done；比空壳恒 FINAL_ANSWER 更真实的业务断言）。
+    assert f'"stop_reason":"{StopReason.CAPABILITY_FALLBACK.value}"' in text_body
 
     assert len(sink.turns) == 1
     record = sink.turns[0]
-    assert record.stop_reason == StopReason.FINAL_ANSWER
-    assert [span.name for span in record.spans] == ["route", "answer"]
+    assert record.stop_reason == StopReason.CAPABILITY_FALLBACK
+    # M4-AI01b 真快路径：零命中回合的段 = retrieve（route 直通不产 span）
+    assert [span.name for span in record.spans] == ["retrieve"]
     # 身份边界：trace 用认证主体的租户与用户，不再是占位值
     assert record.tenant_id == tenant_id
     assert record.user_id == user_id
