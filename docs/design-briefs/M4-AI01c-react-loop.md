@@ -156,4 +156,38 @@ AI 域功能点（LLM 自主选工具=AI 护栏敏感面），按 §11.7 从严�
 
 ## §10 实现注记（编码后回填）
 
-（待实现 PR 回填：落地差异、读数、审查处置。）
+### 10.1 落地文件
+
+- `app/harness/budget.py`：`TurnBudget`（四维计数/上限校验/snapshot）
+- `app/harness/router.py`：`LlmRouter` + `RouterOutcome`（route_v1 分类/JSON 解析矩阵/D2 降级/D3 意图白名单/simple 判定由路由器计算）
+- `app/harness/react_loop.py`：`ReactLoop`（THINK→ACT→OBSERVE 有界循环 + navigate 入口证据 + 合并 GENERATE + budget span + 超时/取消/异常弧对齐 AI-01b）
+- `app/harness/orchestrator.py`：`ChatOrchestrator`（meta/step(route) 首事件立出 + 路由分派 + TD-334 permissions 必传）
+- prompt：`route_v1.md` + `react_think_v1.md`（**新增第三模板**——THINK 指令需独立版本化，偏离 §1「两个模板」登记于此）+ `react_v1.md`
+- `app/harness/chat_tools.py`：`openai_tool_specs`（registry→tools 参数转换）
+- `app/harness/loop.py`：`format_evidence` 提取公共函数（react_loop 同源）+ FastPathLoop.run 签名变更（permissions/skip_route_stage/trace_id——TD-334/D1）
+- `app/harness/chat_assembly.py`：装配换 `ChatOrchestrator`（预算 Settings 化传递）
+- 测试：budget 7 / router 7 / react_loop 9 / orchestrator 4 / BS-M4-03（1，真实栈多意图全链）
+
+### 10.2 与简报的偏离（全登记）
+
+1. **prompt 三模板而非两个**（§1 写 route_v1+react_v1）：THINK 决策指令需独立版本化文件（`react_think_v1.md`）——提示词不得硬编码（AGENTS §5），多一个模板是纪律要求。
+2. **OBSERVE 用文本回喂而非 tool 协议**（D3 细化）：`LlmMessage` 无 tool_call_id 字段；文本 `[观察]` 消息 provider 无关且不扩契约。
+3. **工具预算耗尽即退出循环**：工具不可用后继续决策无意义——`can_act()` 为假直接 GENERATE（比「仅标记」更强的降级）。
+
+### 10.3 门禁读数（2026-11-20，终态）
+
+- `ruff check app tests alembic`：0 错误；`mypy --no-incremental app tests`（307 文件）0 错误
+- `bandit -r app -x tests`：0 issue；`alembic check`：无漂移（零迁移）
+- 受影响全子集 **232 passed**（终态，含审查修复新增：router None 弧 1 + PERMISSION_DENIED 锚定；harness 全部 + chat_retrieval 单元/集成 + audit_db + SSE 端点 + config + 装配 + chat_rbac + bs_m0_01 + sql_baseline + BS-M4-01/02/03）
+
+### 10.4 审查处置（2026-11-20，独立审查第 1 轮：0B/1M/7m）
+
+- **M1（TD-334 纪律性收口→签名强制）**：orchestrator.run `permissions` 去默认值（必传，漏传即类型错误）；docstring 明确「漏传即静默越权」；TD-334 处置列补「loop 层 None 兜底仅 standalone/测试专用，待评估移除」。
+- **m1** requirements §5.1 补 AI-01c 落地注记 + design §6.3 注记更新（navigate 已激活/TD-328 收口/campus.kb.qa 延 AI-04）；**m2** TD-338（token 预算只观测语义，压测批）；**m3** 补 router None llm_port 单测；**m4** 权限拒绝断言锚定 PERMISSION_DENIED（trace span）；**m5** TD-339（THINK 消息历史形态，真连批验证）；**m6** TD-340（ReAct 超时含背压口径，压测批统一）；**m7** while-else 死代码删除 + import re 顶置 + SSE 测试 docstring 修正。
+- 复测终态：router/react/orchestrator **21 passed**；受影响全子集 **232 passed**；ruff/mypy 0。
+
+### 10.5 判例沉淀
+
+1. **「统一入口」的公共 API 是权限收口的真正战场**：loop 层收口只改了内部构造，orchestrator.run 的可选默认值才是漏传入口——签名强制（去默认值）才是结构性收口（审查 M1）。
+2. **SSE tool_result 刻意信息最小化**（无 error_code）——精确错误码断言要走 trace span/审计 metadata，不能只在 SSE 面断言（审查 m4）。
+3. **多意图预算分配顺序**（卡 5-A 延伸）：预算按路由顺序消费，低置信意图可能饿死——TD-337 已登记压测复核。

@@ -200,6 +200,11 @@ class Settings(BaseSettings):
     kb_retrieval_test_rerank_pool: int = Field(default=20, ge=1, le=50)
     # chat 快路径最终引用条数（M4-AI01b：跨版本 fan-out 全局归并后的 top_k）。
     kb_chat_top_k: int = Field(default=5, ge=1, le=20)
+    # ReAct 预算（M4-AI01c；design §6.2 数值 Settings 化）。
+    react_max_model_decisions: int = Field(default=5, ge=1, le=10)
+    react_max_tool_calls: int = Field(default=3, ge=1, le=10)
+    react_max_retrievals: int = Field(default=2, ge=1, le=10)
+    react_token_budget: int = Field(default=12000, ge=1000, le=100000)
 
     # ---------- LLM（M4-AI01a：OpenAI 兼容适配器，design §6） ----------
     # API key 只从 .env/密钥管理注入：不入库、不入日志/审计/trace、不回显（红线）。

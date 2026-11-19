@@ -87,8 +87,8 @@ def make_principal(tenant_id: Any) -> Principal:
     )
 
 
-def build_app(loop: FastPathLoop | None, *, tenant_id: Any) -> Any:
-    """构造应用 + Principal 依赖覆盖（loop=None 模拟装配错误）。"""
+def build_app(loop: FastPathLoop, *, tenant_id: Any) -> Any:
+    """构造应用 + Principal 依赖覆盖（RBAC 矩阵路径的离线替身）。"""
 
     app = create_app(chat_loop=loop)
     # 覆盖子依赖 get_current_principal（实证有效）：_dependency 的 realm/权限判定保持真实
