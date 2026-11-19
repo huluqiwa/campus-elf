@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from app.auth.principal import Principal, require_permission
 from app.core.sse import SSE_HEADERS, SSE_MEDIA_TYPE, format_sse
-from app.harness.loop import FastPathLoop
+from app.harness.orchestrator import ChatOrchestrator
 
 router = APIRouter(prefix="/campus", tags=["campus"])
 
@@ -46,13 +46,13 @@ def _parse_uuid(value: str | None) -> UUID | None:
         return None
 
 
-def _chat_loop(request: Request) -> FastPathLoop:
+def _chat_loop(request: Request) -> ChatOrchestrator:
     """从应用状态取 Loop（create_app 装配；缺失即装配错误，显式失败）。"""
 
     loop = getattr(request.app.state, "chat_loop", None)
     if loop is None:
         raise RuntimeError("chat loop 未注入；请通过 create_app(chat_loop=...) 装配")
-    return cast(FastPathLoop, loop)
+    return cast(ChatOrchestrator, loop)
 
 
 @router.post("/chat/turns")
@@ -94,6 +94,7 @@ async def create_chat_turn(
                 turn_id=turn_id,
                 message=payload.message,
                 conversation_id=conversation_uuid,
+                permissions=principal.permissions,
             ):
                 yield format_sse(agent_event.type.value, agent_event.payload)
         except (GeneratorExit, asyncio.CancelledError):

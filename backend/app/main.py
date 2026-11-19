@@ -8,6 +8,8 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Protocol
+from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -32,10 +34,25 @@ from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.db.selfcheck import verify_runtime_database
 from app.harness.chat_assembly import build_chat_loop
+from app.harness.contracts import AgentEvent
 from app.harness.llm import LlmPort, build_llm_port
-from app.harness.loop import FastPathLoop
 from app.harness.trace import InMemoryTraceSink, TraceSink
 from app.tenant.middleware import RequestContextMiddleware
+
+
+class ChatTurnRunner(Protocol):
+    """对话回合运行器协议（FastPathLoop/ChatOrchestrator 结构化满足）。"""
+
+    def run(
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        turn_id: UUID,
+        message: str,
+        conversation_id: UUID | None = None,
+        permissions: frozenset[str],
+    ) -> AsyncIterator[AgentEvent]: ...
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +90,7 @@ def create_app(
     *,
     trace_sink: TraceSink | None = None,
     llm_port: LlmPort | None = None,
-    chat_loop: FastPathLoop | None = None,
+    chat_loop: ChatTurnRunner | None = None,
 ) -> FastAPI:
     """构造 FastAPI 应用。
 
@@ -81,7 +98,7 @@ def create_app(
         trace_sink: 可选 trace sink（测试注入内存实现以断言 trace 落点）。
         llm_port: 可选 LLM 端口（测试注入 FakeLlm）；缺省按 Settings 构建，
             未配置 LLM 时为 None（对话链路调用期 fail-closed，M4-AI01a）。
-        chat_loop: 可选快路径 Loop（测试注入）；缺省按 Settings + trace_sink +
+        chat_loop: 可选对话编排器（测试注入）；缺省按 Settings + trace_sink +
             llm_port 装配（M4-AI01b）。
 
     返回值:

@@ -58,6 +58,23 @@ LLM_UNCONFIGURED_TEXT = "AI 回答能力尚未配置，请联系管理员。"
 _REF_PATTERN = re.compile(r"\[(\d+)\]")
 
 
+def format_evidence(evidence: list[ChatEvidence]) -> str:
+    """证据块拼装：[n]（文档 · 章节 · 页码）+ 文本（页码缺省省略）。
+
+    快路径与 ReAct 共用（引用编号全局一致）。
+    """
+
+    blocks: list[str] = []
+    for index, item in enumerate(evidence, start=1):
+        source = item.doc_title or "未命名文档"
+        if item.section_path:
+            source += f" · {item.section_path}"
+        if item.page_start:
+            source += f" · 第{item.page_start}页"
+        blocks.append(f"[{index}]（{source}）\n{item.text}")
+    return "\n\n".join(blocks)
+
+
 class FastPathLoop:
     """快路径编排器（use-site 构造；端口注入对齐 AI-01a 纪律）。
 
@@ -97,22 +114,34 @@ class FastPathLoop:
         turn_id: UUID,
         message: str,
         conversation_id: UUID | None = None,
+        permissions: frozenset[str] | None = None,
+        skip_route_stage: bool = False,
+        trace_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        """执行一个快路径回合；产出 SSE 事件（类型化 AgentEvent）。"""
+        """执行一个快路径回合；产出 SSE 事件（类型化 AgentEvent）。
 
-        trace_id = uuid4().hex
+        参数:
+            permissions: principal 实际权限集（TD-334——ctx 从实际权限派生）；
+                None 仅限测试/兼容，生产路径由 orchestrator 必传。
+            skip_route_stage: True = orchestrator 已发 meta/step(route)（本 loop 跳过——D1）。
+            trace_id: orchestrator 传入的回合 trace id（None 时自行生成）。
+        """
+
+        trace_id_resolved = trace_id if trace_id is not None else uuid4().hex
         conversation = conversation_id if conversation_id is not None else uuid4()
         started = time.perf_counter()
         recorder = TraceRecorder(self._trace_sink)
         state = TurnToolState()
         registry = build_turn_tools(retriever=self._retriever, state=state)
         executor = ToolExecutor(registry, trace=recorder, audit=self._audit_sink)
-        # 工具权限：端点已强制 campus.chat.use（principal 层），此处同码纵深断言
-        # （D2：三工具挂既有码）；data_scope 均 "none"，无需范围集。
+        # 工具权限（TD-334）：从 principal 实际权限派生（orchestrator 必传）；
+        # None 仅测试/兼容路径沿用同码集。data_scope 均 "none"，无需范围集。
         ctx = TenantContext(
             tenant_id=tenant_id,
             user_id=user_id,
-            permissions=frozenset({"campus.chat.use", "campus.nav"}),
+            permissions=permissions
+            if permissions is not None
+            else frozenset({"campus.chat.use", "campus.nav"}),
         )
         evidence: list[ChatEvidence] = []
         yielded_any_delta = False
@@ -134,7 +163,7 @@ class FastPathLoop:
 
             recorder.record_turn(
                 TraceRecord(
-                    trace_id=trace_id,
+                    trace_id=trace_id_resolved,
                     tenant_id=tenant_id,
                     user_id=user_id,
                     conversation_id=conversation,
@@ -159,7 +188,7 @@ class FastPathLoop:
 
         def stream_stage_span(name: str, started_at_ms: int, ok: bool) -> None:
             span = TraceSpan(
-                trace_id=trace_id,
+                trace_id=trace_id_resolved,
                 tenant_id=tenant_id,
                 span_type=name,
                 name=name,
@@ -171,17 +200,18 @@ class FastPathLoop:
             recorder.record_span(span)
 
         try:
-            yield event(
-                AgentEventType.META,
-                {
-                    "turn_id": str(turn_id),
-                    "trace_id": trace_id,
-                    "conversation_id": str(conversation),
-                },
-            )
-            yield event(
-                AgentEventType.STEP, {"stage": "route", "label": "正在理解问题"}
-            )
+            if not skip_route_stage:
+                yield event(
+                    AgentEventType.META,
+                    {
+                        "turn_id": str(turn_id),
+                        "trace_id": trace_id_resolved,
+                        "conversation_id": str(conversation),
+                    },
+                )
+                yield event(
+                    AgentEventType.STEP, {"stage": "route", "label": "正在理解问题"}
+                )
             retrieve_started = elapsed_ms()
             yield event(
                 AgentEventType.STEP,
@@ -191,7 +221,7 @@ class FastPathLoop:
                 AgentEventType.TOOL_CALL, {"tool": KB_SEARCH, "status": "running"}
             )
             result = await executor.execute(
-                ToolCall(tool=KB_SEARCH, args={"query": message}, trace_id=trace_id), ctx
+                ToolCall(tool=KB_SEARCH, args={"query": message}, trace_id=trace_id_resolved), ctx
             )
             if not result.ok or not isinstance(result.data, dict):
                 yield event(
@@ -261,7 +291,7 @@ class FastPathLoop:
                     AgentEventType.DONE,
                     {
                         "turn_id": str(turn_id),
-                        "trace_id": trace_id,
+                        "trace_id": trace_id_resolved,
                         "tokens_in": 0,
                         "tokens_out": 0,
                         "first_token_ms": elapsed_ms(),
@@ -382,7 +412,7 @@ class FastPathLoop:
                 AgentEventType.DONE,
                 {
                     "turn_id": str(turn_id),
-                    "trace_id": trace_id,
+                    "trace_id": trace_id_resolved,
                     # usage 未报时计 0（不伪造 provider 报数；A7 红线同源纪律）
                     "tokens_in": tokens_in if tokens_in is not None else 0,
                     "tokens_out": tokens_out if tokens_out is not None else 0,

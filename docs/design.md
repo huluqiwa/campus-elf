@@ -853,8 +853,14 @@ Fast Path（M4-AI01b 落地）：输入轻检 → ROUTE（规则直通单意图�
 RETRIEVE（kb.search 工具 + 证据文本 PG 回查）→ GENERATE（LLM 流式）→
 VERIFY（引用序号一致性；超范围告警不改写——delta 已发不可撤回，全量改写归 AI-09）→
 输出轻检（占位，AI-09）→ DONE
-ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
-            → GENERATE → VERIFY → OUTPUT_GUARD → DONE
+ReAct（M4-AI01c 落地）：`ChatOrchestrator` 统一入口——发 meta/step(route)（首事件立出）
+→ LLM 路由（route_v1 分类 → `RouteResult.intents[]`；失败降级单意图）→ 分派：
+simple=true → 快路径管道（事件序不变）；否则 THINK（complete+tools，function calling）
+→ ACT（ToolExecutor）→ OBSERVE（[观察] 文本回喂）有界循环 → 合并 GENERATE
+（逐意图小节/全局引用编号/某意图零证据兜底小节）。预算（Settings 化）：5 决策/3 工具/
+2 检索/12k token——任一耗尽 → 带已有证据 GENERATE（降级不报错）+ budget span。
+`TURN_TIMEOUT=30s` 包循环全程 + GENERATE 首事件（delta 后按客户端节奏）。
+navigate 结果作为入口证据并入 citations。ctx 权限从 principal 派生（TD-334）。
 ```
 
 - `MAX_MODEL_DECISIONS=5`、`MAX_TOOL_CALLS=3`、`MAX_RETRIEVALS=2`、`TURN_TIMEOUT=30s`、`TOKEN_BUDGET=12000`。
@@ -869,7 +875,7 @@ ReAct Path: INPUT_GUARD → ROUTE → THINK → ACT → OBSERVE → THINK …
 | `kb.read_chunk` | `campus.chat.use`（MVP） | 读取本轮证据集内分块（白名单守卫，防 ACL 旁路）；只读 |
 | `campus.navigate` | `campus.nav` | 返回前端路由/入口；不写 |
 
-> 权限注记（M4-AI01b D2）：`campus.kb.qa` 独立码延后 ReAct 点随权限目录扩展（新码=目录+落库迁移+角色授予）；MVP 三工具挂既有码（端点已强制 `campus.chat.use`，工具内同码纵深断言）。
+> 权限注记（M4-AI01b D2 / M4-AI01c 更新）：三工具 MVP 挂既有码（端点已强制 `campus.chat.use`，ctx 从 principal 权限派生——TD-334 收口）；navigate 已随 ReAct 激活；`campus.kb.qa` 独立码延后 AI-04 权限目录扩展（新码=目录+落库迁移+角色授予）。
 
 - `ToolExecutor`：schema 校验 → 权限/租户/数据范围 → 超时 → 执行 → 审计/trace → 类型化结果。
 - 二期写工具必须 `side_effect=true` + 确认卡片 + 幂等 + 审批 + 沙箱 + 审计；MVP 不注册。

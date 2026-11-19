@@ -23,7 +23,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.harness.chat_assembly import build_chat_loop
-from app.harness.llm import LlmStreamEvent
+from app.harness.llm import LlmResponse, LlmStreamEvent
 from app.harness.trace import InMemoryTraceSink
 from app.kb.build_task import build_kb_version
 from app.kb.parser import ParsedDocument
@@ -242,6 +242,16 @@ async def test_bs_m4_01_published_kb_chat_full_stream(
     await _chain_to_published(env, monkeypatch, audiences=(("all", None),))
     student_client, _ = await _student_client(env)
     fake = FakeLlm(
+        complete_scripts=[
+            # orchestrator 路由（单 kb_qa → simple → 快路径）
+            LlmResponse(
+                text=json.dumps(
+                    {"intents": [{"name": "kb_qa", "query": "差旅报销怎么办理？"}]},
+                    ensure_ascii=False,
+                ),
+                finish_reason="stop",
+            ),
+        ],
         stream_scripts=[
             [
                 LlmStreamEvent(kind="delta", text_delta="差旅报销需要发票和审批单 [1]。"),
@@ -281,9 +291,9 @@ async def test_bs_m4_01_published_kb_chat_full_stream(
     assert citations[0]["document"] == "财务报销手册"
     assert any("差旅报销" in item["section"] for item in citations)
     # FakeLlm 收到的上下文含真实证据文本（GENERATE 消费 RETRIEVE 结果）
-    prompt = fake.requests[0].messages[0].content
-    assert "差旅报销需要发票和审批单" in prompt
-    assert "[1]" in prompt
+    generate_prompt = fake.requests[-1].messages[0].content
+    assert "差旅报销需要发票和审批单" in generate_prompt
+    assert "[1]" in generate_prompt
     done = events[-1][1]
     assert done["stop_reason"] == "FINAL_ANSWER"
     assert done["tokens_in"] == 150
@@ -349,7 +359,17 @@ async def test_bs_m4_02_acl_fail_closed_no_leak(
         env, monkeypatch, audiences=(("class", CLASS_AUDIENCE_ID),)
     )
     student_client, _ = await _student_client(env)
-    fake = FakeLlm()
+    fake = FakeLlm(
+        complete_scripts=[
+            LlmResponse(
+                text=json.dumps(
+                    {"intents": [{"name": "kb_qa", "query": "差旅报销怎么办理？"}]},
+                    ensure_ascii=False,
+                ),
+                finish_reason="stop",
+            ),
+        ],
+    )
     client, _sink = _chat_client(env, fake)
     async with client as ac, student_client as sc:
         headers = await login(sc, STUDENT_LOGIN)
@@ -377,7 +397,9 @@ async def test_bs_m4_02_acl_fail_closed_no_leak(
     # 零泄漏：整条流不出现文档标题/章节/正文片段
     assert "财务报销手册" not in response.text
     assert "差旅报销需要发票" not in response.text
-    assert fake.requests == []  # 未触 LLM
+    # orchestrator 化后路由触达 LLM 属正常；零命中下仅路由一次、无 GENERATE 流
+    assert len(fake.requests) == 1
+    assert "意图分类器" in fake.requests[0].messages[0].content
     assert events[7][1]["stop_reason"] == "CAPABILITY_FALLBACK"
 
 

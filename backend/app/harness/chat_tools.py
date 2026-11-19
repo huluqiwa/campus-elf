@@ -17,6 +17,8 @@
 信息）；未知目标结构化拒绝。
 """
 
+from typing import Any
+
 from app.harness.contracts import TenantContext, ToolCall, ToolResult, ToolSpec
 from app.harness.registry import ToolHandler, ToolRegistry
 from app.kb.chat_retrieval import ChatEvidence, ChatRetriever
@@ -203,3 +205,22 @@ def _navigate_handler() -> ToolHandler:
         return ToolResult(ok=True, data=dict(entry), redacted_summary=f"入口：{target}")
 
     return handler
+
+
+def openai_tool_specs(registry: ToolRegistry) -> tuple[dict[str, Any], ...]:
+    """ToolRegistry 转 OpenAI ``tools`` 参数形态（ReAct THINK 决策步透传）。
+
+    顺序为注册表排序序（稳定）；input_schema 直接作为 parameters（JSON Schema）。
+    """
+
+    return tuple(
+        {
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": spec.input_schema,
+            },
+        }
+        for spec in registry.all()
+    )
