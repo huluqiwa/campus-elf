@@ -31,7 +31,7 @@ from app.harness.guards.rules import (
 _REDACT_TEMPLATE = "[REDACTED:{rule}]"
 
 _RULE_PROMPT_LEAK = "output.prompt_leak"
-_RULE_SECRET = "output.secret"
+_RULE_SECRET = "output.secret"  # nosec B105——规则名非密码
 _RULE_INTERNAL_ADDR = "output.internal_addr"
 _RULE_XSS = "output.xss"
 _RULE_REF_RANGE = "output.ref_range"
