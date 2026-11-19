@@ -162,7 +162,7 @@ AI 域功能点（LLM 自主选工具=AI 护栏敏感面），按 §11.7 从严�
 - `app/harness/router.py`：`LlmRouter` + `RouterOutcome`（route_v1 分类/JSON 解析矩阵/D2 降级/D3 意图白名单/simple 判定由路由器计算）
 - `app/harness/react_loop.py`：`ReactLoop`（THINK→ACT→OBSERVE 有界循环 + navigate 入口证据 + 合并 GENERATE + budget span + 超时/取消/异常弧对齐 AI-01b）
 - `app/harness/orchestrator.py`：`ChatOrchestrator`（meta/step(route) 首事件立出 + 路由分派 + TD-334 permissions 必传）
-- prompt：`route_v1.md` + `react_think_v1.md`（**新增第三模板**——THINK 指令需独立版本化，偏离 §1「两个模板」登记于此）+ `react_v1.md`
+- prompt：`route_v1.md` ×1 + `react_think_v1.md` ×1（**新增第三模板**——THINK 指令需独立版本化，偏离 §1「两个模板」登记于此）+ `react_v1.md`
 - `app/harness/chat_tools.py`：`openai_tool_specs`（registry→tools 参数转换）
 - `app/harness/loop.py`：`format_evidence` 提取公共函数（react_loop 同源）+ FastPathLoop.run 签名变更（permissions/skip_route_stage/trace_id——TD-334/D1）
 - `app/harness/chat_assembly.py`：装配换 `ChatOrchestrator`（预算 Settings 化传递）

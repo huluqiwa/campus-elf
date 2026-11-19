@@ -385,6 +385,13 @@ async def test_missing_nav_permission_denies_navigate_tool() -> None:
 
     tool_results = [event.payload for event in events if event.type.value == "tool_result"]
     assert tool_results[0]["status"] == "error"
+    # 审查 m4：错误码精确锚定（executor 写入 trace span——SSE 面刻意不含 error_code）
+    denied_spans = [
+        span
+        for span in sink.spans
+        if span.span_type == "tool" and span.attributes.get("error_code") == "PERMISSION_DENIED"
+    ]
+    assert denied_spans
     assert types_of(events)[-1] == "done"
     assert sink.turns[-1].stop_reason is not None
     assert sink.turns[-1].stop_reason.value == "CAPABILITY_FALLBACK"

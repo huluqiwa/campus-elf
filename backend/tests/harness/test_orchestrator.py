@@ -8,6 +8,7 @@ from app.harness.llm import LlmError, LlmErrorCode, LlmResponse, LlmStreamEvent
 from app.harness.orchestrator import ChatOrchestrator
 from app.harness.prompt_loading import build_default_registry
 from app.harness.router import LlmRouter
+from app.harness.trace import InMemoryTraceSink
 from app.kb.chat_retrieval import ChatEvidence, ChatRetriever
 from app.kb.embedding import TEIEmbedder
 from tests.support.llm import FakeLlm
@@ -55,8 +56,10 @@ def build_orchestrator(
     fast_llm: Any,
     react_llm: Any,
     evidence: list[ChatEvidence] | None = None,
-) -> ChatOrchestrator:
-    """装配被测 orchestrator（router/fast/react 各自独立 FakeLlm）。"""
+) -> tuple[ChatOrchestrator, InMemoryTraceSink]:
+    """装配被测 orchestrator（router/fast/react 各自独立 FakeLlm）；返回 sink 供断言。"""
+
+    from app.harness.trace import InMemoryTraceSink
 
     registry = build_default_registry()
     router = LlmRouter(
@@ -64,8 +67,9 @@ def build_orchestrator(
         prompt_registry=registry,
     )
     fast_loop = FastPathLoopFactory(evidence=evidence, llm=fast_llm, registry=registry)
-    react_loop = ReactLoopFactory(evidence=evidence, llm=react_llm, registry=registry)
-    return ChatOrchestrator(router=router, fast_loop=fast_loop, react_loop=react_loop)
+    sink = InMemoryTraceSink()
+    react_loop = ReactLoopFactory(evidence=evidence, llm=react_llm, registry=registry, sink=sink)
+    return ChatOrchestrator(router=router, fast_loop=fast_loop, react_loop=react_loop), sink
 
 
 def FastPathLoopFactory(*, evidence: Any, llm: Any, registry: Any) -> Any:
@@ -88,9 +92,8 @@ def FastPathLoopFactory(*, evidence: Any, llm: Any, registry: Any) -> Any:
     )
 
 
-def ReactLoopFactory(*, evidence: Any, llm: Any, registry: Any) -> Any:
+def ReactLoopFactory(*, evidence: Any, llm: Any, registry: Any, sink: Any) -> Any:
     from app.harness.react_loop import ReactLoop
-    from app.harness.trace import InMemoryTraceSink
 
     class _Audit:
         def append(self, event: Any) -> Any:
@@ -103,7 +106,7 @@ def ReactLoopFactory(*, evidence: Any, llm: Any, registry: Any) -> Any:
         llm_port=llm,
         retriever=stub_retriever(evidence),
         prompt_registry=registry,
-        trace_sink=InMemoryTraceSink(),
+        trace_sink=sink,
         audit_sink=_Audit(),
     )
 
@@ -144,7 +147,7 @@ async def test_simple_intent_dispatches_fast_path_order_unchanged() -> None:
         chunk_id="c1", score=0.9, text="内容。", doc_title="校历",
         section_path=None, page_start=None, page_end=None, chunk_type="child", version_id="v1",
     )]
-    orchestrator = build_orchestrator(
+    orchestrator, _sink = build_orchestrator(
         router_complete=router_json_single(),
         fast_llm=FakeLlm(
             stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="答。"),
@@ -182,7 +185,7 @@ async def test_multi_intent_dispatches_react() -> None:
         chunk_id="c1", score=0.9, text="内容。", doc_title="校历",
         section_path=None, page_start=None, page_end=None, chunk_type="child", version_id="v1",
     )]
-    orchestrator = build_orchestrator(
+    orchestrator, _sink = build_orchestrator(
         router_complete=router_json_multi(),
         fast_llm=FakeLlm(),
         react_llm=FakeLlm(
@@ -212,7 +215,7 @@ async def test_multi_intent_dispatches_react() -> None:
 async def test_router_failure_degrades_to_fast_path() -> None:
     """路由 LLM 异常（D2）：降级 simple → 快路径事件序。"""
 
-    orchestrator = build_orchestrator(
+    orchestrator, _sink = build_orchestrator(
         router_complete=LlmError(LlmErrorCode.TIMEOUT, retryable=True),
         fast_llm=FakeLlm(
             stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="兜底回答。"),
@@ -248,7 +251,7 @@ async def test_permissions_forwarded_to_loops() -> None:
         chunk_id="c1", score=0.9, text="内容。", doc_title="校历",
         section_path=None, page_start=None, page_end=None, chunk_type="child", version_id="v1",
     )]
-    orchestrator = build_orchestrator(
+    orchestrator, sink = build_orchestrator(
         router_complete=router_json_multi(),
         fast_llm=FakeLlm(),
         react_llm=FakeLlm(
@@ -287,4 +290,11 @@ async def test_permissions_forwarded_to_loops() -> None:
         if payload.get("status") == "error" and payload.get("tool") == "campus.navigate"
     ]
     assert denied  # navigate 被权限拒绝（TD-334 端到端）
+    # 审查 m4：错误码精确锚定（executor 写入 trace span）
+    denied_spans = [
+        span
+        for span in sink.spans
+        if span.span_type == "tool" and span.attributes.get("error_code") == "PERMISSION_DENIED"
+    ]
+    assert denied_spans
     assert types_of(events)[-1] == "done"
