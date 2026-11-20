@@ -388,6 +388,9 @@ async def test_client_disconnect_records_user_cancelled() -> None:
 class _SlowFirstTokenLlm:
     """首 token 前长挂起的 LLM stub（超时弧注入）。"""
 
+    provider_name = "slow-fake"
+    model_name = "slow-fake-model"
+
     def __init__(self, delay_s: float) -> None:
         self._delay_s = delay_s
         self.requests: list[Any] = []

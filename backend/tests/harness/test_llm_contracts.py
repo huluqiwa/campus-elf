@@ -113,9 +113,12 @@ def test_llm_stream_event_kind_is_closed_set() -> None:
 
 
 def test_llm_port_is_runtime_checkable_protocol() -> None:
-    """LlmPort 为运行时可检协议：具备 complete/stream 两个调用面即视为实现。"""
+    """LlmPort 为运行时可检协议：complete/stream + provider_name/model_name 四个面。"""
 
     class _Minimal:
+        provider_name = "minimal"
+        model_name = "minimal-model"
+
         async def complete(self, request: LlmRequest) -> LlmResponse:
             return LlmResponse(text="ok")
 
@@ -123,3 +126,16 @@ def test_llm_port_is_runtime_checkable_protocol() -> None:
             return iter(())  # 形态占位：真实实现返回 AsyncIterator
 
     assert isinstance(_Minimal(), LlmPort)
+
+    class _MissingIdentity:
+        """缺 provider_name 面：不属于 LlmPort（trace/usage 落库依赖）。"""
+
+        model_name = "minimal-model"
+
+        async def complete(self, request: LlmRequest) -> LlmResponse:
+            return LlmResponse(text="ok")
+
+        def stream(self, request: LlmRequest) -> object:
+            return iter(())
+
+    assert not isinstance(_MissingIdentity(), LlmPort)

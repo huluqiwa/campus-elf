@@ -136,6 +136,16 @@ class LlmError(Exception):
 class LlmPort(Protocol):
     """LLM 调用端口协议（M4 各功能点只依赖此契约与 FakeLlm）。"""
 
+    @property
+    def provider_name(self) -> str:
+        """provider 标识（llm_usage 落库用；不含密钥与网络信息）。"""
+        ...
+
+    @property
+    def model_name(self) -> str:
+        """配置的模型名（trace/usage 落库用）。"""
+        ...
+
     async def complete(self, request: LlmRequest) -> LlmResponse:
         """非流式调用（ReAct 决策/路由/摘要等中间步骤用）。"""
         ...
@@ -333,6 +343,18 @@ class OpenAICompatLlm:
         self._max_attempts = max_attempts
         self._retry_backoff_seconds = retry_backoff_seconds
         self._sleep = sleep
+
+    @property
+    def provider_name(self) -> str:
+        """provider 标识（llm_usage 落库用）。"""
+
+        return "openai-compat"
+
+    @property
+    def model_name(self) -> str:
+        """构造时配置的模型名（请求未显式指定 model 时即实际使用值）。"""
+
+        return self._model
 
     def _timeout(self, request: LlmRequest) -> httpx.Timeout:
         """单次调用超时；``timeout_override_s`` 只允许收紧（简报 D4）。"""

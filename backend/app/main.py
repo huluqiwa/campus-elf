@@ -36,7 +36,8 @@ from app.db.selfcheck import verify_runtime_database
 from app.harness.chat_assembly import build_chat_loop
 from app.harness.contracts import AgentEvent
 from app.harness.llm import LlmPort, build_llm_port
-from app.harness.trace import InMemoryTraceSink, TraceSink
+from app.harness.trace import TraceSink
+from app.harness.trace_db import DbTraceSink
 from app.tenant.middleware import RequestContextMiddleware
 
 
@@ -116,7 +117,9 @@ def create_app(
         redoc_url="/redoc" if settings.docs_enabled else None,
         lifespan=_lifespan,
     )
-    application.state.trace_sink = trace_sink if trace_sink is not None else InMemoryTraceSink()
+    # 生产缺省 = DB 落库（TD-330 收口：chat_traces/spans/llm_usage 每回合必写）；
+    # InMemory 仅测试显式注入（create_app(trace_sink=...)）
+    application.state.trace_sink = trace_sink if trace_sink is not None else DbTraceSink()
     application.state.llm_port = llm_port if llm_port is not None else build_llm_port(settings)
     application.state.chat_loop = (
         chat_loop

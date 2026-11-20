@@ -62,5 +62,5 @@ def build_chat_loop(
     router = LlmRouter(llm_port=llm_port, prompt_registry=registry)
     return ChatOrchestrator(
         router=router, fast_loop=fast_loop, react_loop=react_loop,
-        guard_events_sink=guard_events_sink,
+        guard_events_sink=guard_events_sink, trace_sink=trace_sink,
     )

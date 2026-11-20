@@ -46,8 +46,14 @@ PASSWORD = "Sql-Baseline-Pass-1"
 # 需要回到 TD-100 重新决策。
 # M4-AI01b 真快路径实测 13 条（版本发现 2 + 人群解析 4-5 + 证据回查 1 + 工具审计 2
 # + 既有鉴权面）：基线从 8 重校准；上限仍守住「单请求 SQL 预算」防退化（TD-100 口径）。
-# M4-AI06/07 实测 20 条（AI-01b 基线 16 + 会话查/创 2 + 消息历史 1 + trace 落库 1）
-MAX_STATEMENTS_PER_REQUEST = 24
+# M4-AI06/07 实测 36 条（2026-11-21 插桩逐条核对，第 2 轮审查 Minor-1 重注）：
+#   鉴权 7（2 set_config + users/roles/permissions/scopes/must_change 各 1）
+# + 会话查/创 4（pinned alias 解析 1 + INSERT 1，含 session set_config 2）
+# + 上下文查取 3 + 检索活跃版本 3 + 兜底审计 3
+# + trace/usage 8（1 trace + 2 span + 1 usage 分两个 session）
+# + 消息写入 8（user/assistant 各 4：INSERT + last_message_at UPDATE）
+# 主优化杠杆 = db_session 数量（每 session 固定 2 条 set_config）——TD-100 口径。
+MAX_STATEMENTS_PER_REQUEST = 40
 # 下界：认证解析本身就要查用户/角色/权限（矩阵 §5-8 的"每请求从库读"）。条数掉到下界
 # 以下说明鉴权改成了缓存或干脆不查（fail-open），热更新口径失效 —— 那时必须显式改这里，
 # 而不是让"更快"静默通过（第三轮审查 Minor 5）。

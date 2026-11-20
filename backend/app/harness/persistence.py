@@ -5,18 +5,62 @@
 
 import logging
 from collections.abc import Sequence
-from datetime import UTC
 from typing import Any
 from uuid import UUID
+
+from sqlalchemy import func, update
 
 from app.db.models.ai import Conversation, ConversationMessage
 from app.db.repository import ScopeBypass, TenantScopedRepository
 from app.db.session import db_session
+from app.harness.audit import redact_mapping
 from app.harness.contracts import TraceRecord
 
 logger = logging.getLogger(__name__)
 
-_CONTEXT_WINDOW = 10
+# 卡 3-A：近 10 **轮**原文注入（1 轮 = user + assistant 两条）
+_CONTEXT_WINDOW_MESSAGES = 20
+
+_PUBLISHED_READ_REASON = "会话持久化：活跃版本解析（kb_publish_aliases × PUBLISHED 只读）"
+
+
+async def _resolve_pinned_in_session(
+    session: Any, tenant_id: UUID,
+) -> UUID | None:
+    """会话内解析租户当前活跃发布版本（pinned_kb_version 落库用）。
+
+    alias 行 × 文档 PUBLISHED（与检索活跃版本发现同源）；多个取最新 alias 行；
+    无活跃发布 → None（fail-closed，不回退任选）。仅作记录语义（TD-P3：
+    版本切换手动触发，本点不绑定检索）。
+    """
+
+    from app.db.models.kb import KbDocument, KbPublishAlias
+
+    alias_repo = TenantScopedRepository(
+        session, KbPublishAlias, tenant_id,
+        scope=ScopeBypass(reason=_PUBLISHED_READ_REASON),
+    )
+    alias_rows = (await session.execute(alias_repo.base_query())).scalars().all()
+    if not alias_rows:
+        return None
+    doc_repo = TenantScopedRepository(
+        session, KbDocument, tenant_id,
+        scope=ScopeBypass(reason=_PUBLISHED_READ_REASON),
+    )
+    doc_ids = {row.document_id for row in alias_rows}
+    docs = (
+        await session.execute(
+            doc_repo.base_query().where(
+                KbDocument.id.in_(doc_ids), KbDocument.status == "PUBLISHED",
+            )
+        )
+    ).scalars().all()
+    published_doc_ids = {doc.id for doc in docs}
+    candidates = [row for row in alias_rows if row.document_id in published_doc_ids]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda row: row.created_at)
+    return UUID(str(best.version_id))
 
 
 async def get_or_create_conversation(
@@ -24,13 +68,15 @@ async def get_or_create_conversation(
     tenant_id: UUID,
     user_id: UUID,
     conversation_id: UUID | None = None,
-    pinned_kb_version_id: UUID | None = None,
 ) -> tuple[UUID, bool]:
     """查找或创建会话；返回 (conversation_id, created)。
 
-    D1：客户端传 UUID → 查找（不存在则创建）；None → 创建。
+    D1：客户端传 UUID → 查找（非本人/已删 → 按 D1 语义新建**同名 id 行**，
+    并发撞唯一键时回查重取）；None → 服务端分配。
     D3：创建时写入当前活跃版本（pinned_kb_version_id），后续轮固定不变。
     """
+
+    from sqlalchemy.exc import IntegrityError
 
     async with db_session(tenant_id=tenant_id) as session:
         repo = TenantScopedRepository(
@@ -41,15 +87,36 @@ async def get_or_create_conversation(
             existing = await repo.get(conversation_id)
             if existing is not None and existing.user_id == user_id and existing.status == "active":
                 return existing.id, False
+        pinned = await _resolve_pinned_in_session(session, tenant_id)
         conv = Conversation(
+            # m6：客户端指定 id 时按该 id 建（并发同 id 双建靠主键唯一 + 回查收敛）
+            id=conversation_id,
             tenant_id=tenant_id,
             user_id=user_id,
             status="active",
-            pinned_kb_version_id=pinned_kb_version_id,
+            pinned_kb_version_id=pinned,
         )
         session.add(conv)
-        await session.flush()
-        await session.commit()
+        try:
+            await session.flush()
+            await session.commit()
+        except IntegrityError:
+            # 并发双建/他人占用同 id：回查（新事务）；非本人活跃会话 → 显式失败
+            await session.rollback()
+            if conversation_id is None:
+                raise
+            async with db_session(tenant_id=tenant_id) as retry_session:
+                retry_repo = TenantScopedRepository(
+                    retry_session, Conversation, tenant_id,
+                    scope=ScopeBypass(reason="会话持久化：并发双建回查"),
+                )
+                winner = await retry_repo.get(conversation_id)
+            if (
+                winner is not None and winner.user_id == user_id
+                and winner.status == "active"
+            ):
+                return winner.id, False
+            raise ValueError("conversation id 冲突（非本人或不可复用）") from None
         return conv.id, True
 
 
@@ -64,9 +131,7 @@ async def save_message(
     citations_json: dict[str, Any] | None = None,
     token_usage: dict[str, Any] | None = None,
 ) -> UUID:
-    """写入单条消息并更新 conversation.last_message_at。"""
-
-    from datetime import datetime
+    """写入单条消息并更新 conversation.last_message_at（DB 时钟）。"""
 
     async with db_session(tenant_id=tenant_id) as session:
         TenantScopedRepository(
@@ -85,13 +150,12 @@ async def save_message(
         )
         session.add(msg)
         await session.flush()
-        conv_repo = TenantScopedRepository(
-            session, Conversation, tenant_id,
-            scope=ScopeBypass(reason="会话持久化：更新 last_message_at"),
+        # m8：last_message_at 用数据库时钟（应用时钟在多进程下会漂移）
+        await session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
+            .values(last_message_at=func.now())
         )
-        conv = await conv_repo.get(conversation_id)
-        if conv is not None:
-            conv.last_message_at = datetime.now(UTC)
         await session.commit()
         return msg.id
 
@@ -100,10 +164,16 @@ async def get_recent_messages(
     *,
     tenant_id: UUID,
     conversation_id: UUID,
-    limit: int = _CONTEXT_WINDOW,
+    limit: int = _CONTEXT_WINDOW_MESSAGES,
 ) -> list[dict[str, str]]:
-    """查近 N 轮非 deleted 消息（时间正序）；返回 [{"role": ..., "content": ...}]。"""
+    """查近 N 条非 deleted/failed 消息（时间正序）；返回 [{"role": ..., "content": ...}]。
 
+    上下文注入口径为近 10 轮 = 20 条（卡 3-A）；`limit` 为消息条数。
+    failed（失败回合的空 assistant 占位）不进上下文——空文本既浪费窗口又污染
+    对话形状（第 2 轮审查 Minor-6）；失败回合的 user 提问仍保留。
+    **口径注**：本函数同时服务历史视图端点（GET /conversations/{id}/messages），
+    failed 消息在历史视图中同样不可见（第 3 轮审查备注 1 登记）。
+    """
 
     async with db_session(tenant_id=tenant_id) as session:
         repo = TenantScopedRepository(
@@ -114,7 +184,7 @@ async def get_recent_messages(
             repo.base_query()
             .where(
                 ConversationMessage.conversation_id == conversation_id,
-                ConversationMessage.status != "deleted",
+                ConversationMessage.status.not_in(("deleted", "failed")),
             )
             .order_by(ConversationMessage.created_at.desc())
             .limit(limit)
@@ -126,33 +196,33 @@ async def get_recent_messages(
         ]
 
 
-async def clear_messages(*, tenant_id: UUID, conversation_id: UUID) -> int:
-    """软删该会话全部非 deleted 消息；返回受影响条数（AI-07）。"""
+async def clear_messages_in_session(
+    session: Any, *, tenant_id: UUID, conversation_id: UUID,
+) -> int:
+    """在调用方事务内软删该会话全部非 deleted 消息；返回受影响条数（AI-07）。
 
-    from sqlalchemy import update
+    供清空端点在「归属校验 + 软删 + 审计」单事务内复用（第 2 轮审查 Major-2：
+    端点层不做裸 UPDATE，数据访问收敛到 persistence 层）；显式 tenant_id 谓词
+    是第一道防线，RLS 是第二道。
+    """
 
-    async with db_session(tenant_id=tenant_id) as session:
-        TenantScopedRepository(
-            session, ConversationMessage, tenant_id,
-            scope=ScopeBypass(reason="清空会话：AI-07"),
+    stmt = (
+        update(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation_id,
+            ConversationMessage.tenant_id == tenant_id,
+            ConversationMessage.status != "deleted",
         )
-        stmt = (
-            update(ConversationMessage)
-            .where(
-                ConversationMessage.conversation_id == conversation_id,
-                ConversationMessage.status != "deleted",
-            )
-            .values(status="deleted")
-        )
-        result = await session.execute(stmt)
-        await session.commit()
-        return int(getattr(result, "rowcount", 0) or 0)
+        .values(status="deleted")
+    )
+    result = await session.execute(stmt)
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 async def save_trace(*, tenant_id: UUID, record: TraceRecord) -> None:
-    """写入 chat_traces + chat_trace_spans（TD-330 收口）。"""
+    """写入 chat_traces + chat_trace_spans + llm_usage（TD-330 收口，A5/A6）。"""
 
-    from app.db.models.ai import ChatTrace, ChatTraceSpan
+    from app.db.models.ai import ChatTrace, ChatTraceSpan, LlmUsage
 
     async with db_session(tenant_id=tenant_id) as session:
         session.add(
@@ -184,10 +254,46 @@ async def save_trace(*, tenant_id: UUID, record: TraceRecord) -> None:
                     name=span.name,
                     start_ms=span.start_ms,
                     duration_ms=span.duration_ms,
-                    attributes_json=span.attributes,
+                    attributes_json=redact_mapping(span.attributes or {}),
                     status=span.status,
                 )
             )
+        # A6：每回合一条 usage（护栏回合 provider/model 为空串也落）
+        session.add(
+            LlmUsage(
+                tenant_id=tenant_id,
+                trace_id=record.trace_id,
+                provider=record.provider,
+                model=record.model,
+                tokens_in=record.tokens_in,
+                tokens_out=record.tokens_out,
+                latency_ms=record.latency_ms,
+            )
+        )
+        await session.commit()
+
+
+async def save_trace_span(*, tenant_id: UUID, record: Any) -> None:
+    """独立写入单个 span（ToolExecutor 经 recorder 独立上报、不随 turn 内嵌时）。"""
+
+    from app.db.models.ai import ChatTraceSpan
+
+    if record.tenant_id is None:
+        logger.warning("trace span 缺 tenant_id，跳过落库 trace_id=%s", record.trace_id)
+        return
+    async with db_session(tenant_id=record.tenant_id) as session:
+        session.add(
+            ChatTraceSpan(
+                tenant_id=record.tenant_id,
+                trace_id=record.trace_id,
+                span_type=record.span_type,
+                name=record.name,
+                start_ms=record.start_ms,
+                duration_ms=record.duration_ms,
+                attributes_json=redact_mapping(record.attributes or {}),
+                status=record.status,
+            )
+        )
         await session.commit()
 
 

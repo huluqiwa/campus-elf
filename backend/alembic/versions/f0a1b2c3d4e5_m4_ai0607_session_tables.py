@@ -36,7 +36,7 @@ def _rls_and_grant(table: str, *, readonly: bool = False) -> None:
         f"create policy {table}_tenant_isolation on {table} to campus_elf_tenant "
         f"using ({_TENANT_EXPR}) with check ({_TENANT_EXPR})"
     )
-    priv = "select" if readonly else "select, insert, update"
+    priv = "select, insert" if readonly else "select, insert, update"
     op.execute(f"grant {priv} on {table} to campus_elf_tenant")
     if not readonly:
         op.execute(f"revoke delete on {table} from campus_elf_tenant")
