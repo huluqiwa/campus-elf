@@ -1116,3 +1116,15 @@
 - **修复**：M1→尾部 24 字符重叠 + 修 M1 编辑吃掉 feed return bug；M2→tail.terminated 处置；M3→**产品口径修正**（安全优先 A24：话术+终止不放行检索，§10.4 登记）；M4→react_loop flush；M5→design/TD/requirements 回写；m1~m6 全处置。
 - **修复后复测**：护栏单测 28 + harness **39** + 受影响回归 **175** + BS-M4-04 **四弧全绿** + ruff/mypy/bandit/alembic 全绿。
 - 判例：①复杂多路径编辑必须 import 验证 + 逐用例跑（M1 编辑吃掉 return 导致 5 用例崩）；②自伤场景安全优先（A24 宁枉勿纵）——D5 偏离登记留痕。
+
+### M4 AI06/07 会话持久化（第 1 轮审查——不能提交）
+
+- 日期：2026-11-21
+- 范围：分支 `feature/m4-ai0607-session`（简报 `bb74534` + 实现 `bbbc6b7` + bare SQL 豁免 `c51b916`，9 文件 +710/-29）
+- 对照：简报 `docs/design-briefs/M4-AI0607-session-persistence.md`；design §6.4/§6.6
+- **第 1 轮独立审查（2026-11-21）**：**1 Blocker / 7 Major / 9 Minor**，结论「不能提交」。
+- **B1（Blocker）五项验收未实现但声明完成**：save_message 零调用 / get_recent_messages 返回值被丢弃 / DbTraceSink 不存在 / pinned_kb_version 恒 NULL / LlmUsage 无写入路径——orchestrator.py 只有注释「回合结束一次性写入」但 loop/react_loop 中无持久化代码。简报 §10 声称「消息持久化+上下文注入+trace 落库（TD-330 收口）」与实际严重不符。
+- **7 Major**：M1 清空端点路径双前缀（/campus/campus/→404）；M2 会话列表游标被忽略（翻页死循环）；M3 meta/done conversation_id 不一致（多轮碎片化）；M4 trace/spans/usage 迁移只授 SELECT（save_trace 接线即 permission denied）；M5 save_trace 绕过 redact_mapping；M6 持久化异常无兜底打断 SSE；M7 新代码零测试覆盖。
+- **9 Minor**：m1 近 10 轮实为近 10 条消息（差一倍）；m2 SQL baseline 注记失真；m3 ScopeBypass 理由部分失实（缺 user_id 谓词）；m4 清空链路三段独立事务；m5 limit 无校验；m6 并发同 UUID 双建；m7 简报 §8 回写缺失；m8 save_message 死代码 repo + last_message_at 应用时钟；m9 注释错位。
+- **处理决定**：本 PR 不合入（保留分支），新开会话基于审查报告逐项修复（B1 接线 + M1-M7 + M7 测试 + BS-M4-05），修复完成后再走审查→CI→合并。
+- 判例：①**写了函数库≠功能落地**——persistence.py 函数全部存在但 orchestrator→loop 接线零行代码；简报 §10 必须逐项核对调用链而非只看函数存在；②「262 passed」全是回归绿，新增逻辑零覆盖——**新增代码零测试=审查盲区最大来源**；③AI-01a 决策卡 2「暂无 key」假设错误（.env 早有 key）——事实核实必须查 .env 而非假设。
