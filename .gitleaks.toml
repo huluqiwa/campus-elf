@@ -74,4 +74,6 @@ regexes = [
   "key-2-abcdefgh",
   # M4-AI09 哨兵缓冲测试的假密钥（仅用于触发 output.secret 检测规则；非真实凭证）。
   "sk-abcdef1234567890abcdef1234",
+  # M4-AI06/07 会话端点集成测试假口令（仅 127.0.0.1 测试栈种子账号；非真实凭证）。
+  "Conv-Passw0rd-1",
 ]

@@ -1,7 +1,7 @@
 """DbTraceSink 单元测试：缓冲 + flush 落库编排（save_trace 打桩，无 DB）。
 
 覆盖：turn 内嵌 span 与独立上报 span 的去重（loop 段双通道）；单条落库失败
-记 warning 不中断（尽力落库口径）；flush 后缓冲清空。
+记 warning 不中断（尽力落库口径）；flush 后缓冲清空；生产缺省装配断言。
 """
 
 from uuid import uuid4
@@ -33,23 +33,32 @@ def _span(trace_id: str = "trace-1", name: str = "generate") -> TraceSpan:
     )
 
 
+class _RecorderCalls:
+    """打桩调用记录（类型化；fail_on = "turn"/"span" 注入失败弧）。"""
+
+    def __init__(self) -> None:
+        self.turns: list[TraceRecord] = []
+        self.spans: list[TraceSpan] = []
+        self.fail_on = ""
+
+
 @pytest.fixture
-def calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[object]]:
+def calls(monkeypatch: pytest.MonkeyPatch) -> _RecorderCalls:
     """打桩 persistence 层：记录调用并支持注入失败。"""
 
     import app.harness.trace_db as trace_db
 
-    recorded: dict[str, list[object]] = {"turns": [], "spans": [], "fail_on": ""}
+    recorded = _RecorderCalls()
 
     async def fake_save_trace(*, tenant_id: object, record: TraceRecord) -> None:
-        if recorded["fail_on"] == "turn":
+        if recorded.fail_on == "turn":
             raise RuntimeError("boom")
-        recorded["turns"].append(record)
+        recorded.turns.append(record)
 
-    async def fake_save_span(*, tenant_id: object, record: object) -> None:
-        if recorded["fail_on"] == "span":
+    async def fake_save_span(*, tenant_id: object, record: TraceSpan) -> None:
+        if recorded.fail_on == "span":
             raise RuntimeError("boom")
-        recorded["spans"].append(record)
+        recorded.spans.append(record)
 
     monkeypatch.setattr(trace_db, "save_trace", fake_save_trace)
     monkeypatch.setattr(trace_db, "save_trace_span", fake_save_span)
@@ -57,7 +66,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[object]]:
 
 
 @pytest.mark.asyncio
-async def test_flush_dedupes_embedded_spans_and_writes_usage_fields(calls: dict[str, list[object]]) -> None:
+async def test_flush_dedupes_embedded_spans_and_writes_usage_fields(calls: _RecorderCalls) -> None:
     """turn 内嵌 span 不重复落库；独立 span（未内嵌）补写；字段透传。"""
 
     sink = DbTraceSink()
@@ -69,26 +78,26 @@ async def test_flush_dedupes_embedded_spans_and_writes_usage_fields(calls: dict[
 
     written = await sink.flush()
     assert written == 2  # 1 turn + 1 独立 span（内嵌重复被去重）
-    assert len(calls["turns"]) == 1
-    assert calls["turns"][0].provider == "fake"
-    assert [s.name for s in calls["spans"]] == ["tool.execute"]
+    assert len(calls.turns) == 1
+    assert calls.turns[0].provider == "fake"
+    assert [s.name for s in calls.spans] == ["tool.execute"]
     assert sink.pending_count() == 0
 
 
 @pytest.mark.asyncio
-async def test_flush_failure_does_not_raise_and_clears_buffer(calls: dict[str, list[object]]) -> None:
+async def test_flush_failure_does_not_raise_and_clears_buffer(calls: _RecorderCalls) -> None:
     """turn 落库失败 → warning 丢弃不重试（不中断回合）；缓冲清空；span 不受影响。"""
 
     sink = DbTraceSink()
     sink.write_turn(_record())
     sink.write_span(_span("trace-1", "generate"))
-    calls["fail_on"] = "turn"
+    calls.fail_on = "turn"
     written = await sink.flush()
     assert written == 1  # turn 失败被吞，独立 span 照常落库
-    assert len(calls["spans"]) == 1
+    assert len(calls.spans) == 1
     assert sink.pending_count() == 0
 
-    calls["fail_on"] = "span"
+    calls.fail_on = "span"
     sink.write_span(_span("trace-2", "generate"))
     assert await sink.flush() == 0
     assert sink.pending_count() == 0
