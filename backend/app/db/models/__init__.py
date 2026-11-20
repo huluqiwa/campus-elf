@@ -1,6 +1,13 @@
 """数据模型包：导入所有模型，保证 Alembic autogenerate 能发现全部表。"""
 
-from app.db.models.ai import GuardEvent
+from app.db.models.ai import (
+    ChatTrace,
+    ChatTraceSpan,
+    Conversation,
+    ConversationMessage,
+    GuardEvent,
+    LlmUsage,
+)
 from app.db.models.approval import (
     ApprovalAction,
     ApprovalRequest,
@@ -61,6 +68,10 @@ __all__ = [
     "ApprovalStep",
     "ApprovalType",
     "AuditLog",
+    "ChatTrace",
+    "ChatTraceSpan",
+    "Conversation",
+    "ConversationMessage",
     "Course",
     "DataScope",
     "Department",
@@ -77,6 +88,7 @@ __all__ = [
     "KbTestRun",
     "KbTestSet",
     "KbUploadBatch",
+    "LlmUsage",
     "MfaRecoveryCode",
     "OrgClass",
     "Permission",

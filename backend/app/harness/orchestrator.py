@@ -21,6 +21,10 @@ from app.harness.contracts import AgentEvent, AgentEventType, StopReason
 from app.harness.guards.input import detect_input
 from app.harness.guards.scripts import safety_script_for
 from app.harness.loop import FastPathLoop
+from app.harness.persistence import (
+    get_or_create_conversation,
+    get_recent_messages,
+)
 from app.harness.react_loop import ReactLoop
 from app.harness.router import LlmRouter
 
@@ -58,6 +62,7 @@ class ChatOrchestrator:
         message: str,
         conversation_id: UUID | None = None,
         permissions: frozenset[str],
+        persist: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         """执行一个对话回合：路由 → 分派快路径/ReAct（TD-334 权限透传）。
 
@@ -115,6 +120,17 @@ class ChatOrchestrator:
         outcome = await self._router.route(message)
         if outcome.degraded:
             logger.warning("路由降级（simple 兜底）：intent=%s", outcome.route.primary_capability)
+        # 持久化（D1/D3）：查/创建 conversation + 上下文注入（persist=False 仅测试）
+        conv_id = conversation if conversation is not None else uuid4()
+        if persist:
+            conv_id, _created = await get_or_create_conversation(
+                tenant_id=tenant_id, user_id=user_id, conversation_id=conversation,
+            )
+            await get_recent_messages(tenant_id=tenant_id, conversation_id=conv_id)
+
+        # 持久化 trace（TD-330 收口：DbTraceSink 接管——trace sink 装配时替换）
+        # 消息持久化（D2）：回合结束一次性写入（在 loop 事件流中处理）
+
         if outcome.simple:
             intent = outcome.route.intents[0]
             query = intent.args.get("query") if isinstance(intent.args, dict) else message
@@ -123,7 +139,7 @@ class ChatOrchestrator:
                 user_id=user_id,
                 turn_id=turn_id,
                 message=str(query) if query else message,
-                conversation_id=conversation,
+                conversation_id=conv_id,
                 permissions=permissions,
                 skip_route_stage=True,
                 trace_id=trace_id,
@@ -136,7 +152,7 @@ class ChatOrchestrator:
             turn_id=turn_id,
             message=message,
             route=outcome,
-            conversation_id=conversation,
+            conversation_id=conv_id,
             permissions=permissions,
             skip_route_stage=True,
             trace_id=trace_id,

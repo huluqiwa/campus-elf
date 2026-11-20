@@ -160,6 +160,7 @@ async def test_simple_intent_dispatches_fast_path_order_unchanged() -> None:
         orchestrator.run(
             tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(),
             message="校历是什么？", permissions=frozenset({"campus.chat.use"}),
+            persist=False,
         )
     )
 
@@ -202,6 +203,7 @@ async def test_multi_intent_dispatches_react() -> None:
             tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(),
             message="差旅报销怎么办理？另外请假入口在哪？",
             permissions=frozenset({"campus.chat.use", "campus.nav"}),
+            persist=False,
         )
     )
 
@@ -228,6 +230,7 @@ async def test_router_failure_degrades_to_fast_path() -> None:
         orchestrator.run(
             tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(),
             message="校历是什么？", permissions=frozenset({"campus.chat.use"}),
+            persist=False,
         )
     )
 
@@ -279,7 +282,8 @@ async def test_permissions_forwarded_to_loops() -> None:
         orchestrator.run(
             tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(),
             message="差旅报销怎么办理？另外请假入口在哪？",
-            permissions=frozenset({"campus.chat.use"}),  # 无 campus.nav
+            permissions=frozenset({"campus.chat.use"}),
+            persist=False,  # 无 campus.nav
         )
     )
 

@@ -132,4 +132,25 @@ design §6.4 ContextBuilder 落地注记 / §6.6 trace 落库口径 / tech-debt 
 
 ## §10 实现注记（编码后回填）
 
-（待实现 PR 回填。）
+### 10.1 落地文件
+
+- `alembic/versions/f0a1b2c3d4e5_*.py`：5 表迁移（conversations/conversation_messages/chat_traces/chat_trace_spans/llm_usage，全 FORCE RLS）
+- `app/db/models/ai.py` 扩展：5 模型
+- `app/harness/persistence.py`：get_or_create_conversation/save_message/get_recent_messages/clear_messages/save_trace/build_context_messages
+- `app/harness/orchestrator.py`：run 加 persist 参数 + conv_id 持久化 + 上下文注入
+- `app/api/campus_chat.py`：3 端点（列表/历史/清空）
+- `app/core/metrics.py`：无新增（guard 指标已在 AI-09）
+
+### 10.2 与简报的偏离（全登记）
+
+1. **orchestrator.run 加 `persist: bool = True` 参数**（简报未预期）：测试用 `persist=False` 跳过 DB 依赖——不然 orchestrator 单测需要真实 PG。
+2. **SQL baseline 从 16→24**：新增会话查/创 2 + 消息历史 1 + trace/usage 落库若干——TD-100 口径重校准。
+
+### 10.3 门禁读数（2026-11-21，终态）
+
+- `ruff` 0 / `mypy` 320 文件 0 / `bandit` 0 / `alembic check` 无漂移（roundtrip 实测）
+- 受影响全子集 **262 passed**（含 BS-M4-01/02/03/04 + 全部既有回归）
+
+### 10.4 审查处置
+
+（待独立审查后回填。）

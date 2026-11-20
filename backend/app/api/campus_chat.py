@@ -16,12 +16,17 @@ from typing import Annotated, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.audit.writer import append_audit
 from app.auth.principal import Principal, require_permission
 from app.core.sse import SSE_HEADERS, SSE_MEDIA_TYPE, format_sse
+from app.db.models.ai import Conversation
+from app.db.repository import ScopeBypass, TenantScopedRepository
+from app.db.session import db_session
 from app.harness.orchestrator import ChatOrchestrator
+from app.harness.persistence import clear_messages, get_recent_messages
 
 router = APIRouter(prefix="/campus", tags=["campus"])
 
@@ -102,3 +107,123 @@ async def create_chat_turn(
             raise
 
     return StreamingResponse(event_stream(), media_type=SSE_MEDIA_TYPE, headers=SSE_HEADERS)
+
+
+# ---------------------------------------------------------------------------
+# 会话管理端点（M4-AI06/07：列表/历史/清空）
+# ---------------------------------------------------------------------------
+
+
+
+_CLEAR_PERMISSION = require_permission("campus.conversation.clear", realm="tenant")
+
+
+@router.get("/conversations")
+async def list_conversations(
+    request: Request,
+    principal: Annotated[Principal, ChatTurnDep],
+    limit: int = 20,
+    cursor: str | None = None,
+) -> JSONResponse:
+    """当前用户的会话列表（游标分页；按 last_message_at 降序）。"""
+
+
+    tenant_id = principal.tenant_id
+    if tenant_id is None:
+        raise HTTPException(status_code=403, detail="缺少租户上下文")
+
+    async with db_session(tenant_id=tenant_id) as session:
+        repo = TenantScopedRepository(
+            session, Conversation, tenant_id,
+            scope=ScopeBypass(reason="会话列表：用户自己的会话"),
+        )
+        stmt = (
+            repo.base_query()
+            .where(Conversation.user_id == principal.user_id, Conversation.status == "active")
+            .order_by(Conversation.last_message_at.desc().nulls_last(), Conversation.id.desc())
+            .limit(limit + 1)
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    return JSONResponse(content={
+        "conversations": [
+            {
+                "id": str(c.id),
+                "title": c.title,
+                "status": c.status,
+                "last_message_at": c.last_message_at.isoformat() if c.last_message_at else None,
+                "created_at": c.created_at.isoformat(),
+            }
+            for c in items
+        ],
+        "next_cursor": items[-1].id.hex if has_more and items else None,
+    })
+
+
+@router.get("/conversations/{conversation_id}/messages")
+async def get_conversation_messages(
+    request: Request,
+    conversation_id: UUID,
+    principal: Annotated[Principal, ChatTurnDep],
+    limit: int = 50,
+) -> JSONResponse:
+    """会话消息历史（排除 deleted；按时间正序）。"""
+
+
+    tenant_id = principal.tenant_id
+    if tenant_id is None:
+        raise HTTPException(status_code=403, detail="缺少租户上下文")
+
+    async with db_session(tenant_id=tenant_id) as session:
+        conv_repo = TenantScopedRepository(
+            session, Conversation, tenant_id,
+            scope=ScopeBypass(reason="会话历史：归属校验"),
+        )
+        conv = await conv_repo.get(conversation_id)
+        if conv is None or conv.user_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        messages = await get_recent_messages(
+            tenant_id=tenant_id, conversation_id=conversation_id, limit=limit,
+        )
+    return JSONResponse(content={"messages": messages})
+
+
+@router.delete("/campus/conversations/{conversation_id}/messages")
+async def clear_conversation_messages(
+    request: Request,
+    conversation_id: UUID,
+    principal: Annotated[Principal, _CLEAR_PERMISSION],
+) -> JSONResponse:
+    """AI-07：清空当前会话消息（软删 + 审计 + 幂等）。"""
+
+
+    tenant_id = principal.tenant_id
+    if tenant_id is None:
+        raise HTTPException(status_code=403, detail="缺少租户上下文")
+
+    async with db_session(tenant_id=tenant_id) as session:
+        conv_repo = TenantScopedRepository(
+            session, Conversation, tenant_id,
+            scope=ScopeBypass(reason="清空会话：归属校验"),
+        )
+        conv = await conv_repo.get(conversation_id)
+        if conv is None or conv.user_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="会话不存在")
+
+    count = await clear_messages(tenant_id=tenant_id, conversation_id=conversation_id)
+
+    async with db_session(tenant_id=tenant_id) as session:
+        await append_audit(
+            session,
+            action="campus.conversation.clear",
+            resource_type="conversation",
+            resource_id=str(conversation_id),
+            actor_realm="tenant",
+            actor_id=principal.user_id,
+            tenant_id=tenant_id,
+            result="success",
+            metadata={"cleared_count": count},
+        )
+
+    return JSONResponse(content={"cleared": count})
