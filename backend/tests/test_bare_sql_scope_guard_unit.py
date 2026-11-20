@@ -41,6 +41,13 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
     "app/rbac/__init__.py": {
         "*": "RBAC 定义同步：管理连接上的幂等维护任务，运行时无租户上下文"
     },
+    "app/harness/persistence.py": {
+        "*": (
+            "会话持久化（M4-AI06/07）：按 user_id/conversation_id 精确操作本人会话行，"
+            "属于 self 范围内唯一可见的数据，无需角色级范围；"
+            "且 conversation_id 由服务端创建/归属校验，不存在伪造面"
+        )
+    },
     "app/workers/tasks.py": {
         "refresh_tokens": "后台清理任务：跨租户清理过期令牌，属运维写路径而非业务读路径"
     },
@@ -111,7 +118,8 @@ SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
 # M2-UI2 +2（rbac/admin.py 与 personnel/mfa_admin.py 都是授权判据/凭证本身，无仓储原语）。
 # M2-UI3 +1（rbac/binding.py 同理：绑定行就是授权判据，且需按集合批量读写）。
 # M2-UI3 +1（personnel/account_admin.py：状态迁移与凭证吊销，与 auth/service.py 同类）。
-MAX_EXEMPT_MODULES = 15
+# M4-AI06/07：+persistence.py（会话持久化按 user_id 精确操作本人数据）
+MAX_EXEMPT_MODULES = 16
 
 # 已知命名盲区（M2-ORG02 复审登记）：`sa_update(Model)` 形态不匹配下方 update 正则。
 # 当前两处使用（retry CAS / 看门狗收口）均为「行经仓储取得 + 条件更新」的正当路径且 RLS 生效；
