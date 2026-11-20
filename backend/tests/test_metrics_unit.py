@@ -155,6 +155,7 @@ async def test_metrics_output_contains_only_campus_families(
         "campus_data_scope_denials_total": {"reason"},
         "campus_auth_login_failures_total": {"realm", "reason"},
         "campus_auth_account_lockouts_total": {"realm"},
+        "campus_guard_hits_total": {"rule", "severity", "direction"},
     }
     for line in samples:
         name, _, rest = line.partition("{")

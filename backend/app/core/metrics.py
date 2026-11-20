@@ -56,6 +56,12 @@ AUTH_LOGIN_FAILURES = Counter(
     ["realm", "reason"],
     registry=REGISTRY,
 )
+GUARD_HITS = Counter(
+    "campus_guard_hits_total",
+    "AI 输入/输出护栏命中数（M4-AI09：规则 / 严重度 / 方向）",
+    ["rule", "severity", "direction"],
+    registry=REGISTRY,
+)
 AUTH_LOCKOUTS = Counter(
     "campus_auth_account_lockouts_total",
     "账号因连续失败被锁定的次数",
@@ -96,6 +102,12 @@ def record_audit_write_failure(action: str) -> None:
     """登记一次审计写入失败。"""
 
     AUDIT_WRITE_FAILURES.labels(action=action).inc()
+
+
+def record_guard_hit(rule: str, severity: str, direction: str) -> None:
+    """登记一次护栏命中（loop 输入/输出校验）。"""
+
+    GUARD_HITS.labels(rule=rule, severity=severity, direction=direction).inc()
 
 
 def record_permission_denial(realm: str, reason: str) -> None:

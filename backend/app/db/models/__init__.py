@@ -1,5 +1,6 @@
 """数据模型包：导入所有模型，保证 Alembic autogenerate 能发现全部表。"""
 
+from app.db.models.ai import GuardEvent
 from app.db.models.approval import (
     ApprovalAction,
     ApprovalRequest,
@@ -63,6 +64,7 @@ __all__ = [
     "Course",
     "DataScope",
     "Department",
+    "GuardEvent",
     "ImportJob",
     "ImportRowError",
     "KbBuildEvent",

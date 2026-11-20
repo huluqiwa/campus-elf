@@ -72,4 +72,6 @@ regexes = [
   # 首个提交 d6b2efe 已含该字符串，历史不重写，按精确字符串放行。
   "key-1-abcdefgh",
   "key-2-abcdefgh",
+  # M4-AI09 哨兵缓冲测试的假密钥（仅用于触发 output.secret 检测规则；非真实凭证）。
+  "sk-abcdef1234567890abcdef1234",
 ]
