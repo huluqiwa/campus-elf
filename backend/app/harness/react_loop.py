@@ -52,6 +52,8 @@ from app.harness.guards.stream_guard import StreamSentinel
 from app.harness.llm import LlmError, LlmMessage, LlmPort, LlmRequest, LlmStreamEvent
 from app.harness.loop import format_evidence
 from app.harness.prompts import PromptRegistry
+from app.harness.ref_semantics import REF_IRRELEVANT_RULE as _RULE_REF_IRRELEVANT
+from app.harness.ref_semantics import RefSemanticChecker, RefVerdict, parse_cited
 from app.harness.router import RouterOutcome
 from app.harness.tools import ToolExecutor
 from app.harness.trace import TraceRecorder, TraceSink
@@ -103,6 +105,7 @@ class ReactLoop:
         trace_sink: TraceSink,
         audit_sink: AuditSink,
         guard_events_sink: Any | None = None,
+        ref_checker: RefSemanticChecker | None = None,
         turn_timeout_s: float = 30.0,
         retrieve_timeout_s: float = 5.0,
         max_decisions: int = 5,
@@ -116,6 +119,7 @@ class ReactLoop:
         self._trace_sink = trace_sink
         self._audit_sink = audit_sink
         self._guard_events_sink = guard_events_sink
+        self._ref_checker = ref_checker
         self._turn_timeout_s = turn_timeout_s
         self._retrieve_timeout_s = retrieve_timeout_s
         self._max_decisions = max_decisions
@@ -459,6 +463,8 @@ class ReactLoop:
             sentinel = StreamSentinel(evidence_count=len(evidence))
             guard_terminated = False
             guard_hits: list[GuardResultContract] = []
+            # AI-04：答案全文累计（= 用户实际所见：正常分片 + 哨兵替换文本 + 尾片）
+            answer_parts: list[str] = []
             async for llm_event in self._stream_with_first(first, stream):
                 if llm_event.kind == "delta":
                     if not yielded_any_delta:
@@ -468,6 +474,7 @@ class ReactLoop:
                         guard_hits.extend(chunk.results)
                     if chunk.terminated:
                         guard_terminated = True
+                        answer_parts.append(chunk.replacement_text or "")
                         yield event(
                             AgentEventType.DELTA,
                             {"text": chunk.replacement_text or ""},
@@ -475,6 +482,7 @@ class ReactLoop:
                         break
                     if chunk.text:
                         yielded_any_delta = True
+                        answer_parts.append(chunk.text)
                         yield event(AgentEventType.DELTA, {"text": chunk.text})
                 elif llm_event.kind == "finish":
                     stage_span("generate", generate_started, ok=True)
@@ -486,18 +494,24 @@ class ReactLoop:
                 guard_hits.extend(tail.results)
             if tail.terminated:
                 # M2：尾片 blocking 命中（flush_final 终止）——同 feed 期处置
+                answer_parts.append(tail.replacement_text or "")
                 yield event(
                     AgentEventType.DELTA,
                     {"text": tail.replacement_text or ""},
                 )
-            if guard_hits:
-                for hit in guard_hits:
+            def record_output_events(results: list[GuardResultContract]) -> None:
+                """输出护栏事件统一出口：metrics + guard_events 落库（第 1 轮审查 Minor-4）。"""
+
+                for hit in results:
                     record_guard_hit(hit.rule, hit.severity, "output")
-                if self._guard_events_sink is not None:
+                if self._guard_events_sink is not None and results:
                     self._guard_events_sink.append(
                         tenant_id=tenant_id, trace_id=resolved_trace, direction="output",
-                        results=guard_hits,
+                        results=results,
                     )
+
+            if guard_hits:
+                record_output_events(guard_hits)
             if guard_terminated:
                 yield event(
                     AgentEventType.DONE,
@@ -520,8 +534,50 @@ class ReactLoop:
                 return
             if tail.text:
                 yielded_any_delta = True
+                answer_parts.append(tail.text)
                 yield event(AgentEventType.DELTA, {"text": tail.text})
-            for index, item in enumerate(evidence, start=1):
+
+            # AI-04：citation 被引子集 + 语义过滤（时序：全文已生成完毕）
+            answer_text = "".join(answer_parts)
+            kept_indices, removed_verdicts = await self._resolve_citations(
+                answer_text, evidence
+            )
+            if removed_verdicts:
+                spans.append(
+                    TraceSpan(
+                        trace_id=resolved_trace,
+                        tenant_id=tenant_id,
+                        span_type="verify",
+                        name="ref_semantics",
+                        start_ms=elapsed_ms(),
+                        duration_ms=0,
+                        attributes={
+                            "checked": len(kept_indices) + len(removed_verdicts),
+                            "removed": len(removed_verdicts),
+                            "min_similarity": (
+                                self._ref_checker.min_similarity
+                                if self._ref_checker is not None
+                                else None
+                            ),
+                        },
+                    )
+                )
+                recorder.record_span(spans[-1])  # 与 stage_span 同款双通道（第 1 轮审查 Minor-5）
+                ref_guard_results = [
+                    GuardResultContract(
+                        action="redact",
+                        rule=_RULE_REF_IRRELEVANT,
+                        severity="low",
+                        reason=(
+                            f"引用 [{v.index}] 与答案语义相关性不足"
+                            f"（sim={v.similarity:.2f}）——citation 剔除"
+                        ),
+                    )
+                    for v in removed_verdicts
+                ]
+                record_output_events(ref_guard_results)
+            for index in kept_indices:
+                item = evidence[index - 1]
                 yield event(
                     AgentEventType.CITATION,
                     {
@@ -610,6 +666,29 @@ class ReactLoop:
         yield first
         async for llm_event in stream:
             yield llm_event
+
+    async def _resolve_citations(
+        self, answer_text: str, evidence: list[ChatEvidence],
+    ) -> tuple[list[int], list[RefVerdict]]:
+        """citation 被引子集 + 语义过滤（AI-04）：返回（保留序号升序, 剔除明细）。
+
+        与快路径同款：checker=None → 仅正文解析；checker 故障 → fail-open
+        （A4——质量检查不阻塞回合）。剔除事件的落库/计数由调用方执行。
+        """
+
+        cited = parse_cited(answer_text, len(evidence))
+        if self._ref_checker is None:
+            return cited, []
+        try:
+            result = await self._ref_checker.check(answer_text, evidence)
+        except Exception:
+            logger.warning(
+                "引用语义校验失败（fail-open：按正文解析保留被引 citation）",
+                exc_info=True,
+            )
+            return cited, []
+        kept = [v.index for v in result.verdicts if v.relevant]
+        return kept, list(result.removed)
 
     async def _flush_guards(self) -> None:
         """M4：ReAct 路径护栏事件落库（与快路径 flush_guards 同款）。"""

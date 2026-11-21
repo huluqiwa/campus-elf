@@ -254,7 +254,8 @@ async def test_bs_m4_01_published_kb_chat_full_stream(
         ],
         stream_scripts=[
             [
-                LlmStreamEvent(kind="delta", text_delta="差旅报销需要发票和审批单 [1]。"),
+                # AI-04：citation=被引子集——正文须实际引用 [2] 才有两个 citation 事件
+                LlmStreamEvent(kind="delta", text_delta="差旅报销需要发票和审批单 [1]。招待费需注明事由 [2]。"),
                 LlmStreamEvent(kind="finish", finish_reason="stop"),
                 LlmStreamEvent(kind="usage", tokens_in=150, tokens_out=12),
             ]

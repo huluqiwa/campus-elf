@@ -302,7 +302,10 @@ async def test_bs_m4_03_multi_intent_react_full_stream(
             [
                 LlmStreamEvent(
                     kind="delta",
-                    text_delta="差旅报销需要发票和审批单 [1]。请假入口见 [2]。",
+                    # AI-04：citation=被引子集——每个 [n] 的句子必须与被引块语义对齐
+                    # （[1]=差旅块 [2]=招待块 [3]=nav:请假 入口豁免通道；第 1 轮审查
+                    # Major-1：错位引用曾以 0.0098 余量漏过阈值，勿回退）
+                    text_delta="差旅报销需要发票和审批单 [1]。招待费需注明事由 [2]。请假办理入口 [3]。",
                 ),
                 LlmStreamEvent(kind="finish", finish_reason="stop"),
                 LlmStreamEvent(kind="usage", tokens_in=300, tokens_out=30),

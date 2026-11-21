@@ -458,3 +458,158 @@ async def test_load_texts_timeout_yields_retrieval_failed() -> None:
     assert types_of(events)[-1] == "error"
     assert events[-1].payload["code"] == "RETRIEVAL_FAILED"
     assert events[-1].payload["retryable"] is True
+
+# ---------------------------------------------------------------------------
+# AI-04：citation 被引子集 + 语义过滤
+# ---------------------------------------------------------------------------
+
+
+class StubRefChecker:
+    """AI-04 stub：按 chunk_id 黑名单判无关；可注入故障（fail-open 弧）。"""
+
+    def __init__(
+        self, *, irrelevant: set[str] | None = None, fail: bool = False,
+    ) -> None:
+        self._irrelevant = irrelevant or set()
+        self._fail = fail
+        self.min_similarity = 0.4
+        self.checked: list[str] = []
+
+    async def check(self, answer_text: str, evidence: list[ChatEvidence]) -> Any:
+        from app.harness.ref_semantics import RefCheckResult, RefVerdict, parse_cited
+
+        if self._fail:
+            raise RuntimeError("checker boom")
+        self.checked.append(answer_text)
+        cited = parse_cited(answer_text, len(evidence))
+        verdicts = []
+        removed = []
+        for index in cited:
+            ev = evidence[index - 1]
+            relevant = ev.chunk_id not in self._irrelevant
+            verdict = RefVerdict(
+                index=index, chunk_id=ev.chunk_id,
+                similarity=0.9 if relevant else 0.1, relevant=relevant,
+            )
+            verdicts.append(verdict)
+            if not relevant:
+                removed.append(verdict)
+        return RefCheckResult(cited=cited, verdicts=verdicts, removed=removed, checked=True)
+
+
+class CaptureGuardSink:
+    """guard_events 捕获（append 形状与 GuardEventsDbSink 一致）。"""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def append(self, **kwargs: Any) -> None:
+        self.events.append(kwargs)
+
+
+def _build_loop_with(
+    llm_port: Any, retriever: StubRetriever, *,
+    ref_checker: Any | None = None,
+    guard_sink: CaptureGuardSink | None = None,
+) -> tuple[FastPathLoop, InMemoryTraceSink]:
+    sink = InMemoryTraceSink()
+    loop = FastPathLoop(
+        llm_port=cast("LlmPort | None", llm_port),
+        retriever=retriever,
+        prompt_registry=build_default_registry(),
+        trace_sink=sink,
+        audit_sink=StubAuditSink(),
+        guard_events_sink=guard_sink,
+        ref_checker=ref_checker,
+    )
+    return loop, sink
+
+
+@pytest.mark.asyncio
+async def test_citation_parse_only_subset_when_no_checker() -> None:
+    """checker 未注入（D1）→ citation=正文被引子集：只引 [2] 就只发 [2]。"""
+
+    retriever = StubRetriever(
+        evidence=[evidence("c1", "三天内提交。"), evidence("c2", "请假需班主任审批。")],
+    )
+    fake = FakeLlm(
+        stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="三天内提交 [2]。"),
+                         LlmStreamEvent(kind="finish", finish_reason="stop")]],
+    )
+    loop, _sink = _build_loop_with(fake, retriever)
+    events = await collect(loop.run(
+        tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(), message="请假流程",
+    ))
+    citations = [e.payload for e in events if e.type.value == "citation"]
+    assert [c["index"] for c in citations] == [2]
+    assert citations[0]["chunk_id"] == "c2"
+
+
+@pytest.mark.asyncio
+async def test_citation_semantic_filter_removes_irrelevant() -> None:
+    """stub checker 判 c2 无关 → citation 只剩 [1] + verify span + guard 事件。"""
+
+    retriever = StubRetriever(
+        evidence=[evidence("c1", "请假需班主任审批。"), evidence("c2", "考勤打卡时间。")],
+    )
+    fake = FakeLlm(
+        stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="请假需审批 [1]。考勤见 [2]。"),
+                         LlmStreamEvent(kind="finish", finish_reason="stop")]],
+    )
+    guard_sink = CaptureGuardSink()
+    checker = StubRefChecker(irrelevant={"c2"})
+    loop, sink = _build_loop_with(fake, retriever, ref_checker=checker, guard_sink=guard_sink)
+    events = await collect(loop.run(
+        tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(), message="请假流程",
+    ))
+    citations = [e.payload for e in events if e.type.value == "citation"]
+    assert [c["index"] for c in citations] == [1]
+    # verify span（A6：checked/removed/min_similarity 数值）
+    verify_spans = [s for s in sink.turns[-1].spans if s.span_type == "verify"]
+    assert len(verify_spans) == 1
+    assert verify_spans[0].attributes["checked"] == 2
+    assert verify_spans[0].attributes["removed"] == 1
+    assert verify_spans[0].attributes["min_similarity"] == 0.4
+    # guard 事件（A3：rule/direction/severity）
+    assert len(guard_sink.events) == 1
+    assert guard_sink.events[0]["direction"] == "output"
+    assert guard_sink.events[0]["results"][0].rule == "output.ref_irrelevant"
+    assert guard_sink.events[0]["results"][0].severity == "low"
+
+
+@pytest.mark.asyncio
+async def test_citation_fail_open_when_checker_raises() -> None:
+    """checker 故障 → fail-open：citation 按正文解析（A4），无 guard 事件。"""
+
+    retriever = StubRetriever(
+        evidence=[evidence("c1", "请假需班主任审批。"), evidence("c2", "三天内提交。")],
+    )
+    fake = FakeLlm(
+        stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="请假需审批 [1]，三天内提交 [2]。"),
+                         LlmStreamEvent(kind="finish", finish_reason="stop")]],
+    )
+    guard_sink = CaptureGuardSink()
+    loop, _sink = _build_loop_with(
+        fake, retriever, ref_checker=StubRefChecker(fail=True), guard_sink=guard_sink,
+    )
+    events = await collect(loop.run(
+        tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(), message="请假流程",
+    ))
+    citations = [e.payload for e in events if e.type.value == "citation"]
+    assert [c["index"] for c in citations] == [1, 2]  # fail-open：全部保留
+    assert guard_sink.events == []
+
+@pytest.mark.asyncio
+async def test_citation_zero_refs_emits_no_citation() -> None:
+    """正文零引用（A2 头条行为）→ 零 citation 事件（绝不回退全量证据）。"""
+
+    retriever = StubRetriever(evidence=[evidence("c1", "请假需班主任审批。")])
+    fake = FakeLlm(
+        stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="直接回答，不带引用标记。"),
+                         LlmStreamEvent(kind="finish", finish_reason="stop")]],
+    )
+    loop, _sink = _build_loop_with(fake, retriever)
+    events = await collect(loop.run(
+        tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(), message="请假流程",
+    ))
+    assert [e.type.value for e in events if e.type.value == "citation"] == []

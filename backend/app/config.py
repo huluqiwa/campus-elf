@@ -200,6 +200,11 @@ class Settings(BaseSettings):
     kb_retrieval_test_rerank_pool: int = Field(default=20, ge=1, le=50)
     # chat 快路径最终引用条数（M4-AI01b：跨版本 fan-out 全局归并后的 top_k）。
     kb_chat_top_k: int = Field(default=5, ge=1, le=20)
+    # 引用语义校验阈值（M4-AI04；BGE-M3 余弦）。相关判定 = sim >= 阈值。
+    # 0.7 为真实 TEI 探针校准值（2026-11-22，dev TEI 实测：相关对 0.82~0.85、
+    # 无关对 0.56~0.68、同域不同主题 0.64~0.68——0.4 初值实测完全无效，
+    # 全部配对 ≥0.4；探针数据与校准记录见简报 §10）。
+    kb_ref_min_similarity: float = Field(default=0.7, ge=0.0, le=1.0)
     # ReAct 预算（M4-AI01c；design §6.2 数值 Settings 化）。
     react_max_model_decisions: int = Field(default=5, ge=1, le=10)
     react_max_tool_calls: int = Field(default=3, ge=1, le=10)
