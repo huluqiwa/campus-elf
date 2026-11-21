@@ -123,6 +123,7 @@ class FastPathLoop:
         permissions: frozenset[str] | None = None,
         skip_route_stage: bool = False,
         trace_id: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """执行一个快路径回合；产出 SSE 事件（类型化 AgentEvent）。
 
@@ -176,6 +177,8 @@ class FastPathLoop:
                     turn_id=turn_id,
                     intents=["kb_qa"],
                     route_path="fast",
+                    provider=self._llm_port.provider_name if self._llm_port else "",
+                    model=self._llm_port.model_name if self._llm_port else "",
                     prompt_name=PROMPT_NAME,
                     prompt_version=PROMPT_VERSION,
                     prompt_hash=self._prompt_hash(),
@@ -363,7 +366,12 @@ class FastPathLoop:
                 question=message,
                 evidence=self._format_evidence(evidence),
             )
-            request = LlmRequest(messages=[LlmMessage(role="user", content=prompt)])
+            # AI-06：上下文注入——近 10 轮对话原文 + 当前问题（含证据）
+            llm_messages: list[LlmMessage] = []
+            for m in (history or []):
+                llm_messages.append(LlmMessage(role=m["role"], content=m["content"]))
+            llm_messages.append(LlmMessage(role="user", content=prompt))
+            request = LlmRequest(messages=llm_messages)
             stream = self._llm_port.stream(request)
             tokens_in: int | None = None
             tokens_out: int | None = None

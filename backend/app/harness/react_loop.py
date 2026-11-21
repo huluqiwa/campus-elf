@@ -135,6 +135,7 @@ class ReactLoop:
         permissions: frozenset[str] | None = None,
         skip_route_stage: bool = False,
         trace_id: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """执行一个 ReAct 回合；产出 SSE 事件（类型化 AgentEvent）。
 
@@ -201,6 +202,8 @@ class ReactLoop:
                     turn_id=turn_id,
                     intents=[intent.name for intent in route.route.intents],
                     route_path="react",
+                    provider=self._llm_port.provider_name if self._llm_port else "",
+                    model=self._llm_port.model_name if self._llm_port else "",
                     prompt_name="react",
                     prompt_version="v1",
                     prompt_hash=self._registry.get("react", "v1").sha256,
@@ -439,8 +442,13 @@ class ReactLoop:
                     intents_block=_intents_block(route),
                     evidence_block=format_evidence(evidence),
                 )
+                # AI-06：上下文注入——近 10 轮对话原文 + 当前问题（含证据）
+                react_messages: list[LlmMessage] = []
+                for m in (history or []):
+                    react_messages.append(LlmMessage(role=m["role"], content=m["content"]))
+                react_messages.append(LlmMessage(role="user", content=answer_prompt))
                 stream = llm.stream(
-                    LlmRequest(messages=[LlmMessage(role="user", content=answer_prompt)])
+                    LlmRequest(messages=react_messages)
                 )
                 first: LlmStreamEvent = await stream.__anext__()
             # timeout 块外：delta 后按客户端节奏

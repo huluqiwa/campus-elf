@@ -183,7 +183,9 @@ class TraceRecord(BaseModel):
     conversation_id: UUID
     turn_id: UUID
     intents: list[str] = Field(default_factory=list)
-    route_path: Literal["fast", "react"] = "fast"
+    # guard：输入护栏直接终止（M4-AI06/07——orchestrator 护栏回合也落 trace，A5 每回合必写）
+    route_path: Literal["fast", "react", "guard"] = "fast"
+    provider: str = ""
     model: str = ""
     prompt_name: str = ""
     prompt_version: str = ""

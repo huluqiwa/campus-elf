@@ -18,6 +18,9 @@ StreamScriptItem = LlmStreamEvent | Exception
 class FakeLlm:
     """``LlmPort`` 的脚本化实现（仅测试用，绝不进生产装配）。"""
 
+    provider_name = "fake"
+    model_name = "fake-model"
+
     def __init__(
         self,
         *,
