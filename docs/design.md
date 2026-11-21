@@ -851,7 +851,11 @@ GET  /api/v1/platform/tenants/{id}/review-records
 ```text
 Fast Path（M4-AI01b 落地）：输入轻检 → ROUTE（规则直通单意图，零 LLM 调用）→
 RETRIEVE（kb.search 工具 + 证据文本 PG 回查）→ GENERATE（LLM 流式）→
-VERIFY（引用序号一致性——AI-09 哨兵接管改写，TD-332 收口）→
+VERIFY（引用校验——序号一致性由 AI-09 哨兵接管改写〔TD-332〕；
+**语义相关性已落地（M4-AI04）**：citation 事件前对答案全文 × 逐条被引证据
+做嵌入余弦校验（阈值 Settings 化，真实 TEI 探针校准 0.7），低于阈值从
+citation 事件剔除 + guard_events `output.ref_irrelevant` 留痕；正文残留 [n]
+为可接受降级〔流式已发不可撤回，与 TD-332 口径一致〕；nav: 入口证据豁免）→
 输出轻检（占位，AI-09）→ DONE
 ReAct（M4-AI01c 落地）：`ChatOrchestrator` 统一入口——发 meta/step(route)（首事件立出）
 → LLM 路由（route_v1 分类 → `RouteResult.intents[]`；失败降级单意图）→ 分派：
@@ -875,7 +879,7 @@ navigate 结果作为入口证据并入 citations。ctx 权限从 principal 派�
 | `kb.read_chunk` | `campus.chat.use`（MVP） | 读取本轮证据集内分块（白名单守卫，防 ACL 旁路）；只读 |
 | `campus.navigate` | `campus.nav` | 返回前端路由/入口；不写 |
 
-> 权限注记（M4-AI01b D2 / M4-AI01c 更新）：三工具 MVP 挂既有码（端点已强制 `campus.chat.use`，ctx 从 principal 权限派生——TD-334 收口）；navigate 已随 ReAct 激活；`campus.kb.qa` 独立码延后 AI-04 权限目录扩展（新码=目录+落库迁移+角色授予）。
+> 权限注记（M4-AI01b D2 / M4-AI01c 更新 / **M4-AI04 改判**）：三工具 MVP 挂既有码（端点已强制 `campus.chat.use`，ctx 从 principal 权限派生——TD-334 收口）；navigate 已随 ReAct 激活；`campus.kb.qa` 独立码**继续延后至 C 端聊天 UI 点**（原「延后 AI-04」经用户 2026-11-22 拍板改判：权限码消费方是前端菜单/按钮，AI-04 为纯后端校验，二者零耦合；新码=目录+落库迁移+角色授予）。
 
 - `ToolExecutor`：schema 校验 → 权限/租户/数据范围 → 超时 → 执行 → 审计/trace → 类型化结果。
 - 二期写工具必须 `side_effect=true` + 确认卡片 + 幂等 + 审批 + 沙箱 + 审计；MVP 不注册。
@@ -904,7 +908,7 @@ navigate 结果作为入口证据并入 citations。ctx 权限从 principal 派�
   Prometheus `campus_guard_hits_total{rule,severity,direction}`；自伤场景=支持性话术
   +GUARD_BLOCK 终止（M3 偏离 D5「放行检索」——安全优先登记 §10.4）；
   输入护栏在 orchestrator 层路由之前执行。
-- 引用校验：chunk_id 存在、属于当前租户/版本、与答案相关；失败修复或降级。
+- 引用校验：chunk_id 存在、属于当前租户/版本、与答案相关；失败修复或降级。**M4-AI04 落地**：存在性/归属=RETRIEVE 证据回查；超范围=哨兵剔除；语义相关=citation 前嵌入余弦校验（阈值 0.7 探针校准），失效引用从 citation 事件剔除 + guard_events 留痕；全部失效时正文保留、citation 面为空。
 
 ### 6.6 观测 / Langfuse
 
@@ -970,7 +974,9 @@ navigate 结果作为入口证据并入 citations。ctx 权限从 principal 派�
 
 > **chat 快路径落地口径（M4-AI01b）**：无 rerank（CPU 推理延迟不可进 chat——TD-056/331）；
 > 跨活跃版本 fan-out 后按 RRF 分数全局归并 `kb_chat_top_k`（默认 5）；无相邻块拼装与
-> 6k 预算（归 ReAct 点/压测批）；引用校验=序号一致性（语义相关性归 AI-04/TD-332）。
+> 6k 预算（归 ReAct 点/压测批）；引用校验=序号一致性（哨兵，TD-332）+ **语义相关性
+> （M4-AI04 落地：citation 前嵌入余弦，阈值 `kb_ref_min_similarity`=0.7 真实 TEI 探针
+> 校准——BGE-M3 中文基线相似度高，经验初值 0.4 实测无效；压测批复核）**。
 > 以下为通用 QA 管线设计（ReAct/后续点对齐）。
 
 1. Query 预处理（可选改写）。
