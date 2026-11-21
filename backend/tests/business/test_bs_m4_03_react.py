@@ -302,7 +302,8 @@ async def test_bs_m4_03_multi_intent_react_full_stream(
             [
                 LlmStreamEvent(
                     kind="delta",
-                    text_delta="差旅报销需要发票和审批单 [1]。请假入口见 [2]。",
+                    # AI-04：citation=被引子集——[3]（业务入口）须被正文引用才出现在 citation 事件
+                    text_delta="差旅报销需要发票和审批单 [1]。请假入口见 [2]，办理入口 [3]。",
                 ),
                 LlmStreamEvent(kind="finish", finish_reason="stop"),
                 LlmStreamEvent(kind="usage", tokens_in=300, tokens_out=30),

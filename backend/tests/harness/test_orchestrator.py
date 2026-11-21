@@ -150,7 +150,7 @@ async def test_simple_intent_dispatches_fast_path_order_unchanged() -> None:
     orchestrator, _sink = build_orchestrator(
         router_complete=router_json_single(),
         fast_llm=FakeLlm(
-            stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="答。"),
+            stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="答 [1]。"),
                              LlmStreamEvent(kind="finish", finish_reason="stop")]],
         ),
         react_llm=FakeLlm(),
@@ -164,6 +164,7 @@ async def test_simple_intent_dispatches_fast_path_order_unchanged() -> None:
         )
     )
 
+    # AI-04：citation=被引子集——脚本答案引用 [1] 才有 citation 事件
     assert types_of(events) == [
         "meta",
         "step",

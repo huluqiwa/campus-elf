@@ -42,6 +42,8 @@ from app.harness.contracts import (
 from app.harness.guards.stream_guard import StreamSentinel
 from app.harness.llm import LlmError, LlmMessage, LlmPort, LlmRequest, LlmStreamEvent
 from app.harness.prompts import PromptRegistry
+from app.harness.ref_semantics import REF_IRRELEVANT_RULE as _RULE_REF_IRRELEVANT
+from app.harness.ref_semantics import RefSemanticChecker, parse_cited
 from app.harness.tools import ToolExecutor
 from app.harness.trace import TraceRecorder, TraceSink
 from app.kb.chat_retrieval import ChatEvidence, ChatRetriever
@@ -100,6 +102,7 @@ class FastPathLoop:
         trace_sink: TraceSink,
         audit_sink: AuditSink,
         guard_events_sink: Any | None = None,
+        ref_checker: RefSemanticChecker | None = None,
         turn_timeout_s: float = 30.0,
         retrieve_timeout_s: float = 5.0,
     ) -> None:
@@ -109,6 +112,7 @@ class FastPathLoop:
         self._trace_sink = trace_sink
         self._audit_sink = audit_sink
         self._guard_events_sink = guard_events_sink
+        self._ref_checker = ref_checker
         self._turn_timeout_s = turn_timeout_s
         self._retrieve_timeout_s = retrieve_timeout_s
 
@@ -377,6 +381,8 @@ class FastPathLoop:
             tokens_out: int | None = None
             sentinel = StreamSentinel(evidence_count=len(evidence))
             guard_terminated = False
+            # AI-04：答案全文累计（= 用户实际所见：正常分片 + 哨兵替换文本 + 尾片）
+            answer_parts: list[str] = []
             try:
                 # 首 token 前 30s 硬超时（D5：关键段；delta 后流式按客户端节奏）。
                 async with asyncio.timeout(self._turn_timeout_s):
@@ -393,6 +399,7 @@ class FastPathLoop:
                             record_guard("output", chunk.results)
                         if chunk.terminated:
                             guard_terminated = True
+                            answer_parts.append(chunk.replacement_text or "")
                             yield event(
                                 AgentEventType.DELTA,
                                 {"text": chunk.replacement_text or ""},
@@ -400,6 +407,7 @@ class FastPathLoop:
                             break
                         if chunk.text:
                             yielded_any_delta = True
+                            answer_parts.append(chunk.text)
                             yield event(
                                 AgentEventType.DELTA, {"text": chunk.text}
                             )
@@ -450,6 +458,7 @@ class FastPathLoop:
                 record_guard("output", tail.results)
             if tail.terminated:
                 # M2：尾片 blocking 命中（flush_final 终止）——与 feed 期 guard_terminated 同款处置
+                answer_parts.append(tail.replacement_text or "")
                 yield event(
                     AgentEventType.DELTA,
                     {"text": tail.replacement_text or ""},
@@ -477,8 +486,57 @@ class FastPathLoop:
                 return
             if tail.text:
                 yielded_any_delta = True
+                answer_parts.append(tail.text)
                 yield event(AgentEventType.DELTA, {"text": tail.text})
-            for index, item in enumerate(evidence, start=1):
+
+            # AI-04：citation 被引子集 + 语义过滤（时序：全文已生成完毕）
+            answer_text = "".join(answer_parts)
+            kept_indices, removed_verdicts = await self._resolve_citations(
+                answer_text, evidence
+            )
+            if removed_verdicts:
+                spans.append(
+                    TraceSpan(
+                        trace_id=trace_id_resolved,
+                        tenant_id=tenant_id,
+                        span_type="verify",
+                        name="ref_semantics",
+                        start_ms=elapsed_ms(),
+                        duration_ms=0,
+                        attributes={
+                            "checked": len(kept_indices) + len(removed_verdicts),
+                            "removed": len(removed_verdicts),
+                            "min_similarity": (
+                                self._ref_checker.min_similarity
+                                if self._ref_checker is not None
+                                else None
+                            ),
+                        },
+                    )
+                )
+                guard_results = [
+                    GuardResult(
+                        action="redact",
+                        rule=_RULE_REF_IRRELEVANT,
+                        severity="low",
+                        reason=(
+                            f"引用 [{v.index}] 与答案语义相关性不足"
+                            f"（sim={v.similarity:.2f}）——citation 剔除"
+                        ),
+                    )
+                    for v in removed_verdicts
+                ]
+                for gr in guard_results:
+                    record_guard_hit(gr.rule, gr.severity, "output")
+                if self._guard_events_sink is not None:
+                    self._guard_events_sink.append(
+                        tenant_id=tenant_id,
+                        trace_id=trace_id_resolved,
+                        direction="output",
+                        results=guard_results,
+                    )
+            for index in kept_indices:
+                item = evidence[index - 1]
                 yield event(
                     AgentEventType.CITATION,
                     {
@@ -539,6 +597,30 @@ class FastPathLoop:
         yield first
         async for llm_event in stream:
             yield llm_event
+
+    async def _resolve_citations(
+        self, answer_text: str, evidence: list[ChatEvidence],
+    ) -> tuple[list[int], list[Any]]:
+        """citation 被引子集 + 语义过滤（AI-04）：返回（保留序号升序, 剔除明细）。
+
+        checker=None → 仅正文解析（D1）；checker 故障 → fail-open 按正文解析
+        并 warning（A4——质量检查不阻塞回合）。剔除事件的落库/计数由调用方
+        在拿到 removed 后执行。
+        """
+
+        cited = parse_cited(answer_text, len(evidence))
+        if self._ref_checker is None:
+            return cited, []
+        try:
+            result = await self._ref_checker.check(answer_text, evidence)
+        except Exception:
+            logger.warning(
+                "引用语义校验失败（fail-open：按正文解析保留被引 citation）",
+                exc_info=True,
+            )
+            return cited, []
+        kept = [v.index for v in result.verdicts if v.relevant]
+        return kept, list(result.removed)
 
     def _prompt_hash(self) -> str:
         """当前生产 prompt 的 sha256（trace 元数据）。"""

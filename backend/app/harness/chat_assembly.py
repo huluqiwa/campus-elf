@@ -8,6 +8,7 @@ from app.harness.loop import FastPathLoop
 from app.harness.orchestrator import ChatOrchestrator
 from app.harness.prompt_loading import build_default_registry
 from app.harness.react_loop import ReactLoop
+from app.harness.ref_semantics import RefSemanticChecker
 from app.harness.router import LlmRouter
 from app.harness.trace import TraceSink
 from app.kb.chat_retrieval import ChatRetriever
@@ -39,6 +40,10 @@ def build_chat_loop(
     registry = build_default_registry()
     audit_sink = DbAuditSink(actor_realm="tenant")
     guard_events_sink = GuardEventsDbSink()
+    # 引用语义校验（M4-AI04）：两条路径同一 checker（同 embedder 同阈值——A5）
+    ref_checker = RefSemanticChecker(
+        embedder=embedder, min_similarity=settings.kb_ref_min_similarity,
+    )
     fast_loop = FastPathLoop(
         llm_port=llm_port,
         retriever=retriever,
@@ -46,6 +51,7 @@ def build_chat_loop(
         trace_sink=trace_sink,
         audit_sink=audit_sink,
         guard_events_sink=guard_events_sink,
+        ref_checker=ref_checker,
     )
     react_loop = ReactLoop(
         llm_port=llm_port,
@@ -54,6 +60,7 @@ def build_chat_loop(
         trace_sink=trace_sink,
         audit_sink=audit_sink,
         guard_events_sink=guard_events_sink,
+        ref_checker=ref_checker,
         max_decisions=settings.react_max_model_decisions,
         max_tool_calls=settings.react_max_tool_calls,
         max_retrievals=settings.react_max_retrievals,

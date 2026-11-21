@@ -152,3 +152,51 @@ requirements AI-04 注记 / milestone AI-04 过账（里程碑边界评审时）
 
 引用校验触及 AI 输出改写（citation 剔除），按 §11.7 从严：**简报经用户确认后
 再编码**；判定本身 fail-open 不阻断回答（质量检查不阻塞——M6 口径延续）。
+
+---
+
+## §10 实现注记（编码后回填）
+
+### 10.1 落地文件
+
+- `app/harness/ref_semantics.py`（新增）：EmbedPort 协议 / parse_cited / cosine_similarity /
+  RefVerdict / RefCheckResult / RefSemanticChecker（含 **nav: 豁免**）+ `REF_IRRELEVANT_RULE`
+- `app/harness/loop.py`：构造器 ref_checker 参数；答案全文累计（正常分片+哨兵替换+尾片）；
+  `_resolve_citations`（fail-open）；citation 被引子集 + verify span + guard 事件
+- `app/harness/react_loop.py`：同构接线
+- `app/harness/chat_assembly.py`：RefSemanticChecker 构建（TEI embedder + Settings 阈值）注入两 loop
+- `app/config.py`：`kb_ref_min_similarity`
+- 测试：`tests/harness/test_ref_semantics.py`（9）+ test_fast_path_loop/test_react_loop 追加弧（4）+
+  `tests/business/test_bs_m4_06_ref_semantics.py`（真实栈三弧）
+
+### 10.2 与简报的偏离（全登记）
+
+1. **阈值 0.4 → 0.7（真实 TEI 探针校准，2026-11-22）**：BGE-M3 对任意中文句对的余弦
+   基线很高——实测相关对 0.82~0.85、无关对 0.56~0.68、同域不同主题 0.64~0.68，**0.4
+   初值下全部配对 ≥0.4，校验完全无效**。0.7 为探针分界值；D5 的「未经校准」预判
+   （TD-P1）兑现为本次实测校准，压测批复核保留。
+2. **nav: 入口证据豁免语义校验**（简报未预期）：`chunk_id` 以 `nav:` 开头的业务入口
+   证据是 ReAct 决策器**主动获取**的确定性证据（非检索相关性产物），文本为
+   label:route 短标签——语义校验对它必然误杀（业务入口引用是 AI-01c 核心 UX）；
+   引用即视为相关（sim=1.0），不参与嵌入批次。
+3. **guard_events 落库列 = `excerpt_redacted`**（非 reason）：GuardResult.reason 经
+   GuardEventsDbSink 映射到脱敏摘录列（AI-09 既有管道）。
+4. **BS-M4-06 弧 3 从「零证据兜底」改为「全部引用失效」**：两块迷你语料对任意 query
+   必有命中（无分数阈值——卡 5 口径），「不相关 query → 零命中」不可构造；改为断言
+   答案与两块全无关时 citation 面为空 + 两条 guard 行（A2 边界）。零证据兜底回归由
+   BS-M4-02 ACL 弧背书。
+5. **既有测试修正三处（行为变更连带）**：test_orchestrator 脚本答案「答。」→「答 [1]。」
+   （citation 事件需正文引用）；BS-M4-01 答案补 `[2]`（招待费句——与脚本断言 [1,2]
+   对齐且语义真实）；BS-M4-03 答案补 `[3]`（办理入口句——原答案引用 [2] 表达「请假
+   入口」与招待块语义错位）。
+
+### 10.3 门禁读数（2026-11-22）
+
+- `ruff` 0 / `mypy` app+tests 327 文件 0 / `bandit`×2 EXIT=0 / `alembic check` 无漂移（零迁移）
+- 受影响子集（harness 全量 + business 全量 + baseline + bare SQL 守卫 + rbac +
+  conversation_api）：终值见提交信息（全绿为合并前提）
+- 真实 TEI 探针（校准依据）：相关对 0.8199/0.8440/0.8505；无关对 0.5568/0.6428/0.6760
+
+### 10.4 审查处置
+
+（待独立审查后回填。）

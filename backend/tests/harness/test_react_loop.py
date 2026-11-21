@@ -5,6 +5,8 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from app.harness.contracts import Intent, RouteResult
 from app.harness.llm import LlmError, LlmErrorCode, LlmResponse, LlmStreamEvent
 from app.harness.prompt_loading import build_default_registry
@@ -483,3 +485,76 @@ async def test_think_llm_error_maps_to_error_event() -> None:
     assert types_of(events)[-1] == "error"
     assert events[-1].payload["code"] == "LLM_TIMEOUT"
     assert all(name != "done" for name in types_of(events))
+
+# ---------------------------------------------------------------------------
+# AI-04：citation 被引子集 + 语义过滤
+# ---------------------------------------------------------------------------
+
+
+class StubRefChecker:
+    """AI-04 stub：按 chunk_id 黑名单判无关。"""
+
+    def __init__(self, *, irrelevant: set[str] | None = None) -> None:
+        self._irrelevant = irrelevant or set()
+        self.min_similarity = 0.4
+
+    async def check(self, answer_text: str, evidence: list[Any]) -> Any:
+        from app.harness.ref_semantics import RefCheckResult, RefVerdict, parse_cited
+
+        cited = parse_cited(answer_text, len(evidence))
+        verdicts = []
+        removed = []
+        for index in cited:
+            ev = evidence[index - 1]
+            relevant = ev.chunk_id not in self._irrelevant
+            verdict = RefVerdict(
+                index=index, chunk_id=ev.chunk_id,
+                similarity=0.9 if relevant else 0.1, relevant=relevant,
+            )
+            verdicts.append(verdict)
+            if not relevant:
+                removed.append(verdict)
+        return RefCheckResult(cited=cited, verdicts=verdicts, removed=removed, checked=True)
+
+
+@pytest.mark.asyncio
+async def test_react_citation_filter_removes_irrelevant() -> None:
+    """stub checker 判 c2 无关 → citation 只剩 [1] + verify span + guard 事件。"""
+
+    retriever = StubRetriever(evidence=[evidence("c1", "报销需发票。"), evidence("c2", "考勤时间。")])
+    fake = FakeLlm(
+        complete_scripts=[
+            kb_response([tool_call("kb.search", json.dumps({"query": "差旅报销"}, ensure_ascii=False))]),
+            kb_response(text="DONE"),
+        ],
+        stream_scripts=[
+            [
+                LlmStreamEvent(kind="delta", text_delta="报销需发票 [1]。考勤见 [2]。"),
+                LlmStreamEvent(kind="finish", finish_reason="stop"),
+                LlmStreamEvent(kind="usage", tokens_in=200, tokens_out=20),
+            ]
+        ],
+    )
+
+    class _CaptureGuardSink:
+        def __init__(self) -> None:
+            self.events: list[dict[str, Any]] = []
+
+        def append(self, **kwargs: Any) -> None:
+            self.events.append(kwargs)
+
+    guard_sink = _CaptureGuardSink()
+    loop, sink, _audit = build_loop(
+        fake, retriever, ref_checker=StubRefChecker(irrelevant={"c2"}),
+        guard_events_sink=guard_sink,
+    )
+    events = await collect(loop.run(
+        tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(),
+        message="差旅报销", route=two_intent_route(),
+    ))
+    citations = [e.payload for e in events if e.type.value == "citation"]
+    assert [c["index"] for c in citations] == [1]
+    verify_spans = [s for s in sink.turns[-1].spans if s.span_type == "verify"]
+    assert len(verify_spans) == 1
+    assert verify_spans[0].attributes["removed"] == 1
+    assert guard_sink.events[0]["results"][0].rule == "output.ref_irrelevant"
