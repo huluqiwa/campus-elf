@@ -173,3 +173,22 @@ def test_min_similarity_bounds_validated() -> None:
 
 def test_embed_port_protocol_satisfied_by_fake() -> None:
     assert isinstance(FakeEmbedder(table={}), EmbedPort)
+
+@pytest.mark.asyncio
+async def test_check_similarity_equal_threshold_is_relevant() -> None:
+    """sim 恰等于阈值 → 相关（>= 判据，简报 §5 步 1 的边界弧）。
+
+    同向单位向量余弦恒为精确 1.0（无浮点漂移），阈值取 1.0 构造精确等值。
+    """
+
+    table = {
+        "答案 [1]。": [1.0, 0.0],
+        "答案块。": [1.0, 0.0],
+    }
+    checker, _ = _make_checker(table, min_similarity=1.0)
+    ev = [evidence("c1", "答案块。")]
+    result = await checker.check("答案 [1]。", ev)
+
+    assert result.removed == []
+    assert result.verdicts[0].relevant is True
+    assert result.verdicts[0].similarity == pytest.approx(1.0)

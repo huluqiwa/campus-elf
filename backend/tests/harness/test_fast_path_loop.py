@@ -598,3 +598,18 @@ async def test_citation_fail_open_when_checker_raises() -> None:
     citations = [e.payload for e in events if e.type.value == "citation"]
     assert [c["index"] for c in citations] == [1, 2]  # fail-open：全部保留
     assert guard_sink.events == []
+
+@pytest.mark.asyncio
+async def test_citation_zero_refs_emits_no_citation() -> None:
+    """正文零引用（A2 头条行为）→ 零 citation 事件（绝不回退全量证据）。"""
+
+    retriever = StubRetriever(evidence=[evidence("c1", "请假需班主任审批。")])
+    fake = FakeLlm(
+        stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="直接回答，不带引用标记。"),
+                         LlmStreamEvent(kind="finish", finish_reason="stop")]],
+    )
+    loop, _sink = _build_loop_with(fake, retriever)
+    events = await collect(loop.run(
+        tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(), message="请假流程",
+    ))
+    assert [e.type.value for e in events if e.type.value == "citation"] == []

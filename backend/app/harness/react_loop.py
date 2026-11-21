@@ -53,7 +53,7 @@ from app.harness.llm import LlmError, LlmMessage, LlmPort, LlmRequest, LlmStream
 from app.harness.loop import format_evidence
 from app.harness.prompts import PromptRegistry
 from app.harness.ref_semantics import REF_IRRELEVANT_RULE as _RULE_REF_IRRELEVANT
-from app.harness.ref_semantics import RefSemanticChecker, parse_cited
+from app.harness.ref_semantics import RefSemanticChecker, RefVerdict, parse_cited
 from app.harness.router import RouterOutcome
 from app.harness.tools import ToolExecutor
 from app.harness.trace import TraceRecorder, TraceSink
@@ -499,14 +499,19 @@ class ReactLoop:
                     AgentEventType.DELTA,
                     {"text": tail.replacement_text or ""},
                 )
-            if guard_hits:
-                for hit in guard_hits:
+            def record_output_events(results: list[GuardResultContract]) -> None:
+                """输出护栏事件统一出口：metrics + guard_events 落库（第 1 轮审查 Minor-4）。"""
+
+                for hit in results:
                     record_guard_hit(hit.rule, hit.severity, "output")
-                if self._guard_events_sink is not None:
+                if self._guard_events_sink is not None and results:
                     self._guard_events_sink.append(
                         tenant_id=tenant_id, trace_id=resolved_trace, direction="output",
-                        results=guard_hits,
+                        results=results,
                     )
+
+            if guard_hits:
+                record_output_events(guard_hits)
             if guard_terminated:
                 yield event(
                     AgentEventType.DONE,
@@ -557,6 +562,7 @@ class ReactLoop:
                         },
                     )
                 )
+                recorder.record_span(spans[-1])  # 与 stage_span 同款双通道（第 1 轮审查 Minor-5）
                 ref_guard_results = [
                     GuardResultContract(
                         action="redact",
@@ -569,13 +575,7 @@ class ReactLoop:
                     )
                     for v in removed_verdicts
                 ]
-                for gr in ref_guard_results:
-                    record_guard_hit(gr.rule, gr.severity, "output")
-                if self._guard_events_sink is not None:
-                    self._guard_events_sink.append(
-                        tenant_id=tenant_id, trace_id=resolved_trace,
-                        direction="output", results=ref_guard_results,
-                    )
+                record_output_events(ref_guard_results)
             for index in kept_indices:
                 item = evidence[index - 1]
                 yield event(
@@ -669,7 +669,7 @@ class ReactLoop:
 
     async def _resolve_citations(
         self, answer_text: str, evidence: list[ChatEvidence],
-    ) -> tuple[list[int], list[Any]]:
+    ) -> tuple[list[int], list[RefVerdict]]:
         """citation 被引子集 + 语义过滤（AI-04）：返回（保留序号升序, 剔除明细）。
 
         与快路径同款：checker=None → 仅正文解析；checker 故障 → fail-open

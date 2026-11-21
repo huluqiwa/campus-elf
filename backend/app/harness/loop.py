@@ -43,7 +43,7 @@ from app.harness.guards.stream_guard import StreamSentinel
 from app.harness.llm import LlmError, LlmMessage, LlmPort, LlmRequest, LlmStreamEvent
 from app.harness.prompts import PromptRegistry
 from app.harness.ref_semantics import REF_IRRELEVANT_RULE as _RULE_REF_IRRELEVANT
-from app.harness.ref_semantics import RefSemanticChecker, parse_cited
+from app.harness.ref_semantics import RefSemanticChecker, RefVerdict, parse_cited
 from app.harness.tools import ToolExecutor
 from app.harness.trace import TraceRecorder, TraceSink
 from app.kb.chat_retrieval import ChatEvidence, ChatRetriever
@@ -514,6 +514,7 @@ class FastPathLoop:
                         },
                     )
                 )
+                recorder.record_span(spans[-1])  # 与 stage_span 同款双通道（第 1 轮审查 Minor-5）
                 guard_results = [
                     GuardResult(
                         action="redact",
@@ -526,15 +527,7 @@ class FastPathLoop:
                     )
                     for v in removed_verdicts
                 ]
-                for gr in guard_results:
-                    record_guard_hit(gr.rule, gr.severity, "output")
-                if self._guard_events_sink is not None:
-                    self._guard_events_sink.append(
-                        tenant_id=tenant_id,
-                        trace_id=trace_id_resolved,
-                        direction="output",
-                        results=guard_results,
-                    )
+                record_guard("output", guard_results)
             for index in kept_indices:
                 item = evidence[index - 1]
                 yield event(
@@ -600,7 +593,7 @@ class FastPathLoop:
 
     async def _resolve_citations(
         self, answer_text: str, evidence: list[ChatEvidence],
-    ) -> tuple[list[int], list[Any]]:
+    ) -> tuple[list[int], list[RefVerdict]]:
         """citation 被引子集 + 语义过滤（AI-04）：返回（保留序号升序, 剔除明细）。
 
         checker=None → 仅正文解析（D1）；checker 故障 → fail-open 按正文解析
