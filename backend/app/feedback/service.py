@@ -5,15 +5,19 @@
 
 加密（D2）：快照 AES-256-GCM，复用 `ENCRYPTION_KEK`，AAD=`ai_feedback:{tenant}:{feedback}`
 与 MFA（mfa:）/身份证（idcard:）同 KEK 不同 AAD 域——跨域密文不可解（AAD 绑定）。
-脱敏（卡 3）：comment 提交时过输出扫描 PII 规则（复用 guards 检测器，仅取 redact 后文本）。
+脱敏（卡 3 / 第 1 轮审查 Minor-2）：comment 提交走**专用脱敏**（仅身份证/密钥/
+内网地址）——不套输出扫描全套（REF_MARKER/XSS 属 AI 回答红线，会改写用户反馈
+原文；手机号属「自身 PII 放行」AI-09 卡 4-A 口径）。
 """
 
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import tuple_
+from sqlalchemy.exc import IntegrityError
 
 from app.audit.writer import append_audit
 from app.db.models.ai import (
@@ -23,10 +27,14 @@ from app.db.models.ai import (
     Conversation,
     ConversationMessage,
 )
-from app.db.repository import ScopeBypass, TenantScopedRepository
+from app.db.repository import CursorError, ScopeBypass, TenantScopedRepository, decode_cursor
 from app.db.session import db_session
-from app.harness.guards.output import scan_output
-from app.security.encryption import decrypt_secret, encrypt_secret
+from app.harness.guards.rules import (
+    INTERNAL_ADDR_PATTERNS,
+    PII_PATTERNS,
+    SECRET_PATTERNS,
+)
+from app.security.encryption import SecretDecryptError, decrypt_secret, encrypt_secret
 
 RATING_VALUES = frozenset({"helpful", "unhelpful"})
 REASON_TAGS = frozenset({"inaccurate", "irrelevant", "outdated", "harmful", "other"})
@@ -52,15 +60,27 @@ def feedback_aad(tenant_id: UUID | str, feedback_id: UUID | str) -> bytes:
     return f"ai_feedback:{tenant_id}:{feedback_id}".encode()
 
 
-def redact_comment(comment: str) -> str:
-    """comment 提交脱敏：过输出扫描，仅取 redact 后文本（卡 3）。
+# 反馈通道专用脱敏规则（第 1 轮审查 Minor-2）：仅身份证/密钥/内网地址——
+# 不套用输出扫描全套（REF_MARKER/XSS 属 AI 回答红线，套用会改写用户反馈原文；
+# 手机号属「自身 PII 放行」——AI-09 卡 4-A 口径）
+_REDACT_COMPILED: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    [(p, "output.pii_idcard") for p in PII_PATTERNS]
+    + [(p, "output.secret") for p in SECRET_PATTERNS]  # nosec B105——规则名非密码
+    + [(p, "output.internal_addr") for p in INTERNAL_ADDR_PATTERNS]
+)
 
-    blocking 类命中（自伤/注入等）不阻断反馈——反馈是用户表达通道，
-    只做 PII 清除（身份证/手机号/邮箱/密钥/内网地址）。
+
+def redact_comment(comment: str) -> str:
+    """comment 提交脱敏（卡 3）：仅清除身份证/密钥/内网地址三类。
+
+    不拦截、不改写其他内容（反馈是用户表达通道；引用标记/XSS 等输出红线
+    不适用于用户输入文本）。
     """
 
-    scan = scan_output(comment, evidence_count=0)
-    return scan.redacted_text or comment
+    redacted = comment
+    for pattern, rule in _REDACT_COMPILED:
+        redacted = pattern.sub(f"[REDACTED:{rule}]", redacted)
+    return redacted
 
 
 def encrypt_snapshot(payload: dict[str, Any], *, kek: bytes, tenant_id: UUID, feedback_id: UUID) -> str:
@@ -112,24 +132,11 @@ async def submit_feedback(
     """
 
     clean_comment = _validate_payload(rating, reason_tags, comment)
+    unique_tags = sorted(set(reason_tags))
     async with db_session(tenant_id=tenant_id) as session:
-        # 幂等重放（卡 2：唯一约束 (tenant, conversation, turn)）
-        repo = TenantScopedRepository(
-            session, AiFeedback, tenant_id,
-            scope=ScopeBypass(reason="AI 反馈：本人对自身会话回合的反馈"),
-        )
-        existing = (
-            await session.execute(
-                repo.base_query().where(
-                    AiFeedback.conversation_id == conversation_id,
-                    AiFeedback.turn_id == turn_id,
-                )
-            )
-        ).scalars().first()
-        if existing is not None:
-            return existing.id, True
-
-        # 归属校验（D5）：会话本人 + trace 存在且属于本会话本人（不满足 → 404 语义）
+        # 归属校验（D5）先行——幂等重放查询必须带 user_id 谓词（第 1 轮审查
+        # Major-1：无谓词时同租他人拿到 conversation+turn 两 UUID 可探测
+        # feedback_id 存在性，绕过 D5 的 404 语义）
         conv_repo = TenantScopedRepository(
             session, Conversation, tenant_id,
             scope=ScopeBypass(reason="AI 反馈：归属校验（会话本人）"),
@@ -152,6 +159,35 @@ async def submit_feedback(
         ).scalars().first()
         if trace_row is None:
             raise FeedbackError("FEEDBACK_TARGET_NOT_FOUND")
+
+        # 幂等重放（卡 2）：仅本人已有反馈才重放；Major-2 补审计（重放意图留痕）
+        repo = TenantScopedRepository(
+            session, AiFeedback, tenant_id,
+            scope=ScopeBypass(reason="AI 反馈：本人对自身会话回合的反馈"),
+        )
+        existing = (
+            await session.execute(
+                repo.base_query().where(
+                    AiFeedback.conversation_id == conversation_id,
+                    AiFeedback.turn_id == turn_id,
+                    AiFeedback.user_id == user_id,
+                )
+            )
+        ).scalars().first()
+        if existing is not None:
+            await append_audit(
+                session,
+                action="campus.feedback.create",
+                resource_type="ai_feedback",
+                resource_id=str(existing.id),
+                actor_realm="tenant",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                result="success",
+                metadata={"rating": rating, "replayed": True},
+            )
+            await session.commit()
+            return existing.id, True
 
         # 快照（D1）：被反馈轮问/答/引用（trace_id 定位 conversation_messages）
         msg_repo = TenantScopedRepository(
@@ -191,12 +227,20 @@ async def submit_feedback(
             message_id=assistant_msg.id if assistant_msg is not None else None,
             trace_id=trace_id,
             rating=rating,
-            reason_tags=list(reason_tags),
+            reason_tags=unique_tags,
             comment=clean_comment or None,
             content_snapshot_enc=snapshot_enc,
             status=_STATUS_SUBMITTED,
         )
         session.add(feedback)
+        try:
+            await session.flush()
+        except IntegrityError:
+            # 并发同键双写 / 匿名化旧行占位（用户删除后对同轮重新提交——第 1 轮
+            # 审查 Minor-5：唯一键禁止新插，「复活行」会写回 user_id 破坏断链
+            # 不变量）→ 显式 409，语义决策随 TD-343
+            await session.rollback()
+            raise FeedbackError("FEEDBACK_ALREADY_EXISTS") from None
         await append_audit(
             session,
             action="campus.feedback.create",
@@ -341,9 +385,14 @@ async def get_feedback_detail(
         anonymized = feedback.status == _STATUS_ANONYMIZED
         snapshot: dict[str, Any] | None = None
         if not anonymized and feedback.content_snapshot_enc:
-            snapshot = decrypt_snapshot(
-                feedback.content_snapshot_enc, kek=kek, tenant_id=tenant_id, feedback_id=feedback.id,
-            )
+            # KEK 轮换/密文损坏 → 显式 503（第 1 轮审查 Minor-7：不裸 500）
+            try:
+                snapshot = decrypt_snapshot(
+                    feedback.content_snapshot_enc,
+                    kek=kek, tenant_id=tenant_id, feedback_id=feedback.id,
+                )
+            except (SecretDecryptError, json.JSONDecodeError) as exc:
+                raise FeedbackError("FEEDBACK_SNAPSHOT_UNAVAILABLE") from exc
         return {
             "id": str(feedback.id),
             "conversation_id": str(feedback.conversation_id),
@@ -363,8 +412,6 @@ async def list_feedback(
     *, tenant_id: UUID, rating: str | None, limit: int, cursor: str | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """B 端列表（A3）：rating 可选筛选 + keyset 游标（created_at desc, id desc）。"""
-
-    from app.db.repository import CursorError, decode_cursor
 
     async with db_session(tenant_id=tenant_id) as session:
         repo = TenantScopedRepository(

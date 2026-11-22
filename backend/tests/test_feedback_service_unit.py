@@ -87,3 +87,19 @@ def test_validate_comment_pii_redacted_in_payload() -> None:
 
     cleaned = _validate_payload("unhelpful", ["irrelevant"], "答非所问，证件号 11010119900307777X")
     assert "11010119900307777X" not in cleaned
+
+def test_redact_comment_preserves_refs_and_non_pii() -> None:
+    """专用脱敏（第 1 轮审查 Minor-2）：引用标记/普通内容保留，仅身份证/密钥/内网清除。"""
+
+    text_in = "第[1]条引用对不上，密钥 sk-abcdef1234567890abcdef1234 泄露在回答里。"
+    redacted = redact_comment(text_in)
+    assert "[1]" in redacted  # REF_MARKER 保留（不再误改写用户原文）
+    assert "sk-abcdef" not in redacted
+    assert "泄露在回答里" in redacted
+
+
+def test_redact_comment_preserves_xss_like_text() -> None:
+    """XSS 形态文本不脱敏不拦截（输出红线不适用用户输入通道）。"""
+
+    text_in = "回答里出现了 <script>alert(1)</script> 这段代码"
+    assert redact_comment(text_in) == text_in

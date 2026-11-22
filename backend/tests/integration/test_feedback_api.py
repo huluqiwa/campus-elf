@@ -237,8 +237,8 @@ async def test_submit_feedback_idempotent_and_encrypted(fb_env: AsyncClient) -> 
     body2 = resp2.json()
     assert body2["replayed"] is True
     assert body2["feedback_id"] == body["feedback_id"]
-    # 重放不写新审计（幂等路径无写操作）
-    assert await _audit_count(tenant_id, "campus.feedback.create") == 1
+    # 重放也写审计（第 1 轮审查 Major-2：重放意图留痕 metadata.replayed=true）
+    assert await _audit_count(tenant_id, "campus.feedback.create") == 2
 
 
 @pytest.mark.asyncio
@@ -273,6 +273,30 @@ async def test_submit_feedback_target_validation(fb_env: AsyncClient) -> None:
         "trace_id": trace_id, "rating": "helpful", "reason_tags": ["自定义"],
     }, headers=headers)
     assert bad_tags.status_code == 422
+
+    # Major-1：已有反馈的轮，他人提交 → 404（重放路径不绕过归属校验/不泄露存在性）
+    fb_resp = await fb_env.post(CREATE_URL, json={
+        "conversation_id": str(conversation_id), "turn_id": str(turn_id),
+        "trace_id": trace_id, "rating": "helpful", "reason_tags": [],
+    }, headers=headers)
+    assert fb_resp.status_code == 201
+    other_replay = await fb_env.post(CREATE_URL, json={
+        "conversation_id": str(conversation_id), "turn_id": str(turn_id),
+        "trace_id": trace_id, "rating": "helpful", "reason_tags": [],
+    }, headers=other_headers)
+    assert other_replay.status_code == 404
+
+    # Minor-5 关联：本人删除后对同轮重新提交 → 409（唯一键被匿名化行占位，
+    # 「复活行」会破坏断链不变量；语义决策随 TD-343）
+    fb_id = fb_resp.json()["feedback_id"]
+    deleted = await fb_env.delete(f"{CREATE_URL}/{fb_id}", headers=headers)
+    assert deleted.status_code == 200
+    resubmit = await fb_env.post(CREATE_URL, json={
+        "conversation_id": str(conversation_id), "turn_id": str(turn_id),
+        "trace_id": trace_id, "rating": "helpful", "reason_tags": [],
+    }, headers=headers)
+    assert resubmit.status_code == 409
+    assert resubmit.json()["detail"] == "FEEDBACK_ALREADY_EXISTS"
 
 
 @pytest.mark.asyncio
@@ -399,6 +423,25 @@ async def test_b_side_view_handle_reply_and_anonymize(fb_env: AsyncClient) -> No
     fb2 = resp2.json()["feedback_id"]
     cross = await fb_env.delete(f"{CREATE_URL}/{fb2}", headers=other_headers)
     assert cross.status_code == 404
+
+    # Minor-8：跨租 404（第二租户的校方 handler 查第一租户反馈）
+    admin_engine = make_test_engine("admin")
+    try:
+        await seed_tenant_user(
+            admin_engine, school_code="SCH-AI05-B", login_id="SCH-B-7190",
+            password=PASSWORD, user_type="teacher",
+            permissions=("school.feedback.view", "school.feedback.update"),
+        )
+    finally:
+        await admin_engine.dispose()
+    other_tenant_headers = await login_tenant(
+        fb_env, school_code="SCH-AI05-B", login_id="SCH-B-7190", password=PASSWORD,
+    )
+    cross_detail = await fb_env.get(f"/api/v1/school/feedback/{fb2}", headers=other_tenant_headers)
+    assert cross_detail.status_code == 404
+    cross_list = await fb_env.get("/api/v1/school/feedback", headers=other_tenant_headers)
+    assert cross_list.status_code == 200
+    assert cross_list.json()["feedback"] == []  # 跨租列表只见本租（空）
 
 
 @pytest.mark.asyncio

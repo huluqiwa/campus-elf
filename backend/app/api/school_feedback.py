@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.auth.principal import Principal, require_permission
-from app.config import get_settings
+from app.feedback.errors import get_kek, http_from
 from app.feedback.service import (
     REPLY_MAX_CHARS,
     FeedbackError,
@@ -22,28 +22,11 @@ from app.feedback.service import (
     mark_handled,
     reply_feedback,
 )
-from app.security.encryption import decode_kek
 
 router = APIRouter(prefix="/school/feedback", tags=["school-feedback"])
 
 _ViewDep = require_permission("school.feedback.view", realm="tenant")
 _UpdateDep = require_permission("school.feedback.update", realm="tenant")
-
-_ERROR_STATUS = {
-    "FEEDBACK_TARGET_NOT_FOUND": 404,
-    "FEEDBACK_ANONYMIZED": 409,
-    "FEEDBACK_RATING_INVALID": 422,
-    "FEEDBACK_REPLY_INVALID": 422,
-    "FEEDBACK_CURSOR_INVALID": 400,
-}
-
-
-def _http_from(exc: FeedbackError) -> HTTPException:
-    return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=exc.code)
-
-
-def _kek() -> bytes:
-    return decode_kek(get_settings().encryption_kek)
 
 
 @router.get("")
@@ -63,7 +46,7 @@ async def list_school_feedback(
             tenant_id=tenant_id, rating=rating, limit=limit, cursor=cursor,
         )
     except FeedbackError as exc:
-        raise _http_from(exc) from exc
+        raise http_from(exc) from exc
     return {"feedback": items, "next_cursor": next_cursor}
 
 
@@ -79,10 +62,10 @@ async def get_school_feedback(
         raise HTTPException(status_code=403, detail="缺少租户上下文")
     try:
         return await get_feedback_detail(
-            tenant_id=tenant_id, feedback_id=feedback_id, kek=_kek(),
+            tenant_id=tenant_id, feedback_id=feedback_id, kek=get_kek(),
         )
     except FeedbackError as exc:
-        raise _http_from(exc) from exc
+        raise http_from(exc) from exc
 
 
 @router.post("/{feedback_id}/handle")
@@ -100,7 +83,7 @@ async def handle_school_feedback(
             tenant_id=tenant_id, handler_id=principal.user_id, feedback_id=feedback_id,
         )
     except FeedbackError as exc:
-        raise _http_from(exc) from exc
+        raise http_from(exc) from exc
     return {"feedback_id": str(feedback_id), "status": "handled", "executed_now": executed_now}
 
 
@@ -127,5 +110,5 @@ async def reply_school_feedback(
             feedback_id=feedback_id, content=payload.content,
         )
     except FeedbackError as exc:
-        raise _http_from(exc) from exc
+        raise http_from(exc) from exc
     return {"feedback_id": str(feedback_id), "reply_id": str(reply_id)}

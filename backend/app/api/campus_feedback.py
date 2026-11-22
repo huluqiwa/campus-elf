@@ -13,40 +13,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.auth.principal import Principal, require_permission
-from app.config import get_settings
+from app.feedback.errors import get_kek, http_from
 from app.feedback.service import (
     COMMENT_MAX_CHARS,
     FeedbackError,
     anonymize_feedback,
     submit_feedback,
 )
-from app.security.encryption import decode_kek
 
 router = APIRouter(prefix="/campus", tags=["campus"])
 
 _CreateDep = require_permission("campus.feedback.create", realm="tenant")
-
-_ERROR_STATUS = {
-    "FEEDBACK_TARGET_NOT_FOUND": 404,
-    "FEEDBACK_RATING_INVALID": 422,
-    "FEEDBACK_TAGS_INVALID": 422,
-    "FEEDBACK_COMMENT_TOO_LONG": 422,
-    "FEEDBACK_REPLY_INVALID": 422,
-    "FEEDBACK_ANONYMIZED": 409,
-    "FEEDBACK_CURSOR_INVALID": 400,
-}
-
-
-def _http_from(exc: FeedbackError) -> HTTPException:
-    """领域错误码 → HTTP 状态（端点层统一映射）。"""
-
-    return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=exc.code)
-
-
-def _kek() -> bytes:
-    """ENCRYPTION_KEK（复用既有主密钥，AAD 域隔离——简报 D2）。"""
-
-    return decode_kek(get_settings().encryption_kek)
 
 
 class FeedbackCreateRequest(BaseModel):
@@ -81,10 +58,10 @@ async def create_feedback(
             rating=payload.rating,
             reason_tags=payload.reason_tags,
             comment=payload.comment,
-            kek=_kek(),
+            kek=get_kek(),
         )
     except FeedbackError as exc:
-        raise _http_from(exc) from exc
+        raise http_from(exc) from exc
     return JSONResponse(
         status_code=(200 if replayed else 201),
         content={"feedback_id": str(feedback_id), "replayed": replayed},
@@ -96,7 +73,11 @@ async def delete_feedback(
     feedback_id: UUID,
     principal: Annotated[Principal, _CreateDep],
 ) -> dict[str, object]:
-    """自助删除反馈（A6）：立即匿名化；幂等（已匿名化再删仍 200）。"""
+    """自助删除反馈（A6）：立即匿名化。
+
+    身份断链语义（§10.2.3）：匿名化后 user_id 已置空，任何人（含原本人）再删
+    一律 404（不泄露存在性）；幂等体现在效果层面（无可再清）。
+    """
 
     tenant_id = principal.tenant_id
     if tenant_id is None:
@@ -106,5 +87,5 @@ async def delete_feedback(
             tenant_id=tenant_id, user_id=principal.user_id, feedback_id=feedback_id,
         )
     except FeedbackError as exc:
-        raise _http_from(exc) from exc
+        raise http_from(exc) from exc
     return {"feedback_id": str(feedback_id), "anonymized": True}

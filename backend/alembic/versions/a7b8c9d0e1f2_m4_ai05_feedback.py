@@ -78,6 +78,7 @@ def upgrade() -> None:
             "status != 'anonymized' OR user_id IS NULL",
             name="ck_ai_feedback_anonymized_no_user",
         ),
+        sa.CheckConstraint("char_length(comment) <= 500", name="ck_ai_feedback_comment_len"),
         sa.UniqueConstraint("id", "tenant_id", name="uq_ai_feedback_id_tenant_id"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], name="fk_ai_feedback_tenant_id_tenants", ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ai_feedback_user_id_users", ondelete="RESTRICT"),

@@ -176,6 +176,7 @@ class AiFeedback(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
 
     __tablename__ = "ai_feedback"
     __table_args__ = (
+        CheckConstraint("char_length(comment) <= 500", name="ck_ai_feedback_comment_len"),
         UniqueConstraint("id", "tenant_id", name="uq_ai_feedback_id_tenant_id"),
         UniqueConstraint(
             "tenant_id", "conversation_id", "turn_id",

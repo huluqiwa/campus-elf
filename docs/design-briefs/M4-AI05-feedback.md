@@ -185,6 +185,15 @@ milestone AI-05 过账（里程碑边界评审）/ handoff §1 + README（合并
    （test_conversation_api 先例）；BS-M4-07 学生仍走 student 角色绑定（与生产一致）。
 7. **bare SQL 守卫要求**：归属校验改走 TenantScopedRepository（select 直查被守卫拦截，
    第 1 轮实现内修复——数据范围必须经仓储基类注入）。
+8. **幂等重放补审计**（第 1 轮审查 Major-2，偏离实现初稿）：重放路径写
+   `campus.feedback.create`（metadata.replayed=true）——简报 §4 本就要求重放审计。
+9. **重放归属谓词**（第 1 轮审查 Major-1）：重放查询加 `user_id == 本人`，且归属校验
+   先行——否则同租他人凭 conversation+turn 两 UUID 可探测 feedback_id（D5 被绕过）。
+10. **comment 长度库层 CHECK 补建**（第 1 轮审查 Minor-4）：决策卡 5 承诺「库层 CHECK」，
+   迁移初版遗漏——补 `ck_ai_feedback_comment_len`。
+11. **comment 专用脱敏**（第 1 轮审查 Minor-2）：初稿套 output 扫描全套会改写用户原文
+   （REF_MARKER/XSS 被处理）；改专用规则（身份证/密钥/内网地址三类，模式来自 guards
+   公开常量），手机号放行（AI-09 卡 4-A 口径）。
 
 ### 10.3 门禁读数（2026-11-22）
 
@@ -195,4 +204,6 @@ milestone AI-05 过账（里程碑边界评审）/ handoff §1 + README（合并
 
 ### 10.4 审查处置
 
-（待独立审查后回填。）
+**第 1 轮（2026-11-22）：2 Major / 9 Minor**——Major-1 重放路径绕过归属校验（跨用户存在性泄露）→ 重放查询加 user_id 谓词 + 归属校验先行；Major-2 重放不写审计（未登记偏离）→ 补审计；Minor 全处置（docstring 同步/专用脱敏/IntegrityError→409/comment CHECK/匿名化重放语义/跨租用例/共享错误映射/TD-343）。新增弧：他人重放 404、删除后重提交 409、跨租 404/列表空。
+
+**第 2 轮聚焦复审：待派发。**
