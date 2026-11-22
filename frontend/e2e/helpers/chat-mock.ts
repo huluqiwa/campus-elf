@@ -46,14 +46,21 @@ export interface ChatMockHandles {
   clearCalls: string[];
 }
 
-export function mockChatApi(page: Page, options: ChatMockOptions = {}): ChatMockOptions & { handles: ChatMockHandles } {
+export function mockChatApi(
+  page: Page,
+  options: ChatMockOptions = {},
+): ChatMockOptions & { handles: ChatMockHandles } {
   const handles: ChatMockHandles = { turnBodies: [], clearCalls: [] };
 
   void page.route("**/api/v1/campus/chat/turns", async (route) => {
     const body = route.request().postDataJSON() as Record<string, unknown>;
     handles.turnBodies.push(body);
     if (options.rejectTurn) {
-      await route.fulfill({ status: 403, contentType: "application/json", body: '{"detail":"缺少权限"}' });
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: '{"detail":"缺少权限"}',
+      });
       return;
     }
     const mode = options.mode ?? "normal";

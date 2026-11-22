@@ -74,7 +74,9 @@ async function onClear(item: CampusConversationView): Promise<void> {
   <div class="conversations-page">
     <van-nav-bar title="历史会话" left-arrow @click-left="router.back()">
       <template #right>
-        <span class="nav-link" data-testid="new-chat-link" @click="router.push({ name: 'chat' })">新对话</span>
+        <span class="nav-link" data-testid="new-chat-link" @click="router.push({ name: 'chat' })"
+          >新对话</span
+        >
       </template>
     </van-nav-bar>
 
@@ -114,12 +116,22 @@ async function onClear(item: CampusConversationView): Promise<void> {
         重试
       </van-button>
     </div>
-    <div v-else-if="!loading && items.length === 0 && finished" class="empty">还没有会话，去问问看吧～</div>
+    <div v-else-if="!loading && items.length === 0 && finished" class="empty">
+      还没有会话，去问问看吧～
+    </div>
   </div>
 </template>
 
 <style scoped>
-.conversations-page { height: 100vh; }
-.nav-link { color: #1989fa; }
-.empty { text-align: center; color: #969799; margin-top: 40px; }
+.conversations-page {
+  height: 100vh;
+}
+.nav-link {
+  color: #1989fa;
+}
+.empty {
+  text-align: center;
+  color: #969799;
+  margin-top: 40px;
+}
 </style>

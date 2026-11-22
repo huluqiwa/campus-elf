@@ -216,7 +216,10 @@ export interface CampusMessageView {
 
 export interface CampusChatApi {
   /** 流式对话回合（SSE）；abort 由调用方 signal 控制。 */
-  streamTurn(input: StreamTurnInput, handlers: { onEvent: (e: ChatStreamEvent) => void; signal?: AbortSignal }): Promise<void>;
+  streamTurn(
+    input: StreamTurnInput,
+    handlers: { onEvent: (e: ChatStreamEvent) => void; signal?: AbortSignal },
+  ): Promise<void>;
   /** 会话列表（keyset 游标；M4-AI06/07）。 */
   listConversations(query?: { limit?: number; cursor?: string }): Promise<CampusConversationPage>;
   /** 会话历史（排除 deleted/failed）。 */
@@ -303,7 +306,8 @@ export function createCampusChatApi(
           try {
             chunk = await reader.read();
           } catch (err) {
-            if (err instanceof DOMException && err.name === "AbortError") throw new ChatAbortError();
+            if (err instanceof DOMException && err.name === "AbortError")
+              throw new ChatAbortError();
             throw err;
           }
           if (chunk.done) break;
@@ -352,8 +356,8 @@ export function createCampusChatApi(
           id: String(c.id),
           title: (typeof c.title === "string" ? c.title : null) as string | null,
           status: String(c.status),
-          lastMessageAt:
-            (typeof c.last_message_at === "string" ? c.last_message_at : null) as string | null,
+          lastMessageAt: (typeof c.last_message_at === "string" ? c.last_message_at : null) as
+            string | null,
           createdAt: String(c.created_at),
         })),
         nextCursor: payload.next_cursor,

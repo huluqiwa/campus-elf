@@ -55,8 +55,8 @@ export const useChatStore = defineStore("chat", () => {
   let controller: AbortController | null = null;
 
   const isStreaming = computed(() => phase.value === "streaming");
-  const lastAssistant = computed(
-    () => [...messages.value].reverse().find((m) => m.role === "assistant"),
+  const lastAssistant = computed(() =>
+    [...messages.value].reverse().find((m) => m.role === "assistant"),
   );
 
   function _placeholder(): ChatMessage {
@@ -114,7 +114,14 @@ export const useChatStore = defineStore("chat", () => {
     if (phase.value === "streaming" || !text.trim()) return;
     lastUserMessage.value = text.trim();
     errorInfo.value = null;
-    messages.value.push({ id: nextId(), role: "user", content: text.trim(), steps: [], citations: [], status: "final" });
+    messages.value.push({
+      id: nextId(),
+      role: "user",
+      content: text.trim(),
+      steps: [],
+      citations: [],
+      status: "final",
+    });
     const placeholder = _placeholder();
     messages.value.push(placeholder);
     phase.value = "streaming";
@@ -133,7 +140,11 @@ export const useChatStore = defineStore("chat", () => {
       if (placeholder.status === "streaming") {
         // 流结束但无 done（服务端断流）：按不完整处理（design §5.8 重试口径）
         placeholder.status = "error";
-        errorInfo.value = { code: "STREAM_INCOMPLETE", message: "回答不完整，请重试", retryable: true };
+        errorInfo.value = {
+          code: "STREAM_INCOMPLETE",
+          message: "回答不完整，请重试",
+          retryable: true,
+        };
       }
     } catch (err) {
       if (err instanceof ChatAbortError) {
@@ -167,7 +178,11 @@ export const useChatStore = defineStore("chat", () => {
   async function retry(): Promise<void> {
     if (phase.value === "streaming" || !lastUserMessage.value) return;
     const last = messages.value[messages.value.length - 1];
-    if (!last || last.role !== "assistant" || (last.status !== "error" && last.status !== "stopped")) {
+    if (
+      !last ||
+      last.role !== "assistant" ||
+      (last.status !== "error" && last.status !== "stopped")
+    ) {
       return;
     }
     messages.value.pop();

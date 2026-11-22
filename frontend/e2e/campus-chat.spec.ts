@@ -9,13 +9,17 @@ import { CHAT_PERMISSION, mockChatApi } from "./helpers/chat-mock";
 
 test.describe("聊天入口权限渲染", () => {
   test("持 campus.kb.qa → 显示「开始 AI 问答」入口", async ({ page }) => {
-    mockAuth(page, { user: { ...{ realm: "tenant", roles: ["student"] }, permissions: [CHAT_PERMISSION] } });
+    mockAuth(page, {
+      user: { ...{ realm: "tenant", roles: ["student"] }, permissions: [CHAT_PERMISSION] },
+    });
     await page.goto("/");
     await expect(page.getByTestId("go-chat")).toBeVisible();
   });
 
   test("无 campus.kb.qa → 入口不渲染", async ({ page }) => {
-    mockAuth(page, { user: { realm: "tenant", roles: ["student"], permissions: ["campus.chat.use"] } });
+    mockAuth(page, {
+      user: { realm: "tenant", roles: ["student"], permissions: ["campus.chat.use"] },
+    });
     await page.goto("/");
     await expect(page.getByTestId("go-chat")).toHaveCount(0);
     await expect(page.getByTestId("go-conversations")).toBeVisible();
@@ -24,7 +28,12 @@ test.describe("聊天入口权限渲染", () => {
 
 test.describe("聊天页", () => {
   test.beforeEach(async ({ page }) => {
-    mockAuth(page, { user: { ...{ realm: "tenant", roles: ["student"] }, permissions: [CHAT_PERMISSION, "campus.chat.use"] } });
+    mockAuth(page, {
+      user: {
+        ...{ realm: "tenant", roles: ["student"] },
+        permissions: [CHAT_PERMISSION, "campus.chat.use"],
+      },
+    });
   });
 
   test("正常流：流式正文 + 步骤提示 + 完成态（meta 后 URL 更新）", async ({ page }) => {
@@ -33,7 +42,9 @@ test.describe("聊天页", () => {
     await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
     await page.getByTestId("send-button").click();
 
-    await expect(page.getByTestId("messages")).toContainText("根据学校规定，差旅报销需要发票和审批单");
+    await expect(page.getByTestId("messages")).toContainText(
+      "根据学校规定，差旅报销需要发票和审批单",
+    );
     await expect(page.getByTestId("reasoning-steps")).toContainText("已找到 2 条相关校规");
     // meta 回显 conversation_id → URL 更新（D4）
     await expect(page).toHaveURL(/\/chat\/conv-e2e/);
@@ -75,7 +86,12 @@ test.describe("聊天页", () => {
 
 test.describe("会话列表与清空", () => {
   test.beforeEach(async ({ page }) => {
-    mockAuth(page, { user: { ...{ realm: "tenant", roles: ["student"] }, permissions: [CHAT_PERMISSION, "campus.chat.use"] } });
+    mockAuth(page, {
+      user: {
+        ...{ realm: "tenant", roles: ["student"] },
+        permissions: [CHAT_PERMISSION, "campus.chat.use"],
+      },
+    });
   });
 
   test("列表渲染 + 进入会话加载历史", async ({ page }) => {
@@ -92,7 +108,11 @@ test.describe("会话列表与清空", () => {
     const cursors: string[] = [];
     void page.route("**/api/v1/campus/conversations*", async (route) => {
       if (route.request().method() === "DELETE") {
-        await route.fulfill({ status: 200, contentType: "application/json", body: '{"cleared":0}' });
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: '{"cleared":0}',
+        });
         return;
       }
       const url = new URL(route.request().url());

@@ -33,8 +33,7 @@ function sseResponse(body: string, init?: { status?: number }): Response {
 }
 
 function makeApi(fetchImpl: () => Response) {
-  const asyncFetch: typeof fetch = (() =>
-    Promise.resolve(fetchImpl())) as unknown as typeof fetch;
+  const asyncFetch: typeof fetch = (() => Promise.resolve(fetchImpl())) as unknown as typeof fetch;
   const session = {
     getAccessToken: vi.fn(() => "tok"),
     refresh: vi.fn(async () => undefined),
@@ -44,10 +43,10 @@ function makeApi(fetchImpl: () => Response) {
   };
   // vi.fn 的泛型与 AuthSession 结构类型兼容性差：测试桩按结构断言（运行时形状正确）
   return {
-    api: createCampusChatApi(
-      session as unknown as Parameters<typeof createCampusChatApi>[0],
-      { baseUrl: "", fetchImpl: asyncFetch },
-    ),
+    api: createCampusChatApi(session as unknown as Parameters<typeof createCampusChatApi>[0], {
+      baseUrl: "",
+      fetchImpl: asyncFetch,
+    }),
     session,
   };
 }
@@ -76,9 +75,9 @@ describe("campusChat.streamTurn", () => {
     const citation = events[5];
     expect(citation.type === "citation" && citation.document === "财务报销手册").toBe(true);
     const done = events[6];
-    expect(done.type === "done" && done.stopReason === "FINAL_ANSWER" && done.tokensOut === 20).toBe(
-      true,
-    );
+    expect(
+      done.type === "done" && done.stopReason === "FINAL_ANSWER" && done.tokensOut === 20,
+    ).toBe(true);
   });
 
   it("半包：事件被 chunk 边界切开仍正确分帧", async () => {
@@ -134,14 +133,17 @@ describe("campusChat.streamTurn", () => {
         headers: { "Content-Type": "text/event-stream" },
       });
     });
-    const pending = api.streamTurn({ message: "问" }, {
-      onEvent: () => {
-        // 模拟真实 fetch：signal abort → body reader 抛 AbortError
-        controller.abort();
-        streamController.error(new DOMException("This operation was aborted", "AbortError"));
+    const pending = api.streamTurn(
+      { message: "问" },
+      {
+        onEvent: () => {
+          // 模拟真实 fetch：signal abort → body reader 抛 AbortError
+          controller.abort();
+          streamController.error(new DOMException("This operation was aborted", "AbortError"));
+        },
+        signal: controller.signal,
       },
-      signal: controller.signal,
-    });
+    );
     await expect(pending).rejects.toBeInstanceOf(ChatAbortError);
   });
 
@@ -157,7 +159,9 @@ describe("campusChat.streamTurn", () => {
     const { api, session } = makeApi(() => {
       calls += 1;
       if (calls === 1) return new Response('{"detail":"expired"}', { status: 401 });
-      return sseResponse('event: meta\ndata: {"turn_id":"t","trace_id":"r","conversation_id":"c"}\n\n');
+      return sseResponse(
+        'event: meta\ndata: {"turn_id":"t","trace_id":"r","conversation_id":"c"}\n\n',
+      );
     });
     const events: ChatStreamEvent[] = [];
     await api.streamTurn({ message: "问" }, { onEvent: (e) => events.push(e) });

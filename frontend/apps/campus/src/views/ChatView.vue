@@ -94,13 +94,14 @@ function statusTail(status: string): string {
 
 <template>
   <div class="chat-page">
-    <van-nav-bar
-      title="AI 助手"
-      left-arrow
-      @click-left="router.back()"
-    >
+    <van-nav-bar title="AI 助手" left-arrow @click-left="router.back()">
       <template #right>
-        <span class="nav-link" data-testid="conversations-link" @click="router.push({ name: 'conversations' })">会话</span>
+        <span
+          class="nav-link"
+          data-testid="conversations-link"
+          @click="router.push({ name: 'conversations' })"
+          >会话</span
+        >
       </template>
     </van-nav-bar>
 
@@ -110,17 +111,14 @@ function statusTail(status: string): string {
 
     <template v-else>
       <div ref="scrollBox" class="messages" data-testid="messages">
-        <div
-          v-for="msg in chat.messages"
-          :key="msg.id"
-          class="bubble-row"
-          :class="msg.role"
-        >
+        <div v-for="msg in chat.messages" :key="msg.id" class="bubble-row" :class="msg.role">
           <div class="bubble" :data-role="msg.role" :data-status="msg.status">
             <div v-if="msg.steps.length" class="steps" data-testid="reasoning-steps">
               <div v-for="(step, i) in msg.steps" :key="i" class="step-line">· {{ step }}</div>
             </div>
-            <div class="content">{{ msg.content }}<span v-if="msg.status === 'streaming'" class="cursor">▌</span></div>
+            <div class="content">
+              {{ msg.content }}<span v-if="msg.status === 'streaming'" class="cursor">▌</span>
+            </div>
             <div v-if="statusTail(msg.status)" class="tail">{{ statusTail(msg.status) }}</div>
             <div
               v-if="
@@ -130,7 +128,13 @@ function statusTail(status: string): string {
               "
               class="retry-row"
             >
-              <van-button size="small" plain type="primary" data-testid="retry-button" @click="onRetry">
+              <van-button
+                size="small"
+                plain
+                type="primary"
+                data-testid="retry-button"
+                @click="onRetry"
+              >
                 重新提问
               </van-button>
             </div>
@@ -175,22 +179,84 @@ function statusTail(status: string): string {
 </template>
 
 <style scoped>
-.chat-page { display: flex; flex-direction: column; height: 100vh; }
-.nav-link { color: #1989fa; }
-.messages { flex: 1; overflow-y: auto; padding: 12px; }
-.bubble-row { display: flex; margin-bottom: 10px; }
-.bubble-row.user { justify-content: flex-end; }
-.bubble { max-width: 80%; padding: 8px 12px; border-radius: 10px; background: #f2f3f5; font-size: 14px; }
-.bubble-row.user .bubble { background: #e8f3ff; }
-.steps { border-left: 2px solid #c8c9cc; padding-left: 8px; margin-bottom: 6px; color: #969799; font-size: 12px; }
-.step-line { line-height: 1.6; }
-.content { white-space: pre-wrap; word-break: break-word; }
-.cursor { animation: blink 1s infinite; }
-@keyframes blink { 50% { opacity: 0; } }
-.tail { margin-top: 4px; color: #969799; font-size: 12px; }
-.retry-row { margin-top: 6px; }
-.empty { text-align: center; color: #969799; margin-top: 40px; }
-.input-bar { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid #ebedf0; align-items: flex-end; }
-.input-bar .van-field { flex: 1; }
-.no-permission { padding: 40px 20px; text-align: center; color: #969799; }
+.chat-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.nav-link {
+  color: #1989fa;
+}
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+.bubble-row {
+  display: flex;
+  margin-bottom: 10px;
+}
+.bubble-row.user {
+  justify-content: flex-end;
+}
+.bubble {
+  max-width: 80%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #f2f3f5;
+  font-size: 14px;
+}
+.bubble-row.user .bubble {
+  background: #e8f3ff;
+}
+.steps {
+  border-left: 2px solid #c8c9cc;
+  padding-left: 8px;
+  margin-bottom: 6px;
+  color: #969799;
+  font-size: 12px;
+}
+.step-line {
+  line-height: 1.6;
+}
+.content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.cursor {
+  animation: blink 1s infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+.tail {
+  margin-top: 4px;
+  color: #969799;
+  font-size: 12px;
+}
+.retry-row {
+  margin-top: 6px;
+}
+.empty {
+  text-align: center;
+  color: #969799;
+  margin-top: 40px;
+}
+.input-bar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid #ebedf0;
+  align-items: flex-end;
+}
+.input-bar .van-field {
+  flex: 1;
+}
+.no-permission {
+  padding: 40px 20px;
+  text-align: center;
+  color: #969799;
+}
 </style>
