@@ -242,8 +242,8 @@ LLM-05-CampusCompanionElf/
 | `conversations` | id, tenant_id, user_id, title, status, pinned_kb_version_id, created_at, last_message_at | 会话 |
 | `conversation_messages` | id, tenant_id, conversation_id, role(user/assistant/system), content, reasoning_summary, citations_json, token_usage, trace_id, status(streaming/completed/partial/failed), created_at | 消息 |
 | `conversation_summaries` | id, tenant_id, conversation_id, summary, covered_message_ids, created_at | 滚动摘要 |
-| `ai_feedback` | id, tenant_id, user_id, conversation_id, message_id, trace_id, rating, reason_tags, comment, content_snapshot_enc, consent_at, status, handled_by, handled_at | 反馈 |
-| `ai_feedback_replies` | id, feedback_id, sender_id, message_id, content, created_at | 反馈答复 |
+| `ai_feedback` | id, tenant_id, user_id, conversation_id, message_id, trace_id, rating, reason_tags, comment, content_snapshot_enc, consent_at, status, handled_by, handled_at | 反馈（**M4-AI05 落地**：迁移 `a7b8c9d0e1f2`；补 `turn_id` 幂等键列；匿名化不变量+tags 枚举/comment 长度 CHECK；FORCE RLS） |
+| `ai_feedback_replies` | id, feedback_id, sender_id, message_id, content, created_at | 反馈答复（**M4-AI05 落地**：仅追加授权；站内信推送归 M5） |
 | `chat_traces` | id, tenant_id, user_id, conversation_id, turn_id, intents_json, route_path, model, prompt_name, prompt_version, prompt_hash, tokens_in, tokens_out, first_token_ms, latency_ms, stop_reason, error_code, created_at | 本地 trace |
 | `chat_trace_spans` | id, trace_id, span_type(route/retrieve/rerank/tool/guard/generate/verify), name, start_ms, duration_ms, attributes_json, status | span |
 | `guard_events` | id, tenant_id, trace_id, direction(input/output), rule, severity, action, excerpt_redacted, created_at | 护栏事件 |
@@ -685,6 +685,13 @@ GET  /api/v1/platform/tenants/{id}/review-records
 | GET | `/school/feedback/{id}` | 反馈详情（问题/答案摘要/引用） |
 | POST | `/school/feedback/{id}/handle` | 标记已处理 |
 | POST | `/school/feedback/{id}/reply` | 站内信答复 |
+
+> **M4-AI05 落地注记（2026-11-22）**：上表 4 端点已实现（迁移 `a7b8c9d0e1f2`；权限码
+> `school.feedback.view/update` 目录已有）；另补 C 端 2 端点——`POST /campus/feedback`
+> （幂等重放 replayed=true；快照 AES-GCM 加密 + comment 专用 PII 脱敏；consent_at
+> 服务端记录=提交即知情同意）与 `DELETE /campus/feedback/{id}`（自助匿名化：user_id
+> 置空+快照/评论清除，身份断链后任何人再删 404；M5 DEL-05 复用同一函数）。答复落
+> `ai_feedback_replies`，站内信推送归 M5；B 端页面归 UI 批次（TD-P1）。
 
 ### 5.12 角色权限配置与 MFA 重置（M2-UI2：TD-137/TD-143/TD-126）
 
