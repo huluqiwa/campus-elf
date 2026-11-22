@@ -147,3 +147,52 @@ milestone AI-05 过账（里程碑边界评审）/ handoff §1 + README（合并
 
 反馈含用户原文（comment/快照）——加密+脱敏+受控展示涉及敏感数据处理；匿名化
 涉及数据删除语义；按 §11.7 从严：**简报经用户确认后再编码**。
+
+---
+
+## §10 实现注记（编码后回填）
+
+### 10.1 落地文件
+
+- `alembic/versions/a7b8c9d0e1f2_m4_ai05_feedback.py`：2 表迁移（FORCE RLS；ai_feedback 授
+  update、replies 仅追加 readonly；tags 枚举 JSONB CHECK；匿名化不变量
+  ck_ai_feedback_anonymized_no_user）
+- `app/db/models/ai.py`：AiFeedback + AiFeedbackReply
+- `app/feedback/service.py`（新增域）：submit_feedback / anonymize_feedback /
+  mark_handled / reply_feedback / get_feedback_detail / list_feedback +
+  encrypt_snapshot / decrypt_snapshot / redact_comment / _validate_payload
+- `app/api/campus_feedback.py`（C 端 2 端点）+ `app/api/school_feedback.py`（B 端 4 端点）+
+  main.py 注册
+- 测试：`tests/test_feedback_service_unit.py`（9）+ `tests/integration/test_feedback_api.py`（4）+
+  `tests/business/test_bs_m4_07_feedback.py`（真实栈全链）
+
+### 10.2 与简报的偏离（全登记）
+
+1. **服务落点 `app/feedback/`**（简报写 `app/harness/feedback.py`）：反馈是独立业务域，
+   与 harness（Loop 编排）无关——对齐 app/org、app/personnel 域目录先例。
+2. **补 `turn_id` 列**（design §4.4 字段列表缺）：幂等键 (tenant, conversation, turn)
+   唯一约束需要它（spec「重复提交幂等」）；design 列了 message_id 但无 turn_id。
+3. **匿名化幂等语义修正**（偏离简报 A6/§4 原文「已匿名化再删 → 200」）：匿名化后
+   user_id 已置空，身份断链后**任何人（含原本人）再删一律 404**——保留「删除者名单」
+   反而违背断链目的；幂等体现在效果层面（重复删除无可再清）。简报 §1.2-A6 与 §4 的
+   「幂等 200」以此为准。
+4. **trace 归属校验键**：chat_traces 表无 trace_id 列（AI-06/07 迁移口径），归属校验用
+   (turn_id, conversation_id, user_id)；快照消息按 trace_id 取且**非空校验**（客户端
+   trace_id 传错 → 404，不落空快照）。
+5. **comment PII 脱敏 = guards 身份证模式**：输出红线仅身份证（手机号/邮箱属「自身
+   PII 放行」——AI-09 卡 4-A 口径）；测试用身份证号验证。
+6. **测试造数权限显式授予**（非内置角色绑定）：seed_tenant_user(permissions=...) 模式
+   （test_conversation_api 先例）；BS-M4-07 学生仍走 student 角色绑定（与生产一致）。
+7. **bare SQL 守卫要求**：归属校验改走 TenantScopedRepository（select 直查被守卫拦截，
+   第 1 轮实现内修复——数据范围必须经仓储基类注入）。
+
+### 10.3 门禁读数（2026-11-22）
+
+- `ruff` 0 / `mypy` app+tests 334 文件 0 / `bandit`×2 EXIT=0 / `alembic check` 无漂移
+- 迁移往返实测：upgrade → downgrade → upgrade 正常（含复合外键 uq 修复）
+- 受影响子集：harness 全量 + business 全量（BS-M4-01..07）+ baseline + bare SQL 守卫 +
+  rbac + conversation_api + feedback_api（4）+ feedback 单测（9）——终值见提交信息
+
+### 10.4 审查处置
+
+（待独立审查后回填。）
