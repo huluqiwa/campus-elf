@@ -2,6 +2,8 @@ import { createRouter, createWebHistory } from "vue-router";
 
 import { useAuthStore } from "../stores/auth";
 import ChangePasswordView from "../views/ChangePasswordView.vue";
+import ChatView from "../views/ChatView.vue";
+import ConversationsView from "../views/ConversationsView.vue";
 import ForgotPasswordView from "../views/ForgotPasswordView.vue";
 import HomeView from "../views/HomeView.vue";
 import LoginView from "../views/LoginView.vue";
@@ -21,6 +23,19 @@ export const router = createRouter({
       meta: { requiresAuth: true },
     },
     { path: "/", name: "home", component: HomeView, meta: { requiresAuth: true } },
+    { path: "/chat", name: "chat", component: ChatView, meta: { requiresAuth: true } },
+    {
+      path: "/chat/:conversationId",
+      name: "chat-detail",
+      component: ChatView,
+      meta: { requiresAuth: true },
+    },
+    {
+      path: "/conversations",
+      name: "conversations",
+      component: ConversationsView,
+      meta: { requiresAuth: true },
+    },
   ],
 });
 

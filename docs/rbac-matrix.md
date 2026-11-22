@@ -2,8 +2,8 @@
 
 | 项 | 内容 |
 |---|---|
-| 版本 | v1.3（2026-10-26：新增 `school.personnel.mfa.reset`（TD-126）+ TD-150「出厂默认只初始化一次」口径） |
-| 日期 | 2026-10-26（v1.2 = 2026-10-23 的 §4 机器校验与全量超管口径；v1.1 = 2026-10-22 的 §6 七条口径定稿与权限码命名归一） |
+| 版本 | v1.4（2026-11-22：新增 `campus.kb.qa`（M4-UI1 C 端聊天入口）+ 存量租户显式授予口径注记） |
+| 日期 | 2026-11-22（v1.3 = 2026-10-26 的 mfa.reset 与 TD-150 口径；v1.2 = 2026-10-23 的 §4 机器校验与全量超管口径；v1.1 = 2026-10-22 的 §6 七条口径定稿与权限码命名归一） |
 | 状态 | 已确认（`docs/design-briefs/M1-E1-rbac-core.md` §4.1/§9） |
 | 实现位置 | 权限项目录 `backend/app/rbac/catalog.py`；内置角色出厂默认 `backend/app/rbac/seeds.py`；落库同步 `backend/app/rbac/__init__.py:sync_rbac_definitions()`；一致性由 `backend/tests/test_rbac_matrix_unit.py` 钉住（§3 逐码相等 + §4 表格分区与逐列 √ 相等，见 §4 说明） |
 | 规则 | 服务端鉴权；前端菜单/按钮不作为安全边界；跨租默认拒绝 |
@@ -124,6 +124,7 @@
 | 权限 | 说明 |
 |---|---|
 | `campus.chat.use` | AI 对话（原写作 `campus.chat`，v1.1 归一为「模块.动作」格式） |
+| `campus.kb.qa` | 学校知识库 AI 问答入口（M4-UI1 新增；student/teacher 内置默认含〔新租户种子〕，超管「只补不撤」自动获得；**存量租户内置角色不自动补**〔TD-150 口径〕——需显式授予或重置出厂） |
 | `campus.feedback.create` | 反馈 |
 | `campus.conversation.clear` | 清空当前会话 |
 | `campus.message.view/send` | 消息（系统/审批+师生 1:1） |
@@ -194,7 +195,7 @@
 | 校方消息 | `school.message.view/send/read` | — | — | — | √ | √ | △ | — | — |
 | 校方审计 | `school.audit.view` | — | — | — | √ | △ | — | — | — |
 | 账号撤权申请/申诉/冻结 | `school.account_termination.request/appeal/freeze` | — | — | — | √ | △ | — | — | — |
-| C 端对话/反馈/消息 | `campus.chat.use` `campus.feedback.create` `campus.message.view/send` | — | — | — | √ | — | — | √ | √ |
+| C 端对话/反馈/消息 | `campus.chat.use` `campus.kb.qa` `campus.feedback.create` `campus.message.view/send` | — | — | — | √ | — | — | √ | √ |
 | C 端清会话/导航 | `campus.conversation.clear` `campus.nav` | — | — | — | √ | — | — | √ | √ |
 | C 端请假 | `campus.leave.create/withdraw` | — | — | — | √ | — | — | √ | — |
 | C 端删除申请 | `campus.account_termination.request` | — | — | — | √ | — | — | √ | √ |

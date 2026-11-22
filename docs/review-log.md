@@ -1164,3 +1164,15 @@
 - **修复**：Major-1→归属校验先行 + 重放查询补 user_id 谓词（双层）；Major-2→重放补审计（metadata.replayed=true）；Minor 全处置——专用脱敏（仅身份证/密钥/内网三类）、IntegrityError→409 FEEDBACK_ALREADY_EXISTS、comment 库层 CHECK、解密失败 503、跨租用例、共享 errors.py、TD-343 登记（M5 DEL-05 彻底断链口径 + sender_id 处置 + 并发语义）。
 - **第 2 轮聚焦复审（2026-11-22，同审查员）**：**通过（0B/0M/0 新增 Major）**——归属校验先行后合法重放无回归（AI-07 只软删消息）、审计无半截事务、文档闭环合规。
 - 判例：①**幂等重放路径必须与首次提交同守卫**——「提前返回的捷径」是归属校验绕过的最大来源；②**实现时的自觉取舍（如重放不写审计）若不登记偏离，按 Major 处理**——简报是契约不是参考；③**用户输入通道与 AI 输出通道的红线不同**——输出扫描全套（REF_MARKER/XSS）套在用户反馈上会改写原文，专用脱敏才对。
+
+### M4 UI1 C 端聊天核心（三轮审查：修复后通过）
+
+- 日期：2026-11-22
+- 范围：分支 `feature/m4-ui1-chat-core`（简报 `eec5427` + 实现 `3837db0` + 三轮修复 `1c76296`/`ec42281`，19 文件量级）
+- 对照：简报 `docs/design-briefs/M4-UI1-chat-core.md`（决策卡六张全按推荐；§10 含 6 条偏离）
+- **第 1 轮独立审查（2026-11-22）**：**4 Major / 6 Minor**，A1~A8 中 A2/A5/A6 部分满足。
+  Major-1 会话列表 snake/camel 契约盲转型（时间/游标全失效）；Major-2 van-list 分页死锁；Major-3 /chat 复位语义未实现（newConversation 无调用方）；Major-4 停止态无重试按钮。Minor：retry 错位/showDialog reject 未捕/200 非 SSE 不拒/401 body 未释放/mock 一次性 SSE 限制/死导出。
+- **修复**：M1→listConversations 显式 snake→camel 映射（auth.me 先例）+ 契约运行时断言；M2→van-list @load 模式；M3→watch route.params（meta 回显守卫——修复过程中主动发现并处理的回归：URL replace 反向触发重拉历史覆盖流式消息）+ 卸载 abort；M4→stopped 重试条；Minor 全处置。**修复期间发现并正确处理回归**（meta 回显守卫）被复审员点名好评。
+- **第 2 轮聚焦复审（2026-11-22，同审查员）**：**不通过**——Major-1/4、Minor-1/2/3/4/6 修复到位，但 Major-2 **修错**（vant List 无自动 loading 复位，死锁换位）、Major-3 **部分修复**（重挂主路径未覆盖）。
+- **第 3 轮修复与复审（2026-11-22，同审查员）**：M2→loadPage finally 复位 loading（vant 官方要求手动置回）；M3→onMounted 无 id 复位 + watch 无 id 先 abort；E2E 补「多页翻页」「SPA 内新对话复位」两弧（复审员点名防掩盖弧形）；**复审通过（0B/0M；2 Minor 残余降级可自愈）**，附合并前条件 3 项（SPA 内导航弧改真路径/文档回填/残余子路径收口）——已全部落地。
+- 判例：①**vant List 的 loading 必须在 onLoad 收尾手动复位**（组件只镜像不自动置回——死锁换位案例）；②**SPA 内路由复用组件时 watch 是唯一复位入口，onMounted 只覆盖重挂**——两条路径缺一即回归；③**mock E2E 的 goto("/") 全页重载会清 Pinia，测不到 SPA 状态语义**——防掩盖弧必须走 SPA 内导航；④**盲转型 session.request<T>() 是契约漂移的结构性根源**——跨包 API 在客户端层显式映射并配运行时断言。

@@ -1,23 +1,12 @@
 <script setup lang="ts">
-import { createApiClient } from "@campus-elf/api-client";
-import { onMounted, ref } from "vue";
+import { computed } from "vue";
 import { useRouter } from "vue-router";
 
 import { useAuthStore } from "../stores/auth";
 
 const router = useRouter();
 const auth = useAuthStore();
-const health = ref("检测中…");
-const api = createApiClient({ baseUrl: import.meta.env.VITE_API_BASE_URL ?? "" });
-
-onMounted(async () => {
-  try {
-    const data = await api.getHealth();
-    health.value = `${data.service} ${data.version} (${data.env})`;
-  } catch {
-    health.value = "后端未连接（M0 脚手架）";
-  }
-});
+const canChat = computed(() => auth.user?.permissions?.includes("campus.kb.qa") ?? false);
 
 async function logout(): Promise<void> {
   await auth.logout();
@@ -30,10 +19,28 @@ async function logout(): Promise<void> {
     <van-nav-bar title="校园陪伴精灵" />
     <h1>C 端 H5 脚手架</h1>
     <van-cell-group inset>
-      <van-cell title="后端健康" :value="health" />
       <van-cell title="当前用户" :value="auth.user?.userId ?? '-'" />
     </van-cell-group>
     <div class="actions">
+      <van-button
+        v-if="canChat"
+        round
+        block
+        type="primary"
+        data-testid="go-chat"
+        @click="router.push({ name: 'chat' })"
+      >
+        开始 AI 问答
+      </van-button>
+      <van-button
+        round
+        block
+        plain
+        data-testid="go-conversations"
+        @click="router.push({ name: 'conversations' })"
+      >
+        历史会话
+      </van-button>
       <van-button
         round
         block
