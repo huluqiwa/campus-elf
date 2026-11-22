@@ -348,6 +348,7 @@
 - 审批与业务解耦，事件驱动通知；所有状态机文档化；统一审批类型可扩展。
 - 交付物：角色权限矩阵、数据字典、OpenAPI、状态机文档、租户隔离规范、测试计划、合规清单。
 - Langfuse Server 4.63.0 + Python SDK 5.0.2：观测+评估+Prompt 草稿/实验；Git 是生产 prompt 唯一事实来源；生产独立主机；默认元数据+哈希；v4 OTel。
+- **M4-AI05 落地注记（2026-11-22）**：反馈采集已落地——C 端提交（幂等重放 + 快照 AES-GCM 加密〔AAD 域绑定〕 + comment 专用 PII 脱敏 + 提交即知情同意 consent_at）+ 自助删除匿名化（身份断链：user_id 置空/快照评论清除，任何人再删 404；M5 DEL-05 复用）+ B 端列表/详情（受控解密）/标记处理/答复（审计留痕）。权限码零迁移（campus.feedback.create / school.feedback.view/update 目录已有）。
 
 ---
 
