@@ -127,3 +127,46 @@ C 端功能点注记 / handoff §1 + README（合并后 docs PR）。
 
 权限码变更（目录+迁移+角色默认口径）属权限面改动，按 §11.7 从严：**简报经用户
 确认后再编码**。前端本身无数据写入面新增（全部消费既有已审 API）。
+
+---
+
+## §10 实现注记（编码后回填）
+
+### 10.1 落地文件
+
+- `backend/app/rbac/catalog.py`（+campus.kb.qa）/ `docs/rbac-matrix.md` v1.4 /
+  `backend/tests/integration/test_rbac_sync.py`（+A1 专项断言）——**零迁移**
+- `frontend/packages/api-client/src/campus-chat.ts`（355 行：SSE 解析器+3 方法）+ 测试 8 例
+- `frontend/apps/campus`：stores/chat.ts / ChatView.vue / ConversationsView.vue /
+  router / HomeView 入口 / main.ts（Vant List/Dialog 注册）
+- `frontend/e2e/campus-chat.spec.ts`（8 例）+ `e2e/helpers/chat-mock.ts`
+
+### 10.2 与简报的偏离（全登记）
+
+1. **零迁移**（简报写「迁移插 permissions 行」）：先例 d7a1c3e5b9f4 注记——新权限码由
+   `sync_rbac_definitions()` 幂等落库（目录即事实源）；迁移只做结构变更。角色映射口径
+   不变：新租户种子自动、超管 FULL_SCOPE 只补不撤、存量 student/teacher 显式授予
+   （A1 测试钉住）。
+2. **矩阵文档 v1.4**（简报写 v1.3——现网已是 v1.3，顺延 v1.4）。
+3. **停止弧移交全栈 E2E（UI2）**：mock route.fulfill 一次性返回完整 SSE 文本，
+   无法模拟流中断时机——UI 侧停止逻辑（AbortController）由 api-client 单测
+   （abort → ChatAbortError）覆盖，E2E 级停止弧随 UI2 全栈链⑤。
+4. **campus app 无 vitest 组件测试**：campus 包测试基建为 Playwright-only（KB 先例）；
+   组件薄逻辑（气泡渲染）由 mock E2E 覆盖，store 状态机核心（SSE 应用）由
+   api-client 解析器单测覆盖。store 独立单测登记 TD-P5。
+5. **Playwright glob 教训**：`?` 是单字符通配（非字面问号）——路由 mock 需用
+   `*` 后缀匹配 query；`route.fulfill` 的 SSE 文本前端流式解析兼容。
+6. **E2E 排查插曲（非缺陷）**：mock 权限数组曾出现 [null]——cleanup 误删
+   `CHAT_PERMISSION` 常量定义（spec import undefined）；已恢复并保留「密文式
+   debug cell」排查法。HomeView 的 health 探测移除（占位页改聊天入口主页）。
+
+### 10.3 门禁读数（2026-11-22）
+
+- 后端：RBAC 同步+矩阵 **45 passed**（含 A1 专项）；ruff/mypy/bandit/alembic check
+  （零迁移）全绿——受影响后端子集随最终提交复跑
+- 前端：api-client vitest **120 passed**（含 campus-chat 8 例）；campus vue-tsc 净；
+  eslint 净；**mock E2E 8 passed**（20.3s）
+
+### 10.4 审查处置
+
+（待独立审查后回填。）
