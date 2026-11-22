@@ -18,12 +18,14 @@ from fastapi.responses import JSONResponse
 from app.api.auth import router as auth_router
 from app.api.body_limit import BodyLimit, BodySizeLimitMiddleware
 from app.api.campus_chat import router as campus_chat_router
+from app.api.campus_feedback import router as campus_feedback_router
 from app.api.health import router as health_router
 from app.api.metrics import router as metrics_router
 from app.api.platform_audit import router as platform_audit_router
 from app.api.platform_rbac import router as platform_rbac_router
 from app.api.platform_tenants import router as platform_tenants_router
 from app.api.school_approvals import router as school_approvals_router
+from app.api.school_feedback import router as school_feedback_router
 from app.api.school_imports import router as school_imports_router
 from app.api.school_kb import router as school_kb_router
 from app.api.school_org import router as school_org_router
@@ -175,10 +177,12 @@ def create_app(
     application.include_router(metrics_router)
     application.include_router(auth_router, prefix=settings.api_prefix)
     application.include_router(campus_chat_router, prefix=settings.api_prefix)
+    application.include_router(campus_feedback_router, prefix=settings.api_prefix)
     application.include_router(platform_audit_router, prefix=settings.api_prefix)
     application.include_router(platform_tenants_router, prefix=settings.api_prefix)
     application.include_router(school_personnel_router, prefix=settings.api_prefix)
     application.include_router(school_org_router, prefix=settings.api_prefix)
+    application.include_router(school_feedback_router, prefix=settings.api_prefix)
     application.include_router(school_imports_router, prefix=settings.api_prefix)
     application.include_router(school_kb_router, prefix=settings.api_prefix)
     application.include_router(school_approvals_router, prefix=settings.api_prefix)

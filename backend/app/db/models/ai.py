@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -164,3 +165,70 @@ class LlmUsage(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
     tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     cost_estimate: Mapped[float | None] = mapped_column(Numeric(10, 6))
+
+class AiFeedback(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """AI 反馈（M4-AI05；design §4.4 `ai_feedback`）。
+
+    匿名化（A6）：user_id 置空 + comment/快照清除 + status=anonymized
+    （库层不变量 ck_ai_feedback_anonymized_no_user 钉住）。
+    快照 content_snapshot_enc 为 AES-256-GCM 密文（AAD 绑定 tenant+feedback）。
+    """
+
+    __tablename__ = "ai_feedback"
+    __table_args__ = (
+        CheckConstraint("char_length(comment) <= 500", name="ck_ai_feedback_comment_len"),
+        UniqueConstraint("id", "tenant_id", name="uq_ai_feedback_id_tenant_id"),
+        UniqueConstraint(
+            "tenant_id", "conversation_id", "turn_id",
+            name="uq_ai_feedback_tenant_conv_turn",
+        ),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], name="fk_ai_feedback_tenant_id_tenants", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ai_feedback_user_id_users", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["conversation_id", "tenant_id"],
+            ["conversations.id", "conversations.tenant_id"],
+            name="fk_ai_feedback_conv_id_tenant_id",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_ai_feedback_tenant_created", "tenant_id", "created_at"),
+        {"comment": "AI 反馈（M4-AI05）"},
+    )
+
+    # 匿名化后置空（A6）；提交时必填
+    user_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    conversation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    turn_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    message_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    rating: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason_tags: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    comment: Mapped[str | None] = mapped_column(Text)
+    content_snapshot_enc: Mapped[str | None] = mapped_column(Text)
+    consent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="submitted")
+    handled_by: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AiFeedbackReply(UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin, Base):
+    """AI 反馈答复（M4-AI05；design §4.4 `ai_feedback_replies`；仅追加）。"""
+
+    __tablename__ = "ai_feedback_replies"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], name="fk_ai_feedback_replies_tenant_id_tenants", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["sender_id"], ["users.id"], name="fk_ai_feedback_replies_sender_id_users", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["feedback_id", "tenant_id"],
+            ["ai_feedback.id", "ai_feedback.tenant_id"],
+            name="fk_ai_feedback_replies_feedback_id_tenant_id",
+            ondelete="CASCADE",
+        ),
+        Index("ix_ai_feedback_replies_tenant_feedback", "tenant_id", "feedback_id"),
+        {"comment": "AI 反馈答复（M4-AI05）"},
+    )
+
+    feedback_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    sender_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    message_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
