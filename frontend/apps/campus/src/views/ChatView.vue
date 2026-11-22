@@ -25,6 +25,10 @@ onMounted(() => {
       void showDialog({ message: "会话不存在或已被清空" });
       void router.replace({ name: "chat" });
     });
+  } else {
+    // 重挂路径复位（第 2 轮审查 Major-3）：会话列表「新对话」/HomeView 入口
+    // 都是组件卸载重建——unmount 已 abort，此处 phase 必 idle
+    chat.newConversation();
   }
 });
 
@@ -42,6 +46,8 @@ watch(
         void router.replace({ name: "chat" });
       });
     } else {
+      // 同组件流式中跳 /chat：先中止在途流再复位（复位守卫要求 idle）
+      chat.abortInFlight();
       chat.newConversation();
     }
   },
@@ -117,7 +123,11 @@ function statusTail(status: string): string {
             <div class="content">{{ msg.content }}<span v-if="msg.status === 'streaming'" class="cursor">▌</span></div>
             <div v-if="statusTail(msg.status)" class="tail">{{ statusTail(msg.status) }}</div>
             <div
-              v-if="(msg.status === 'error' && chat.errorInfo?.retryable) || msg.status === 'stopped'"
+              v-if="
+                ((msg.status === 'error' && chat.errorInfo?.retryable) ||
+                  msg.status === 'stopped') &&
+                msg === chat.lastAssistant
+              "
               class="retry-row"
             >
               <van-button size="small" plain type="primary" data-testid="retry-button" @click="onRetry">

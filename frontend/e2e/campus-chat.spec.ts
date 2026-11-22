@@ -88,6 +88,76 @@ test.describe("会话列表与清空", () => {
     await expect(page.getByTestId("messages")).toContainText("差旅报销需要发票和审批单");
   });
 
+  test("多页翻页：cursor 携带 + 两页不重不漏 + 时间展示", async ({ page }) => {
+    const cursors: string[] = [];
+    void page.route("**/api/v1/campus/conversations*", async (route) => {
+      if (route.request().method() === "DELETE") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: '{"cleared":0}' });
+        return;
+      }
+      const url = new URL(route.request().url());
+      const cursor = url.searchParams.get("cursor");
+      const isFirst = !cursor;
+      if (cursor) cursors.push(cursor);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          conversations: [
+            isFirst
+              ? {
+                  id: "conv-p1",
+                  title: null,
+                  status: "active",
+                  last_message_at: "2026-11-22T10:00:00+08:00",
+                  created_at: "2026-11-22T09:00:00+08:00",
+                }
+              : {
+                  id: "conv-p2",
+                  title: null,
+                  status: "active",
+                  last_message_at: "2026-11-21T10:00:00+08:00",
+                  created_at: "2026-11-21T09:00:00+08:00",
+                },
+          ],
+          next_cursor: isFirst ? "cursor-page2" : null,
+        }),
+      });
+    });
+    await page.goto("/conversations");
+    await expect(page.getByTestId("conversation-conv-p1")).toBeVisible();
+    // vant @load 触发第二页（滚动或 check）
+    await page.waitForTimeout(500);
+    expect(cursors).toContain("cursor-page2");
+    await expect(page.getByTestId("conversation-conv-p2")).toBeVisible();
+    await expect(page.getByTestId("conversation-conv-p1")).toContainText("2026/11/22");
+  });
+
+  test("新对话复位：聊过 A 后入口进 /chat 气泡为空（重挂路径）", async ({ page }) => {
+    mockChatApi(page, { mode: "normal" });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    await expect(page).toHaveURL(/\/chat\/conv-e2e/);
+    await expect(page.getByTestId("messages")).toContainText("差旅报销需要发票和审批单");
+
+    // 重挂路径：HomeView 入口进 /chat（组件卸载重建）→ 气泡必须为空
+    await page.goto("/");
+    await page.getByTestId("go-chat").click();
+    await expect(page).toHaveURL(/\/chat$/);
+    await expect(page.getByTestId("messages")).toContainText("有问题就问我吧～");
+    await expect(page.getByTestId("messages")).not.toContainText("差旅报销");
+    // 仍可开新回合（提交载荷不带旧 conversation_id）——waitForRequest 须在动作前注册
+    const turnPromise = page.waitForRequest(
+      (r) => r.url().includes("/chat/turns") && r.method() === "POST",
+    );
+    await page.getByTestId("chat-input").locator("textarea").fill("新问题");
+    await page.getByTestId("send-button").click();
+    // store 复位后 conversationId=null → 提交不带 conversation_id
+    const lastBody = JSON.parse((await turnPromise).postData() ?? "{}");
+    expect(lastBody).toEqual({ message: "新问题" });
+  });
+
   test("清空会话：确认弹层 → DELETE → 列表移除", async ({ page }) => {
     const { handles } = mockChatApi(page, {});
     await page.goto("/conversations");

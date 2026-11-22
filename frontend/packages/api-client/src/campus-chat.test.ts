@@ -167,15 +167,37 @@ describe("campusChat.streamTurn", () => {
 });
 
 describe("campusChat 会话方法", () => {
-  it("listConversations / getConversationMessages / clearConversation 走 request 基建", async () => {
-    const request = vi.fn(async <T>(): Promise<T> => ({ conversations: [], next_cursor: null }) as T);
+  it("listConversations 显式映射 snake→camel + 方法走 request 基建", async () => {
+    const request = vi.fn(async <T>(): Promise<T> => {
+      return {
+        conversations: [
+          {
+            id: "conv-1",
+            title: null,
+            status: "active",
+            last_message_at: "2026-11-22T10:00:00+08:00",
+            created_at: "2026-11-22T09:00:00+08:00",
+          },
+        ],
+        next_cursor: null,
+      } as T;
+    });
     const session = { request, getAccessToken: vi.fn(() => "tok"), refresh: vi.fn() };
     const api = createCampusChatApi(
       session as unknown as Parameters<typeof createCampusChatApi>[0],
       { baseUrl: "" },
     );
-    await api.listConversations({ limit: 5, cursor: "abc" });
+    const page = await api.listConversations({ limit: 5, cursor: "abc" });
     expect(request).toHaveBeenCalledWith("/api/v1/campus/conversations?limit=5&cursor=abc");
+    // 映射结果运行时断言（第 2 轮审查 Minor-3：snake→camel 契约钉住）
+    expect(page.nextCursor).toBeNull();
+    expect(page.conversations[0]).toEqual({
+      id: "conv-1",
+      title: null,
+      status: "active",
+      lastMessageAt: "2026-11-22T10:00:00+08:00",
+      createdAt: "2026-11-22T09:00:00+08:00",
+    });
     await api.getConversationMessages("conv1");
     expect(request).toHaveBeenLastCalledWith("/api/v1/campus/conversations/conv1/messages");
     await api.clearConversation("conv1");

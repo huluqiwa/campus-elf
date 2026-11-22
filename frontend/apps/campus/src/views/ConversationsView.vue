@@ -31,12 +31,16 @@ async function loadPage(): Promise<void> {
   } catch {
     loadError.value = true;
     finished.value = true;
+  } finally {
+    // vant List 无自动复位：onLoad 完成后必须手动置回（第 2 轮审查 Major-2）
+    loading.value = false;
   }
 }
 
 function retryLoad(): void {
   finished.value = false;
   loadError.value = false;
+  loading.value = false;
   void loadPage();
 }
 
@@ -77,7 +81,7 @@ async function onClear(item: CampusConversationView): Promise<void> {
     <van-list
       v-model:loading="loading"
       :finished="finished"
-      finished-text="没有更多了"
+      :finished-text="loadError ? '' : '没有更多了'"
       @load="loadPage"
     >
       <van-cell-group inset style="margin-top: 12px">
