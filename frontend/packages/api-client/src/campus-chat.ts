@@ -244,6 +244,8 @@ export function createCampusChatApi(
       headers: { ...(init.headers as Record<string, string>), Authorization: `Bearer ${token}` },
     });
     if (response.status === 401) {
+      // 重放前释放首个响应体（连接池归还——第 1 轮审查 Minor-4）
+      await response.body?.cancel();
       await session.refresh();
       const retryToken = session.getAccessToken();
       if (!retryToken) throw new ChatApiError("未登录", 401);
@@ -285,6 +287,11 @@ export function createCampusChatApi(
           /* 非 JSON：保留默认文案 */
         }
         throw new ChatApiError(detail, response.status);
+      }
+      // 200 但非 SSE（网关/代理错误页等）→ 明确报错而非落入流兜底（第 1 轮审查 Minor-3）
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("text/event-stream")) {
+        throw new ChatApiError("chat 响应不是 SSE 流", response.status);
       }
 
       const reader = response.body.getReader();
@@ -334,9 +341,23 @@ export function createCampusChatApi(
       if (query.limit !== undefined) params.set("limit", String(query.limit));
       if (query.cursor) params.set("cursor", query.cursor);
       const qs = params.toString();
-      return session.request<CampusConversationPage>(
-        `/api/v1/campus/conversations${qs ? `?${qs}` : ""}`,
-      );
+      // 后端 snake_case → camelCase 显式映射（第 1 轮审查 Major-1：盲转型使
+      // 时间/游标全失效；照 auth.me 先例在客户端层统一映射）
+      const payload = await session.request<{
+        conversations: Record<string, unknown>[];
+        next_cursor: string | null;
+      }>(`/api/v1/campus/conversations${qs ? `?${qs}` : ""}`);
+      return {
+        conversations: payload.conversations.map((c) => ({
+          id: String(c.id),
+          title: (typeof c.title === "string" ? c.title : null) as string | null,
+          status: String(c.status),
+          lastMessageAt:
+            (typeof c.last_message_at === "string" ? c.last_message_at : null) as string | null,
+          createdAt: String(c.created_at),
+        })),
+        nextCursor: payload.next_cursor,
+      };
     },
 
     async getConversationMessages(conversationId) {

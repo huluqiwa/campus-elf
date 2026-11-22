@@ -94,7 +94,10 @@ describe("campusChat.streamTurn", () => {
           controller.close();
         },
       });
-      return new Response(stream, { status: 200 });
+      return new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
     });
     const events: ChatStreamEvent[] = [];
     await api.streamTurn({ message: "问" }, { onEvent: (e) => events.push(e) });
@@ -126,7 +129,10 @@ describe("campusChat.streamTurn", () => {
           // 不 close：模拟长流
         },
       });
-      return new Response(stream, { status: 200 });
+      return new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
     });
     const pending = api.streamTurn({ message: "问" }, {
       onEvent: () => {
@@ -162,7 +168,7 @@ describe("campusChat.streamTurn", () => {
 
 describe("campusChat 会话方法", () => {
   it("listConversations / getConversationMessages / clearConversation 走 request 基建", async () => {
-    const request = vi.fn(async <T>(): Promise<T> => ({ conversations: [], nextCursor: null }) as T);
+    const request = vi.fn(async <T>(): Promise<T> => ({ conversations: [], next_cursor: null }) as T);
     const session = { request, getAccessToken: vi.fn(() => "tok"), refresh: vi.fn() };
     const api = createCampusChatApi(
       session as unknown as Parameters<typeof createCampusChatApi>[0],

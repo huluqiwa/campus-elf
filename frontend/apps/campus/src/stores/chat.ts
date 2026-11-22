@@ -157,11 +157,22 @@ export const useChatStore = defineStore("chat", () => {
     controller?.abort();
   }
 
-  /** 重试（A5）：清掉失败/停止的 assistant 气泡，以原输入发新回合。 */
+  /** 组件卸载/路由切换时中止在途流（第 1 轮审查 Major-3：防后台流写残状态）。 */
+  function abortInFlight(): void {
+    if (phase.value === "streaming") controller?.abort();
+  }
+
+  /** 重试（A5）：仅末条 assistant（error/stopped）可重试；连 user 气泡一并移除
+   * 后以原输入发新回合（第 1 轮审查 Minor-1：避免重复用户气泡/pop 错位）。 */
   async function retry(): Promise<void> {
-    if (!lastUserMessage.value || phase.value === "streaming") return;
+    if (phase.value === "streaming" || !lastUserMessage.value) return;
     const last = messages.value[messages.value.length - 1];
-    if (last && last.role === "assistant") messages.value.pop();
+    if (!last || last.role !== "assistant" || (last.status !== "error" && last.status !== "stopped")) {
+      return;
+    }
+    messages.value.pop();
+    const prev = messages.value[messages.value.length - 1];
+    if (prev && prev.role === "user") messages.value.pop();
     await send(lastUserMessage.value);
   }
 
@@ -187,13 +198,6 @@ export const useChatStore = defineStore("chat", () => {
     messages.value = [];
   }
 
-  /** 清空当前会话（A6；AI-07 幂等）。 */
-  async function clearCurrent(): Promise<void> {
-    if (!conversationId.value) return;
-    await chatApi.clearConversation(conversationId.value);
-    messages.value = [];
-  }
-
   /** 按会话 id 清空（会话列表页用；不触碰当前打开的对话状态）。 */
   async function clearById(id: string): Promise<void> {
     await chatApi.clearConversation(id);
@@ -211,7 +215,7 @@ export const useChatStore = defineStore("chat", () => {
     retry,
     loadConversation,
     newConversation,
-    clearCurrent,
+    abortInFlight,
     clearById,
   };
 });

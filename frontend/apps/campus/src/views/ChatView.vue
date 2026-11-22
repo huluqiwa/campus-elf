@@ -2,7 +2,7 @@
 
 <script setup lang="ts">
 import { showDialog } from "vant";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { useAuthStore } from "../stores/auth";
@@ -27,6 +27,26 @@ onMounted(() => {
     });
   }
 });
+
+// M3（第 1 轮审查）：同组件路由复用不重挂——/chat/:id ↔ /chat 切换须复位；
+// 流式中离开/卸载 → 中止在途流（防后台流写残状态）
+watch(
+  () => route.params.conversationId,
+  (id) => {
+    if (typeof id === "string" && id) {
+      // meta 回显场景（本轮 URL 对齐 store.conversationId）不得重拉历史——
+      // 会把刚生成的流式消息覆盖掉（第 1 轮审查 M3 修复的回归教训）
+      if (chat.conversationId === id) return;
+      void chat.loadConversation(id).catch(() => {
+        void showDialog({ message: "会话不存在或已被清空" });
+        void router.replace({ name: "chat" });
+      });
+    } else {
+      chat.newConversation();
+    }
+  },
+);
+onBeforeUnmount(() => chat.abortInFlight());
 
 // meta 回显 conversation_id → URL 更新（D4：刷新可续聊）
 watch(
@@ -96,7 +116,10 @@ function statusTail(status: string): string {
             </div>
             <div class="content">{{ msg.content }}<span v-if="msg.status === 'streaming'" class="cursor">▌</span></div>
             <div v-if="statusTail(msg.status)" class="tail">{{ statusTail(msg.status) }}</div>
-            <div v-if="msg.status === 'error' && chat.errorInfo?.retryable" class="retry-row">
+            <div
+              v-if="(msg.status === 'error' && chat.errorInfo?.retryable) || msg.status === 'stopped'"
+              class="retry-row"
+            >
               <van-button size="small" plain type="primary" data-testid="retry-button" @click="onRetry">
                 重新提问
               </van-button>

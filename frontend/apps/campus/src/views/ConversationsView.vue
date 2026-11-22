@@ -2,7 +2,7 @@
 
 <script setup lang="ts">
 import { showDialog } from "vant";
-import { onMounted, ref } from "vue";
+import { ref } from "vue";
 import { useRouter } from "vue-router";
 
 import { fetchConversations, useChatStore, type CampusConversationView } from "../stores/chat";
@@ -13,10 +13,12 @@ const items = ref<CampusConversationView[]>([]);
 const nextCursor = ref<string | null>(null);
 const loading = ref(false);
 const finished = ref(false);
+const loadError = ref(false);
 
+// van-list @load 模式（第 1 轮审查 Major-2：v-model:loading 与 @update:loading
+// 双绑 + 守卫互斥导致加载死锁）；网络错误 → 错误态可重试（Minor-2）
 async function loadPage(): Promise<void> {
-  if (loading.value || finished.value) return;
-  loading.value = true;
+  if (finished.value) return;
   try {
     const page = await fetchConversations({
       limit: 20,
@@ -25,12 +27,18 @@ async function loadPage(): Promise<void> {
     items.value = items.value.concat(page.conversations);
     nextCursor.value = page.nextCursor;
     finished.value = page.nextCursor === null;
-  } finally {
-    loading.value = false;
+    loadError.value = false;
+  } catch {
+    loadError.value = true;
+    finished.value = true;
   }
 }
 
-onMounted(loadPage);
+function retryLoad(): void {
+  finished.value = false;
+  loadError.value = false;
+  void loadPage();
+}
 
 function formatTime(iso: string | null): string {
   if (!iso) return "—";
@@ -38,13 +46,22 @@ function formatTime(iso: string | null): string {
 }
 
 async function onClear(item: CampusConversationView): Promise<void> {
-  const dialog = await showDialog({
-    title: "清空会话",
-    message: "清空后该会话的消息将不可恢复（匿名保留对话记录）？确认清空？",
-    showCancelButton: true,
-  });
-  if (dialog !== "confirm") return;
-  await chat.clearById(item.id);
+  try {
+    const dialog = await showDialog({
+      title: "清空会话",
+      message: "清空后该会话的消息将不可恢复（匿名保留对话记录）？确认清空？",
+      showCancelButton: true,
+    });
+    if (dialog !== "confirm") return;
+  } catch {
+    return; // 取消/遮罩关闭：vant showDialog 对非 confirm 一律 reject
+  }
+  try {
+    await chat.clearById(item.id);
+  } catch {
+    await showDialog({ message: "清空失败，请重试" });
+    return;
+  }
   items.value = items.value.filter((c) => c.id !== item.id);
 }
 </script>
@@ -61,7 +78,7 @@ async function onClear(item: CampusConversationView): Promise<void> {
       v-model:loading="loading"
       :finished="finished"
       finished-text="没有更多了"
-      @update:loading="loadPage"
+      @load="loadPage"
     >
       <van-cell-group inset style="margin-top: 12px">
         <van-cell
@@ -87,7 +104,13 @@ async function onClear(item: CampusConversationView): Promise<void> {
         </van-cell>
       </van-cell-group>
     </van-list>
-    <div v-if="!loading && items.length === 0" class="empty">还没有会话，去问问看吧～</div>
+    <div v-if="loadError" class="empty">
+      加载失败
+      <van-button size="small" plain type="primary" data-testid="retry-load" @click="retryLoad">
+        重试
+      </van-button>
+    </div>
+    <div v-else-if="!loading && items.length === 0 && finished" class="empty">还没有会话，去问问看吧～</div>
   </div>
 </template>
 
