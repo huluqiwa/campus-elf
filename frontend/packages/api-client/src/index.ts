@@ -171,3 +171,25 @@ export {
   type KbTestSetCreateResult,
   type KbVersionApprovalView,
 } from "./testSet";
+
+export {
+  ChatAbortError,
+  ChatApiError,
+  createCampusChatApi,
+  type CampusChatApi,
+  type CampusChatApiOptions,
+  type CampusConversationPage,
+  type CampusConversationView,
+  type CampusMessageView,
+  type ChatCitationEvent,
+  type ChatDeltaEvent,
+  type ChatDoneEvent,
+  type ChatErrorEvent,
+  type ChatMetaEvent,
+  type ChatReasoningEvent,
+  type ChatStreamEvent,
+  type ChatStepEvent,
+  type ChatToolCallEvent,
+  type ChatToolResultEvent,
+  type StreamTurnInput,
+} from "./campus-chat";

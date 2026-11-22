@@ -1,5 +1,17 @@
 import { createPinia } from "pinia";
-import { Button, Cell, CellGroup, Field, Form, NavBar, Radio, RadioGroup, showToast } from "vant";
+import {
+  Button,
+  Cell,
+  CellGroup,
+  Dialog,
+  Field,
+  Form,
+  List,
+  NavBar,
+  Radio,
+  RadioGroup,
+  showToast,
+} from "vant";
 import "vant/lib/index.css";
 import { createApp } from "vue";
 
@@ -18,7 +30,9 @@ const app = createApp(App)
   .use(Form)
   .use(NavBar)
   .use(Radio)
-  .use(RadioGroup);
+  .use(RadioGroup)
+  .use(List)
+  .use(Dialog);
 
 // 会话回调在路由就绪后绑定（避免 store ↔ router 循环依赖）
 authOptions.onUnauthorized = (reason: string) => {

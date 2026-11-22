@@ -531,3 +531,45 @@ async def test_builtin_defaults_tables_never_reference_missing_permissions(
         )
         assert int(scopes) > 0, f"{role_code} 没有出厂数据范围，重置后无人能看到数据"
     assert tenant_id is not None
+
+async def test_new_campus_kb_qa_code_not_backfilled_to_existing_roles(
+    admin_session: AsyncSession,
+) -> None:
+    """M4-UI1-A1（TD-150 口径对新码的适用性）：存量租户 student 角色不自动补新码。
+
+    `campus.kb.qa`（M4-UI1 新增）只进目录与新租户种子；已初始化（defaults_applied
+    = true）的存量内置角色不自动补——运营显式授予或重置出厂。超管不受此限
+    （FULL_SCOPE「只补不撤」）。
+    """
+
+    tenant_id = await _create_tenant(admin_session, "存量租户学校")
+    # 首次同步：该租户角色拿到当时目录全量（含新码——模拟"目录先于角色初始化"）
+    await sync_rbac_definitions(admin_session)
+    await admin_session.commit()
+
+    role_id = await admin_session.scalar(
+        text("select id::text from public.roles where tenant_id = cast(:t as uuid) and code = 'student'"),
+        {"t": str(tenant_id)},
+    )
+    assert role_id is not None
+
+    # 模拟存量态：移除新码后再次同步——不得回补（defaults_applied=true）
+    await admin_session.execute(
+        text(
+            "delete from public.role_permissions where role_id = cast(:r as uuid) "
+            "and permission_id in (select id from public.permissions where code = 'campus.kb.qa')"
+        ),
+        {"r": str(role_id)},
+    )
+    await admin_session.commit()
+    await sync_rbac_definitions(admin_session)
+    await admin_session.commit()
+    assert "campus.kb.qa" not in await _role_permissions(admin_session, "student"), (
+        "存量 student 角色被同步自动补了新码（TD-150 回归——应显式授予或重置出厂）"
+    )
+
+    # 超管（FULL_SCOPE「只补不撤」）则自动获得
+    assert "campus.kb.qa" in await _role_permissions(
+        admin_session, "school_super_admin"
+    ), "超管未自动补新码（FULL_SCOPE 只补不撤口径破坏）"
+

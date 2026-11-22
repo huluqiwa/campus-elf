@@ -92,6 +92,7 @@ _DEFINITIONS: tuple[tuple[str, str], ...] = (
     ("school.account_termination.freeze", "冻结/解冻待处理账号"),
     # §3.3 C 端
     ("campus.chat.use", "使用 AI 对话"),
+    ("campus.kb.qa", "使用学校知识库 AI 问答（C 端聊天入口）"),
     ("campus.feedback.create", "提交反馈"),
     ("campus.conversation.clear", "清空当前会话"),
     ("campus.message.view", "查看消息（系统/审批/师生 1:1）"),
