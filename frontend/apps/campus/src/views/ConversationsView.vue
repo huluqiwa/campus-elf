@@ -40,7 +40,7 @@ async function loadPage(): Promise<void> {
 function retryLoad(): void {
   finished.value = false;
   loadError.value = false;
-  loading.value = false;
+  loading.value = true; // 交由 loadPage 的 finally 复位（第 3 轮审查 Minor）
   void loadPage();
 }
 

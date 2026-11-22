@@ -193,9 +193,14 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function newConversation(): void {
-    if (phase.value === "streaming") return;
+    // 第 3 轮审查 Minor 收口：abort 后无条件清（同组件流式中跳 /chat 的复位
+    // 不再被 phase 守卫吞掉；abort 后残余事件最多写入一行残留，send 的
+    // catch 会随后把终态标为 stopped/error——自愈）
+    controller?.abort();
+    phase.value = "idle";
     conversationId.value = null;
     messages.value = [];
+    errorInfo.value = null;
   }
 
   /** 按会话 id 清空（会话列表页用；不触碰当前打开的对话状态）。 */

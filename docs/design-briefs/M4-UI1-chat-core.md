@@ -169,4 +169,10 @@ C 端功能点注记 / handoff §1 + README（合并后 docs PR）。
 
 ### 10.4 审查处置
 
-（待独立审查后回填。）
+**第 1 轮（2026-11-22）：4 Major / 6 Minor**——M1 契约盲转型→显式映射+运行时断言；M2 分页死锁→@load 模式；M3 /chat 复位→watch（meta 回显守卫）+卸载 abort；M4 停止重试→条件扩展；Minor 全处置。
+
+**第 2 轮聚焦复审（2026-11-22，同审查员）：不通过**——M2 修错（vant List loading 无自动复位，须手动置回）、M3 部分修复（重挂主路径未覆盖）。
+
+**第 3 轮修复与复审（2026-11-22，同审查员）：通过（0B/0M；2 Minor 残余降级可自愈）**——M2 finally 复位 loading + 多页翻页 E2E 硬证明；M3 onMounted/watch 双路径复位 + SPA 内导航复位弧（条件 1）+ 残余子路径收口（newConversation 改 abort 后无条件清，条件 3）+ retryLoad spinner（顺手）。
+
+**§10.2.3 补注**：移交 UI2 全栈链⑤的弧含两个——停止弧（流中断）与「逐 chunk 下发弧」（mock 一次性文本不覆盖增量渲染/光标/滚动，第 2 轮审查 Minor-5）。
