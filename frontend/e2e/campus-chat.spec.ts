@@ -45,7 +45,9 @@ test.describe("聊天页", () => {
     await expect(page.getByTestId("messages")).toContainText(
       "根据学校规定，差旅报销需要发票和审批单",
     );
-    await expect(page.getByTestId("reasoning-steps")).toContainText("已找到 2 条相关校规");
+    await expect(page.getByTestId("reasoning-collapse")).toContainText("思考过程 (1)");
+    await page.getByTestId("reasoning-collapse").click();
+    await expect(page.getByText("已找到 2 条相关校规")).toBeVisible();
     // meta 回显 conversation_id → URL 更新（D4）
     await expect(page).toHaveURL(/\/chat\/conv-e2e/);
   });
@@ -191,5 +193,96 @@ test.describe("会话列表与清空", () => {
     expect(handles.clearCalls[0]).toContain("/api/v1/campus/conversations/conv-e2e/messages");
     // 列表移除
     await expect(page.getByText("AI 对话")).toHaveCount(0);
+  });
+});
+
+test.describe("UI2 体验收口", () => {
+  test.beforeEach(async ({ page }) => {
+    mockAuth(page, {
+      user: {
+        ...{ realm: "tenant", roles: ["student"] },
+        permissions: [CHAT_PERMISSION, "campus.chat.use"],
+      },
+    });
+  });
+
+  test("待机精灵：空闲态渲染（data-testid），发消息后消失", async ({ page }) => {
+    mockChatApi(page, { mode: "normal" });
+    await page.goto("/chat");
+    await expect(page.getByTestId("idle-mascot")).toBeVisible();
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    await expect(page.getByTestId("idle-mascot")).toHaveCount(0);
+    await expect(page.getByTestId("messages")).toContainText("差旅报销需要发票和审批单");
+  });
+
+  test("思考折叠：步骤计数 + 默认收起 + 展开可见明细", async ({ page }) => {
+    mockChatApi(page, { mode: "normal" });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    const collapse = page.getByTestId("reasoning-collapse");
+    await expect(collapse).toContainText("思考过程 (1)");
+    // 默认收起：明细不可见
+    await expect(page.getByText("已找到 2 条相关校规")).toHaveCount(0);
+    await collapse.click();
+    await expect(page.getByText("已找到 2 条相关校规")).toBeVisible();
+  });
+
+  test("引用抽屉：气泡尾入口 → 底部抽屉列明细（文档/章节/页码，chunk_id 不出现）", async ({
+    page,
+  }) => {
+    mockChatApi(page, { mode: "normal" });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    const btn = page.getByTestId("citation-button");
+    await expect(btn).toContainText("引用来源 (1)");
+    await btn.click();
+    const drawer = page.getByTestId("citation-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toContainText("[1] 财务报销手册");
+    await expect(drawer).toContainText("第一章");
+    await expect(drawer).toContainText("第 3 页");
+    expect(await drawer.textContent()).not.toContain("c1");
+  });
+
+  test("反馈入口：👍 → 表单提交 → 已反馈标记 + 幂等不再显示入口", async ({ page }) => {
+    const { handles } = mockChatApi(page, { mode: "normal" });
+    // 反馈提交走真实 POST /campus/feedback mock
+    let fbBody: Record<string, unknown> | null = null;
+    void page.route("**/api/v1/campus/feedback", async (route) => {
+      fbBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: '{"feedback_id":"fb-e2e","replayed":false}',
+      });
+    });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    const row = page.getByTestId("feedback-row");
+    await expect(row).toBeVisible();
+    await page.getByTestId("fb-unhelpful").click();
+    const form = page.getByTestId("feedback-form");
+    await expect(form).toBeVisible();
+    // 无用反馈必须选原因
+    await page.getByTestId("feedback-submit").click();
+    await expect(form).toContainText("请至少选择一个原因标签");
+    await page.locator(".van-checkbox").first().click();
+    await page.getByTestId("feedback-comment").locator("textarea").fill("引用对不上");
+    await page.getByTestId("feedback-submit").click();
+    await expect(page.getByTestId("feedback-done")).toContainText("无用");
+    await expect(page.getByTestId("feedback-row")).toHaveCount(0);
+    expect(fbBody).toMatchObject({
+      rating: "unhelpful",
+      reason_tags: ["inaccurate"],
+      comment: "引用对不上",
+      turn_id: "t-e2e",
+      trace_id: "r-e2e",
+      conversation_id: "conv-e2e",
+    });
+    expect(handles.turnBodies.length).toBe(1); // 反馈不影响聊天回合
   });
 });

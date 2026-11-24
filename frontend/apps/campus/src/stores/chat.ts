@@ -11,7 +11,9 @@ import type {
   CampusMessageView,
   ChatApiError,
   ChatStreamEvent,
+  FeedbackTag,
 } from "@campus-elf/api-client";
+import { createFeedbackApi } from "@campus-elf/api-client";
 import { ChatAbortError, createCampusChatApi } from "@campus-elf/api-client";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
@@ -34,6 +36,12 @@ export interface ChatMessage {
   citations: ChatCitation[];
   status: "streaming" | "final" | "fallback" | "stopped" | "error";
   errorInfo?: { code: string; message: string; retryable: boolean };
+  /** meta 事件的 turn_id（AI-05 反馈键）——占位气泡由 meta 回填。 */
+  turnId?: string;
+  /** 已提交反馈（UI2：防重复提交；刷新后丢失可接受——后端幂等兜底 TD-P7）。 */
+  feedbackRating?: "helpful" | "unhelpful";
+  /** 思考折叠展开态（UI2 卡 3：默认收起——undefined 即收起）。 */
+  stepsOpen?: boolean;
 }
 
 const chatApi = createCampusChatApi(session, { baseUrl: import.meta.env.VITE_API_BASE_URL ?? "" });
@@ -53,6 +61,8 @@ export const useChatStore = defineStore("chat", () => {
   /** 最近一次未完成的用户输入（重试用）。 */
   const lastUserMessage = ref<string | null>(null);
   let controller: AbortController | null = null;
+  /** turn_id → trace_id（AI-05 反馈载荷需要；meta 时记录）。 */
+  const traceIdOfTurn = new Map<string, string>();
 
   const isStreaming = computed(() => phase.value === "streaming");
   const lastAssistant = computed(() =>
@@ -74,6 +84,9 @@ export const useChatStore = defineStore("chat", () => {
     switch (event.type) {
       case "meta": {
         if (!conversationId.value) conversationId.value = event.conversationId;
+        // 占位气泡回填 turn_id（AI-05 反馈键）+ turn→trace 映射
+        msg.turnId = event.turnId;
+        traceIdOfTurn.set(event.turnId, event.traceId);
         break;
       }
       case "reasoning_summary":
@@ -216,11 +229,43 @@ export const useChatStore = defineStore("chat", () => {
     conversationId.value = null;
     messages.value = [];
     errorInfo.value = null;
+    traceIdOfTurn.clear();
   }
 
   /** 按会话 id 清空（会话列表页用；不触碰当前打开的对话状态）。 */
   async function clearById(id: string): Promise<void> {
     await chatApi.clearConversation(id);
+  }
+
+  // 反馈（UI2：D2——按 turn 内存记，刷新丢失可接受，后端幂等兜底 TD-P7）
+  const feedbackApi = createFeedbackApi(session, {
+    baseUrl: import.meta.env.VITE_API_BASE_URL ?? "",
+  });
+  const submittingFeedback = ref(false);
+
+  async function submitFeedback(
+    msgId: string,
+    rating: "helpful" | "unhelpful",
+    reasonTags: string[],
+    comment?: string,
+  ): Promise<void> {
+    const msg = messages.value.find((m) => m.id === msgId);
+    if (!msg?.turnId || !conversationId.value || submittingFeedback.value) return;
+    if (msg.feedbackRating) return; // 已反馈防重复（幂等兜底在后端）
+    submittingFeedback.value = true;
+    try {
+      await feedbackApi.submitFeedback({
+        conversationId: conversationId.value,
+        turnId: msg.turnId,
+        traceId: traceIdOfTurn.get(msg.turnId) ?? "",
+        rating,
+        reasonTags: reasonTags as FeedbackTag[],
+        comment,
+      });
+      msg.feedbackRating = rating;
+    } finally {
+      submittingFeedback.value = false;
+    }
   }
 
   return {
@@ -237,6 +282,8 @@ export const useChatStore = defineStore("chat", () => {
     newConversation,
     abortInFlight,
     clearById,
+    submitFeedback,
+    submittingFeedback,
   };
 });
 

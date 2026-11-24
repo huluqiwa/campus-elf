@@ -3,11 +3,16 @@ import {
   Button,
   Cell,
   CellGroup,
+  Checkbox,
+  CheckboxGroup,
+  Collapse,
+  CollapseItem,
   Dialog,
   Field,
   Form,
   List,
   NavBar,
+  Popup,
   Radio,
   RadioGroup,
   showToast,
@@ -32,7 +37,12 @@ const app = createApp(App)
   .use(Radio)
   .use(RadioGroup)
   .use(List)
-  .use(Dialog);
+  .use(Dialog)
+  .use(Collapse)
+  .use(CollapseItem)
+  .use(Popup)
+  .use(Checkbox)
+  .use(CheckboxGroup);
 
 // 会话回调在路由就绪后绑定（避免 store ↔ router 循环依赖）
 authOptions.onUnauthorized = (reason: string) => {
