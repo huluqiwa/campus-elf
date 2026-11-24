@@ -4,7 +4,7 @@
 |---|---|
 | ID | M4-EVAL-ragas |
 | 日期 | 2026-11-24 |
-| 状态 | 待用户确认（含 §7 高风险口径确认） |
+| 状态 | 用户已确认（2026-11-24「确认」，含 §7 高风险口径）；实现中偏差见 §2.5 注记 |
 | 上游 | requirements A12 / spec OBS-03、§3.15 / milestone §7.4 / test-plan §6、BS-40 |
 | 决策卡 | 5 张，用户 2026-11-24 拍板「全按推荐」 |
 | 范围 | **纯 evals/ + docs/，backend 生产代码零改动、零迁移、零新权限码** |
@@ -92,9 +92,11 @@
 不含证据全文；`citation` 事件带 `chunk_id`。
 
 - **D3-A（推荐）：ragas faithfulness，contexts 用被引块全文**。
-  收集阶段拿 citation 的 `chunk_id`，用 kb_admin 账号走 KB-06 分块预览 API
+  收集阶段拿 citation 的 `chunk_id`，用 kb_publisher 账号走 KB-06 分块预览 API
   （`school.kb.view_chunks`）取块文本，构成 contexts；
   对 `kb_qa(23) + citation(23)` 共 46 条算 faithfulness，均值≥0.90 达标。
+  （勘误：原写 kb_admin——实测种子 kb_admin 只有 upload+view 无 view_chunks，
+  持码的是 kb_publisher/kb_chunk_editor/kb_chunk_confirmer；runner 用 kb_publisher。）
   - **口径注记（诚实声明）**：contexts 是「被引子集」而非「全部检索命中集」——
     SSE 不导出未引用的命中。被引子集是生产 VERIFY/语义校验后的最终证据面，
     评「答案是否忠于它给出的证据」语义成立；登记 TD-351，导出批后可用全量 span 复核。
@@ -113,6 +115,33 @@
   `evals/src/campus_elf_evals/judge_prompts/`，与 backend prompt 规范同构）。
 - D4-B：裸 httpx 手写 judge 调用。缺点：ragas 指标集成要自己糊 LLM 抽象；落选。
 - 密钥纪律：judge 客户端构造后不回显配置；报告/日志只含 model 名与 base_url 的 host 部分。
+- **实现偏差注记（2026-11-24，探测脚本实测后修正）**：ragas 0.4.3 的
+  `ragas.metrics.collections.Faithfulness` 要求 `InstructorBaseRagasLLM`
+  （经 `ragas.llms.llm_factory(model, provider="openai", client=AsyncOpenAI(...))` 构造），
+  **不接受 langchain-community ChatOpenAI 包装**。故 judge 与 ragas 统一改用
+  `openai.AsyncOpenAI` 直连（OpenAI 兼容端点），D4-A 的「langchain 包装」措辞作废；
+  `openai>=3,<4` 原为 ragas 传递依赖，现已在 `evals/pyproject.toml` 显式声明。
+  温度 0 / seed / 锁模型名 / 密钥纪律不变。
+- **实现偏差注记 2（2026-11-24，冒烟首跑暴露）**：runner 的后端 httpx 客户端与
+  judge/ragas 的外联 httpx 客户端均设 `trust_env=False`。原因：运行环境注入
+  `NO_PROXY=...,[::1],::1`，httpx 解析括号 IPv6 抛 `InvalidURL: Invalid port ':1]'`
+  在建客户端时即崩。后端在 localhost 本就不该继承环境代理；外联 LLM 直连已实测可达
+  （trust_env=False 探针 OK）。这是隔离设计而非临时绕行，无需清理。
+- **实现偏差注记 3（2026-11-25，冒烟二跑 faithfulness 恒 0 排查后修正）**：D3-A 的
+  contexts 原仅取分块正文 `text_markdown`，但正文不含文档名/章节标题；回答常以
+  「根据《奖学金评定办法》…申请要求」framing 引用，ragas NLI 判这些 framing「上下文未提及」
+  → verdict 全 0 → faithfulness 假 0（探测脚本实测：纯正文 0.0，补回引用锚点的
+  `文档：{document}\n章节：{section}` 头后 1.0）。修正：每条被引块 context =
+  引用锚点 document/section 头 + 正文。锚点 metadata 本就是用户可见检索上下文的一部分，
+  补回是「完整表示被引块」而非放宽指标；TD-351（被引子集 vs 全量命中）口径不变。
+- **实现偏差注记 4（2026-11-25，全量首跑熔断 cascade 后修正）**：全量并发 2 连打 195 回合
+  把 provider 打到反复超时→熔断器跳闸→116/195 回合 LLM_BREAKER_OPEN，基线无效（TD-354）。
+  用户裁定改并发 1 重跑。配套健壮性补强（TD-355，已完成）：①`TokenRefresher`（qa_seed）
+  按 ttl_s=700 定时重登——access_token TTL=900s，并发 1 全量约 40min 会中途过期→401，
+  chat 收集与 kb_publisher 取块两处令牌均保鲜；②`collect_all` 增可选 `refresh_token` 回调
+  + `refresh_interval_s`（缺省不刷新，旧测试不变）；③`OpenAIJudge.score_case` 网络异常
+  单条隔离（重试一次后保守判 0，reason=judge_transport_error），与 faithfulness 侧一致，
+  避免 provider 瞬断整批崩。新增 5 测试，evals 56 测试全绿。
 
 ---
 
