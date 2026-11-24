@@ -20,6 +20,8 @@ const input = ref("");
 const scrollBox = ref<HTMLElement | null>(null);
 const showCitations = ref(false);
 const showFeedbackForm = ref(false);
+/** 引用抽屉的数据源气泡 id（与反馈目标分开——两个弹层各自独立，防状态串扰）。 */
+const citationMsgId = ref<string | null>(null);
 const feedbackMsgId = ref<string | null>(null);
 const feedbackRating = ref<"helpful" | "unhelpful">("helpful");
 const feedbackTags = ref<string[]>([]);
@@ -29,7 +31,7 @@ const feedbackError = ref("");
 const canChat = computed(() => auth.user?.permissions?.includes("campus.kb.qa") ?? false);
 /** 引用抽屉的数据源（打开时锁定的气泡）。 */
 const drawerCitations = computed(() => {
-  const msg = chat.messages.find((m) => m.id === feedbackMsgId.value);
+  const msg = chat.messages.find((m) => m.id === citationMsgId.value);
   return msg?.citations ?? [];
 });
 
@@ -125,7 +127,7 @@ function openFeedback(msg: ChatMessage, rating: "helpful" | "unhelpful"): void {
 }
 
 function openCitations(msg: ChatMessage): void {
-  feedbackMsgId.value = msg.id;
+  citationMsgId.value = msg.id;
   showCitations.value = true;
 }
 

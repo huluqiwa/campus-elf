@@ -79,6 +79,36 @@ AI-04 验收「点击可查看」）、反馈入口（消费 AI-05）、思考�
 | 3 | 全栈链⑤ spec + 复现命令文档化 | 本地真栈跑（A5） |
 | 4 | 门禁（前端全套 + prettier）+ 独立审查 + PR | CI 四 job |
 
+### 4.1 全栈链⑤复现命令（A5）
+
+```bash
+# 1) 真后端栈（重置测试库 + 迁移 + seed；seed 写 deploy/.e2e-accounts.json）
+scripts/e2e-stack.sh up
+
+# 2) 真 LLM 旁通（可选；不设则跑 LLM_NOT_CONFIGURED 兜底弧）。
+#    口令只从 .env 读取并注入当前进程，不落库/不入日志/不写进编排文件。
+set -a && . ./.env && set +a
+export E2E_LLM_API_KEY="$LLM_API_KEY" E2E_LLM_BASE_URL="$LLM_BASE_URL" E2E_LLM_MODEL="$LLM_MODEL"
+docker compose -p campus-elf-e2e --env-file deploy/.env.test \
+  -f deploy/docker-compose.e2e.yml up -d backend
+
+# 3) 运行（CI 不跑；需先 pnpm build 出 preview 产物）
+cd frontend
+E2E_ACCOUNTS_FILE="../deploy/.e2e-accounts.json" \
+  pnpm exec playwright test campus-fullstack-chat \
+  --config playwright.fullstack.config.ts --reporter=list --workers=1
+```
+
+链路覆盖：KB 发布前置（上传→审批→ACL→构建→测试集→`TEST_PASSED`→发布，全 API
+驱动）→ 学生登录 → 提问 → 等 `data-status` 终态 → 引用抽屉 → 反馈（断言
+`POST /campus/feedback` = **201 首次落库**）→ 清空（断言 `DELETE .../messages`
+`cleared > 0`）→ 打开该会话消息区为空。
+
+**可重复运行**：种子新增 `e2e-campus-chat`（不强制改密、挂内置 `student` 角色），
+与首登强改密用例（`student`）隔离；连跑两轮均全绿。链⑤断言的「清空」按 spec
+AI-06/07 语义是**软删消息、会话行保留**，因此结尾判断「该会话消息为空」而不是
+「会话列表为空」。
+
 ## 5. 测试策略
 
 - **单元**：feedback api 载荷/映射/错误；引用去重展示逻辑
