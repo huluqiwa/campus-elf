@@ -49,6 +49,15 @@ services:
       LLM_API_KEY: ${E2E_LLM_API_KEY:-}
       LLM_BASE_URL: ${E2E_LLM_BASE_URL:-}
       LLM_MODEL: ${E2E_LLM_MODEL:-}
+      # TD-354：慢模型放宽剖面（仅 e2e；生产代码默认仍紧 15s/30s/5 次）。
+      # 当前 provider 首字实测中位 9.7s/p90 51s，紧剖面会反复读超时→重试记失败→熔断 cascade。
+      # 放宽读超时/回合首字上限、减重试、宽熔断，让慢模型能答完以产出有效评估基线。
+      LLM_FIRST_TOKEN_TIMEOUT_SECONDS: ${E2E_LLM_FIRST_TOKEN_TIMEOUT_SECONDS:-90}
+      LLM_TURN_TIMEOUT_SECONDS: ${E2E_LLM_TURN_TIMEOUT_SECONDS:-120}
+      LLM_MAX_ATTEMPTS: ${E2E_LLM_MAX_ATTEMPTS:-2}
+      LLM_BREAKER_FAILURE_THRESHOLD: ${E2E_LLM_BREAKER_FAILURE_THRESHOLD:-10}
+      LLM_BREAKER_WINDOW_SECONDS: ${E2E_LLM_BREAKER_WINDOW_SECONDS:-180}
+      LLM_BREAKER_OPEN_SECONDS: ${E2E_LLM_BREAKER_OPEN_SECONDS:-10}
       # 知识库全栈 E2E 用开发跳过扫描：上传直接 PENDING_APPROVAL + engine=dev-skip。
       # 只在 dev/test 生效；非 dev/test 会被 Settings 拒绝（backend/app/config.py:236-238）。
       DEV_SKIP_FILE_SCAN: "true"
