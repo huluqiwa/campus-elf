@@ -1,5 +1,6 @@
 <!-- C 端聊天页（M4-UI1/UI2）：流式正文/停止/重试/兜底/error 态 + 引用抽屉 +
-     反馈入口（AI-05）+ 思考折叠 + 待机精灵（纯 CSS，TD-P2：真 3D 延后）。 -->
+     反馈入口（AI-05）+ 思考折叠 + 待机精灵（纯 CSS；真 3D 模型延后，见
+     M4-UI2 简报 §6）。 -->
 
 <script setup lang="ts">
 import { showDialog, showToast } from "vant";

@@ -38,7 +38,7 @@ export interface ChatMessage {
   errorInfo?: { code: string; message: string; retryable: boolean };
   /** meta 事件的 turn_id（AI-05 反馈键）——占位气泡由 meta 回填。 */
   turnId?: string;
-  /** 已提交反馈（UI2：防重复提交；刷新后丢失可接受——后端幂等兜底 TD-P7）。 */
+  /** 已提交反馈（UI2：防重复提交；刷新后丢失可接受——后端幂等兜底 TD-345）。 */
   feedbackRating?: "helpful" | "unhelpful";
   /** 思考折叠展开态（UI2 卡 3：默认收起——undefined 即收起）。 */
   stepsOpen?: boolean;
@@ -237,7 +237,7 @@ export const useChatStore = defineStore("chat", () => {
     await chatApi.clearConversation(id);
   }
 
-  // 反馈（UI2：D2——按 turn 内存记，刷新丢失可接受，后端幂等兜底 TD-P7）
+  // 反馈（UI2：D2——按 turn 内存记，刷新丢失可接受，后端幂等兜底 TD-345）
   const feedbackApi = createFeedbackApi(session, {
     baseUrl: import.meta.env.VITE_API_BASE_URL ?? "",
   });
