@@ -1,6 +1,6 @@
 # M4-TD354 — LLM 超时/重试/熔断参数放宽（慢模型适配）
 
-> 状态：**已确认，实现中**（用户 2026-11-25 拍板：方案 A 开做 + SLO 保留目标注明 dev 不达标）。
+> 状态：**已实现，真栈验证通过**（用户 2026-11-25 拍板：方案 A 开做 + SLO 保留目标注明 dev 不达标；待独立审查/PR/合并）。
 > 触发：M4-EVAL Ragas 全量跑批 cascade（TD-354）。用户 2026-11-25 拍板方向＝「放宽超时/重试/熔断参数」（非换模型、非修记账逻辑）。
 >
 > **实现注记（2026-11-25）**：
@@ -8,8 +8,8 @@
 > - e2e 放宽剖面落 `deploy/docker-compose.e2e.yml`（读 90/回合 120/重试 2/熔断 10 次 180s 开 10s，宿主 E2E_LLM_* 可覆盖）；`.env.example` 补可配项 + 注释式 dev 放宽剖面；生产代码默认紧不变。
 > - 测试：`test_config.py::test_llm_turn_timeout_bounds` + 默认断言；`tests/harness/test_chat_assembly.py`（接线 120/默认 30）；`test_fast_path_loop.py::test_relaxed_turn_timeout_lets_slow_first_token_complete`（慢首字 1s + 超时 2s → done，对照原 0.2s 超时弧）。
 > - 文档回写：design §A8/§ReAct TURN_TIMEOUT 注记、spec AI-01 验收 SLO 注记、tech-debt TD-354。
-> - **评估侧配套（留 eval 分支）**：`qa_runner.collect_all` timeout 60→150s，待 TD-354 合并后回 eval 分支改 + 重跑全量基线。
-> - 待验证：e2e 栈重启（拾取新 env）→ 重跑全量 195 → cascade 消除（基础设施失败 <5%）→ TD-354 改已完成。
+> - **评估侧配套（eval 分支 af91235）**：`qa_runner.collect_all`/`qa_collect.collect_turn` 读超时 60→150s（>后端回合 120s），避免客户端先掐断慢回合。
+> - **真栈验证（2026-11-25）**：e2e 栈重建带修复（容器 env 实测读 90/回合 120/重试 2/熔断 10/180/10），冒烟 18 条并发 1 → **0 BREAKER_OPEN**（修复前 87/195）、1 LLM_TIMEOUT（capability_fallback 复杂用例固有慢、未连累后续）、失败率 48%→5.6%，cascade 消除。TD-354 改已完成；全量 195 有效基线留 eval 分支重跑。
 
 ## 1. 目标与验收
 
