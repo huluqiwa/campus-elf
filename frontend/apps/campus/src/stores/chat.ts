@@ -252,12 +252,18 @@ export const useChatStore = defineStore("chat", () => {
     const msg = messages.value.find((m) => m.id === msgId);
     if (!msg?.turnId || !conversationId.value || submittingFeedback.value) return;
     if (msg.feedbackRating) return; // 已反馈防重复（幂等兜底在后端）
+    // 后端 trace_id 必填（min_length=1）：历史消息/丢 meta 时没有映射，直接发出会被
+    // 422 拒绝且用户只看到「提交失败」。这里显式拦下并给出可读原因。
+    const traceId = traceIdOfTurn.get(msg.turnId);
+    if (!traceId) {
+      throw new Error("该回答缺少追踪信息，暂时无法反馈（可重新提问后再试）");
+    }
     submittingFeedback.value = true;
     try {
       await feedbackApi.submitFeedback({
         conversationId: conversationId.value,
         turnId: msg.turnId,
-        traceId: traceIdOfTurn.get(msg.turnId) ?? "",
+        traceId,
         rating,
         reasonTags: reasonTags as FeedbackTag[],
         comment,
