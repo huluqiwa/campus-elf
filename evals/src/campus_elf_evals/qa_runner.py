@@ -53,7 +53,8 @@ async def collect_all(
     cases: list[QaCase],
     *,
     concurrency: int = 2,
-    timeout: float = 60.0,
+    # 客户端读超时须大于后端回合硬超时（TD-354 dev/e2e 放宽到 120s），否则慢回答被客户端先掐断。
+    timeout: float = 150.0,
     refresh_token: Callable[[], Awaitable[str]] | None = None,
     refresh_interval_s: float = 700.0,
 ) -> dict[str, TurnResult]:
