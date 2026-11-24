@@ -76,4 +76,9 @@ regexes = [
   "sk-abcdef1234567890abcdef1234",
   # M4-AI06/07 会话端点集成测试假口令（仅 127.0.0.1 测试栈种子账号；非真实凭证）。
   "Conv-Passw0rd-1",
+  # M4-UI2 链⑤ 种子口令：**仅历史残留**。该常量已改为 secrets.token_urlsafe 随机生成
+  # （现行代码不含此串），但 948037d 提交过静态值，而 security 是全历史扫描
+  # （fetch-depth 0 + --log-opts=--no-merges）。与 RoleA/RoleB/MfaC 同口径精确放行，
+  # 历史不重写；仅 127.0.0.1 测试栈使用，非真实凭证。
+  "Campus-Elf-ChatD-2026x",
 ]

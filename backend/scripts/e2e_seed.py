@@ -68,6 +68,11 @@ TEACHER_EMAIL = "teacher@e2e-scenario.edu"
 TEACHER_PASSWORD = "E2E-Teacher-Pass-1"
 STUDENT_LOGIN_ID = "e2e-student"
 STUDENT_PASSWORD = "E2E-Student-Init-1"
+# C 端聊天链（UI1/UI2）专用：不强制改密（链可重复跑）、独立口令（不与首登改密用例共用）。
+# 口令随机生成（同 KB 账号惯例）：静态串会长期有效，且需要往 gitleaks 放行名单里
+# 加常量——等于给"把凭证形状字符串提交进仓库"开口子。
+CAMPUS_CHAT_LOGIN_ID = "e2e-campus-chat"
+CAMPUS_CHAT_PASSWORD = f"Chat-{secrets.token_urlsafe(18)}"
 # 重置流程专用账号：忘记密码用例会改掉它的口令，避免与教师/运营账号的登录用例互踩。
 RESETTER_LOGIN_ID = "e2e-resetter"
 RESETTER_EMAIL = "resetter@e2e-scenario.edu"
@@ -172,7 +177,7 @@ async def _bind_builtin_role(
         await session.execute(
             text(
                 "insert into user_roles (tenant_id, user_id, role_id) "
-                "values (:tenant_id, :user_id, :role_id)"
+                "values (:tenant_id, :user_id, :role_id) on conflict do nothing"
             ),
             {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
         )
@@ -402,7 +407,7 @@ async def main() -> None:
             chunk_confirmer_user_id,
             "school_super_admin",
         )
-        await seed_tenant_user(
+        student_tenant_id, student_user_id = await seed_tenant_user(
             engine,
             school_code=school_code,
             login_id=STUDENT_LOGIN_ID,
@@ -410,6 +415,18 @@ async def main() -> None:
             user_type="student",
             must_change_password=True,
         )
+        # C 端聊天链（UI1/UI2）需要 campus.kb.qa 等 campus 域码：挂内置 student 角色
+        # （§3.3 全量 campus 码），与教师/运营岗同走真实 user_roles 链路。
+        await _bind_builtin_role(engine, student_tenant_id, student_user_id, "student")
+        # 聊天链专用学生：不强制改密（链可重复跑），同样挂内置 student 角色。
+        chat_tenant_id, chat_user_id = await seed_tenant_user(
+            engine,
+            school_code=school_code,
+            login_id=CAMPUS_CHAT_LOGIN_ID,
+            password=CAMPUS_CHAT_PASSWORD,
+            user_type="student",
+        )
+        await _bind_builtin_role(engine, chat_tenant_id, chat_user_id, "student")
         await seed_tenant_user(
             engine,
             school_code=school_code,
@@ -509,6 +526,12 @@ async def main() -> None:
             {
                 "realm": "tenant",
                 "school_code": school_code,
+                "login_id": CAMPUS_CHAT_LOGIN_ID,
+                "password": CAMPUS_CHAT_PASSWORD,
+            },
+            {
+                "realm": "tenant",
+                "school_code": school_code,
                 "login_id": ROLE_ADMIN_LOGIN_ID,
                 "password": ROLE_ADMIN_PASSWORD,
             },
@@ -568,6 +591,12 @@ async def main() -> None:
             "school_code": school_code,
             "login_id": STUDENT_LOGIN_ID,
             "password": STUDENT_PASSWORD,
+        },
+        # C 端聊天链（UI1/UI2）：不强制改密，供链⑤反复运行。
+        "campus_chat": {
+            "school_code": school_code,
+            "login_id": CAMPUS_CHAT_LOGIN_ID,
+            "password": CAMPUS_CHAT_PASSWORD,
         },
         "resetter": {
             "school_code": school_code,

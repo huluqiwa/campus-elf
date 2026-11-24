@@ -28,6 +28,8 @@ export interface E2EAccounts {
     password: string;
   };
   student: { school_code: string; login_id: string; password: string };
+  /** C 端聊天链（UI1/UI2 链⑤）：不强制改密，链可反复运行。 */
+  campus_chat: { school_code: string; login_id: string; password: string };
   resetter: {
     school_code: string;
     login_id: string;

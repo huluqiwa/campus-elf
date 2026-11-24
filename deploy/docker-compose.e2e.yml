@@ -45,6 +45,10 @@ services:
       SMTP_FROM: no-reply@campus-elf.test
       OBJECT_STORE_BACKEND: local
       OBJECT_STORE_DIR: /tmp/e2e-objects
+      # M4-UI2 链⑤：LLM 旁通（宿主导出 E2E_LLM_* 即真流式弧；缺省空=LLM_NOT_CONFIGURED 兜底弧）
+      LLM_API_KEY: ${E2E_LLM_API_KEY:-}
+      LLM_BASE_URL: ${E2E_LLM_BASE_URL:-}
+      LLM_MODEL: ${E2E_LLM_MODEL:-}
       # 知识库全栈 E2E 用开发跳过扫描：上传直接 PENDING_APPROVAL + engine=dev-skip。
       # 只在 dev/test 生效；非 dev/test 会被 Settings 拒绝（backend/app/config.py:236-238）。
       DEV_SKIP_FILE_SCAN: "true"

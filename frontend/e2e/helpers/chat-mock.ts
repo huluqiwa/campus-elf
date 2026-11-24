@@ -15,7 +15,7 @@ const SSE_NORMAL = [
   'event: reasoning_summary\ndata: {"summary":"已找到 2 条相关校规，正在核对引用"}',
   'event: delta\ndata: {"text":"根据学校规定，"}',
   'event: delta\ndata: {"text":"差旅报销需要发票和审批单 [1]。"}',
-  'event: citation\ndata: {"index":1,"chunk_id":"c1","document":"财务报销手册","page":3,"section":"第一章"}',
+  'event: citation\ndata: {"index":1,"chunk_id":"chunk-uuid-0001-abcdef","document":"财务报销手册","page":3,"section":"第一章"}',
   'event: done\ndata: {"turn_id":"t-e2e","trace_id":"r-e2e","conversation_id":"conv-e2e","tokens_in":120,"tokens_out":30,"first_token_ms":300,"latency_ms":900,"stop_reason":"FINAL_ANSWER"}',
 ].join("\n\n");
 
@@ -38,12 +38,85 @@ export interface ChatMockOptions {
   mode?: "normal" | "fallback" | "error";
   /** 是否 mock abort（403）：无码用户直发请求时后端语义。 */
   rejectTurn?: boolean;
+  /**
+   * 分段慢速下发（M4-UI2 审查 Blocker 回归）：首段只发 meta + 第一个 delta，
+   * 停 `holdMs` 再发其余。用于断言「流式途中气泡已有内容」——一次性 fulfill
+   * 的 mock 无法暴露「增量写入未触发渲染」这类缺陷（内容会在 done 后一次出现）。
+   */
+  slowStream?: { holdMs?: number };
 }
 
 /** 记录请求体，供断言提交载荷。 */
 export interface ChatMockHandles {
   turnBodies: Record<string, unknown>[];
   clearCalls: string[];
+}
+
+/**
+ * 分段慢速 SSE（M4-UI2 审查 Blocker 的回归测试夹具）：
+ * 覆写 window.fetch，对 /chat/turns 返回**真正分块**的 ReadableStream。
+ * 分块顺序是刻意的：① meta（建立占位气泡，伴随一次 ref 赋值→一次重渲染）；
+ * ② +400ms 发首个 delta；③ 再 holdMs（用例传 2500ms）才发末段与 done。
+ * 于是「首段 delta 后、末段到达前正文可见」只可能来自 delta 写入本身触发了渲染——
+ * 用 raw 对象写增量时屏幕仍是空气泡（仅有光标）。`route.fulfill` 一次性给全文，
+ * 结构上无法暴露该缺陷。
+ */
+export async function mockSlowStream(page: Page, options: { holdMs?: number } = {}): Promise<void> {
+  const holdMs = options.holdMs ?? 1500;
+  const chunkMeta =
+    'event: meta\ndata: {"turn_id":"t-e2e","trace_id":"r-e2e","conversation_id":"conv-e2e"}\n\n';
+  const chunkFirstDelta = 'event: delta\ndata: {"text":"根据学校规定，"}\n\n';
+  const chunkRest = [
+    'event: delta\ndata: {"text":"差旅报销需要发票和审批单 [1]。"}',
+    'event: citation\ndata: {"index":1,"chunk_id":"chunk-uuid-0001-abcdef","document":"财务报销手册","page":3,"section":"第一章"}',
+    'event: done\ndata: {"turn_id":"t-e2e","trace_id":"r-e2e","conversation_id":"conv-e2e","tokens_in":120,"tokens_out":30,"first_token_ms":300,"latency_ms":900,"stop_reason":"FINAL_ANSWER"}',
+  ].join("\n\n");
+
+  await page.addInitScript(
+    ({ holdMs, chunkMeta, chunkFirstDelta, chunkRest }) => {
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (!url.includes("/api/v1/campus/chat/turns") || (init?.method ?? "GET") !== "POST") {
+          return originalFetch(input, init);
+        }
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            let closed = false;
+            const push = (text: string): void => {
+              // abort/close 之后定时器仍会触发：不守卫会在页面里抛 TypeError 噪声
+              if (closed) return;
+              try {
+                controller.enqueue(encoder.encode(text));
+              } catch {
+                closed = true;
+              }
+            };
+            // meta 先落地并留 400ms：让「占位气泡建立 + phase=streaming」那一批
+            // 重渲染彻底走完，随后的 delta 才是对「增量写入是否触发渲染」的独立检验。
+            push(chunkMeta);
+            setTimeout(() => push(chunkFirstDelta), 400);
+            setTimeout(() => {
+              push(chunkRest);
+              closed = true;
+              try {
+                controller.close();
+              } catch {
+                /* 已关闭/已中断 */
+              }
+            }, 400 + holdMs);
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      };
+    },
+    { holdMs, chunkMeta, chunkFirstDelta, chunkRest },
+  );
 }
 
 export function mockChatApi(

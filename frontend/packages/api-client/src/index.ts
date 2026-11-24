@@ -193,3 +193,14 @@ export {
   type ChatToolResultEvent,
   type StreamTurnInput,
 } from "./campus-chat";
+
+export {
+  createFeedbackApi,
+  FEEDBACK_RATINGS,
+  FEEDBACK_TAGS,
+  type FeedbackApi,
+  type FeedbackRating,
+  type FeedbackSubmitInput,
+  type FeedbackSubmitResult,
+  type FeedbackTag,
+} from "./campus-feedback";

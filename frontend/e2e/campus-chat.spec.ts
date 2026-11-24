@@ -5,7 +5,7 @@
 import { expect, test } from "@playwright/test";
 
 import { mockAuth } from "./helpers/auth-mock";
-import { CHAT_PERMISSION, mockChatApi } from "./helpers/chat-mock";
+import { CHAT_PERMISSION, mockChatApi, mockSlowStream } from "./helpers/chat-mock";
 
 test.describe("聊天入口权限渲染", () => {
   test("持 campus.kb.qa → 显示「开始 AI 问答」入口", async ({ page }) => {
@@ -45,7 +45,9 @@ test.describe("聊天页", () => {
     await expect(page.getByTestId("messages")).toContainText(
       "根据学校规定，差旅报销需要发票和审批单",
     );
-    await expect(page.getByTestId("reasoning-steps")).toContainText("已找到 2 条相关校规");
+    await expect(page.getByTestId("reasoning-collapse")).toContainText("思考过程 (1)");
+    await page.getByTestId("reasoning-collapse").click();
+    await expect(page.getByText("已找到 2 条相关校规")).toBeVisible();
     // meta 回显 conversation_id → URL 更新（D4）
     await expect(page).toHaveURL(/\/chat\/conv-e2e/);
   });
@@ -191,5 +193,139 @@ test.describe("会话列表与清空", () => {
     expect(handles.clearCalls[0]).toContain("/api/v1/campus/conversations/conv-e2e/messages");
     // 列表移除
     await expect(page.getByText("AI 对话")).toHaveCount(0);
+  });
+});
+
+test.describe("UI2 体验收口", () => {
+  test.beforeEach(async ({ page }) => {
+    mockAuth(page, {
+      user: {
+        ...{ realm: "tenant", roles: ["student"] },
+        // 反馈入口要求 campus.feedback.create（后端强制），与真实 student 角色一致
+        permissions: [CHAT_PERMISSION, "campus.chat.use", "campus.feedback.create"],
+      },
+    });
+  });
+
+  test("流式增量渲染：首段 delta 到达即上屏（不等 done 整段出现）", async ({ page }) => {
+    // 审查 Blocker 回归：store 曾用 push 前的 raw 对象写增量，Vue 不触发渲染，
+    // 整个流式退化为「生成结束才整段出现」。夹具把 meta 与首个 delta 分块下发
+    // （首 delta 在 +400ms），再 hold 2.5s 后才发末段。
+    const HOLD_MS = 2500;
+    await mockSlowStream(page, { holdMs: HOLD_MS });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+
+    const streamingBubble = page.locator('[data-role="assistant"][data-status="streaming"]');
+    await expect(streamingBubble).toBeVisible({ timeout: 5_000 });
+    // 关键：在**末段到达前**确认首段已上屏。用有上限的 auto-wait（2s < 2.9s 末段
+    // 时刻），既不会像固定 sleep 那样在慢机器上假红，也不会等到末段后失去分辨力
+    // （末段到达时气泡已是 final，此选择器就匹配不到了）。
+    await expect(streamingBubble).toContainText("根据学校规定，", { timeout: 2_000 });
+    // 此刻末段（含 [1]）尚未下发：正文不应出现引用编号
+    expect((await streamingBubble.textContent()) ?? "").not.toContain("[1]");
+
+    // 末段到达后进入终态
+    await expect(page.locator('[data-role="assistant"][data-status="final"]')).toContainText(
+      "差旅报销需要发票和审批单",
+      { timeout: 15_000 },
+    );
+  });
+
+  test("待机精灵：空闲态渲染（data-testid），发消息后消失", async ({ page }) => {
+    mockChatApi(page, { mode: "normal" });
+    await page.goto("/chat");
+    await expect(page.getByTestId("idle-mascot")).toBeVisible();
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    await expect(page.getByTestId("idle-mascot")).toHaveCount(0);
+    await expect(page.getByTestId("messages")).toContainText("差旅报销需要发票和审批单");
+  });
+
+  test("待机精灵：进入无消息会话（清空后空态）重新出现", async ({ page }) => {
+    // 清空/空历史是「回到待机态」的路径之一（另一条是 /chat 新对话），
+    // 全栈链⑤ 覆盖了真库路径，这里用 mock 固定住 UI 判定：messages 为空即显示。
+    mockChatApi(page, { mode: "normal" });
+    await page.route("**/api/v1/campus/conversations/*/messages*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ messages: [] }),
+      });
+    });
+    await page.goto("/chat/conv-e2e");
+    await expect(page.getByTestId("idle-mascot")).toBeVisible();
+  });
+
+  test("思考折叠：步骤计数 + 默认收起 + 展开可见明细", async ({ page }) => {
+    mockChatApi(page, { mode: "normal" });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    const collapse = page.getByTestId("reasoning-collapse");
+    await expect(collapse).toContainText("思考过程 (1)");
+    // 默认收起：明细不可见
+    await expect(page.getByText("已找到 2 条相关校规")).toHaveCount(0);
+    await collapse.click();
+    await expect(page.getByText("已找到 2 条相关校规")).toBeVisible();
+  });
+
+  test("引用抽屉：气泡尾入口 → 底部抽屉列明细（文档/章节/页码，chunk_id 不出现）", async ({
+    page,
+  }) => {
+    mockChatApi(page, { mode: "normal" });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    const btn = page.getByTestId("citation-button");
+    await expect(btn).toContainText("引用来源 (1)");
+    await btn.click();
+    const drawer = page.getByTestId("citation-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toContainText("[1] 财务报销手册");
+    await expect(drawer).toContainText("第一章");
+    await expect(drawer).toContainText("第 3 页");
+    // chunk_id 绝不进 UI：用完整长串断言，短串（如 "c1"）近乎恒真
+    expect(await drawer.innerHTML()).not.toContain("chunk-uuid-0001-abcdef");
+  });
+
+  test("反馈入口：👍 → 表单提交 → 已反馈标记 + 幂等不再显示入口", async ({ page }) => {
+    const { handles } = mockChatApi(page, { mode: "normal" });
+    // 反馈提交走真实 POST /campus/feedback mock
+    let fbBody: Record<string, unknown> | null = null;
+    void page.route("**/api/v1/campus/feedback", async (route) => {
+      fbBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: '{"feedback_id":"fb-e2e","replayed":false}',
+      });
+    });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+    const row = page.getByTestId("feedback-row");
+    await expect(row).toBeVisible();
+    await page.getByTestId("fb-unhelpful").click();
+    const form = page.getByTestId("feedback-form");
+    await expect(form).toBeVisible();
+    // 无用反馈必须选原因
+    await page.getByTestId("feedback-submit").click();
+    await expect(form).toContainText("请至少选择一个原因标签");
+    await page.locator(".van-checkbox").first().click();
+    await page.getByTestId("feedback-comment").locator("textarea").fill("引用对不上");
+    await page.getByTestId("feedback-submit").click();
+    await expect(page.getByTestId("feedback-done")).toContainText("无用");
+    await expect(page.getByTestId("feedback-row")).toHaveCount(0);
+    expect(fbBody).toMatchObject({
+      rating: "unhelpful",
+      reason_tags: ["inaccurate"],
+      comment: "引用对不上",
+      turn_id: "t-e2e",
+      trace_id: "r-e2e",
+      conversation_id: "conv-e2e",
+    });
+    expect(handles.turnBodies.length).toBe(1); // 反馈不影响聊天回合
   });
 });
