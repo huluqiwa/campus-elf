@@ -56,9 +56,10 @@ export interface ChatMockHandles {
  * 分段慢速 SSE（M4-UI2 审查 Blocker 的回归测试夹具）：
  * 覆写 window.fetch，对 /chat/turns 返回**真正分块**的 ReadableStream。
  * 分块顺序是刻意的：① meta（建立占位气泡，伴随一次 ref 赋值→一次重渲染）；
- * ② 首个 delta 单独一块，之后 holdMs 内不再有任何其它 ref 变化。于是「正文在
- * hold 期间可见」只可能来自 delta 写入本身触发了渲染——用 raw 对象写增量时屏幕
- * 仍是空气泡。`route.fulfill` 一次性给全文，结构上无法暴露该缺陷。
+ * ② +400ms 发首个 delta；③ 再 holdMs（用例传 2500ms）才发末段与 done。
+ * 于是「首段 delta 后、末段到达前正文可见」只可能来自 delta 写入本身触发了渲染——
+ * 用 raw 对象写增量时屏幕仍是空气泡（仅有光标）。`route.fulfill` 一次性给全文，
+ * 结构上无法暴露该缺陷。
  */
 export async function mockSlowStream(page: Page, options: { holdMs?: number } = {}): Promise<void> {
   const holdMs = options.holdMs ?? 1500;
@@ -83,13 +84,28 @@ export async function mockSlowStream(page: Page, options: { holdMs?: number } = 
         const encoder = new TextEncoder();
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
+            let closed = false;
+            const push = (text: string): void => {
+              // abort/close 之后定时器仍会触发：不守卫会在页面里抛 TypeError 噪声
+              if (closed) return;
+              try {
+                controller.enqueue(encoder.encode(text));
+              } catch {
+                closed = true;
+              }
+            };
             // meta 先落地并留 400ms：让「占位气泡建立 + phase=streaming」那一批
             // 重渲染彻底走完，随后的 delta 才是对「增量写入是否触发渲染」的独立检验。
-            controller.enqueue(encoder.encode(chunkMeta));
-            setTimeout(() => controller.enqueue(encoder.encode(chunkFirstDelta)), 400);
+            push(chunkMeta);
+            setTimeout(() => push(chunkFirstDelta), 400);
             setTimeout(() => {
-              controller.enqueue(encoder.encode(chunkRest));
-              controller.close();
+              push(chunkRest);
+              closed = true;
+              try {
+                controller.close();
+              } catch {
+                /* 已关闭/已中断 */
+              }
             }, 400 + holdMs);
           },
         });

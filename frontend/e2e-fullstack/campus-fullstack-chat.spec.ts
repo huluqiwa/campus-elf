@@ -192,7 +192,7 @@ test("链⑤-前置：API 驱动发布 KB（上传→审批→ACL→构建→测
   expect(publish.status).toBe(200);
 });
 
-test("链⑤：学生登录 → 提问 → 流式 → 引用 → 反馈 → 停止弧 → 清空 → 消息为空", async ({ page }) => {
+test("链⑤：学生登录 → 提问 → 流式 → 引用 → 反馈 → 清空 → 消息为空", async ({ page }) => {
   // 真 LLM 首 token + 生成 + 交互 + 清空：默认 60s 不够（配置 timeout 见
   // playwright.fullstack.config.ts），这里显式放宽。
   test.setTimeout(180_000);
@@ -305,20 +305,30 @@ test("链⑤-停止弧：生成中点击停止 → 已停止尾标 + 不再增�
     .fill("请详细介绍一下学校的差旅报销流程和注意事项。");
   await page.getByTestId("send-button").click();
 
-  // 必须先进入 streaming（能看到停止按钮），才有可中断的流
+  // 停止按钮由 isStreaming 驱动、发送后同步出现，所以「等不到停止按钮」只能说明
+  // 按钮/渲染本身回归——必须失败，不能 skip（skip 条件与被测对象耦合 = 静默放行）。
+  // 环境前提（未配 LLM 时不产生可中断流）在 beforeEach 之外单独判定：只有终态被
+  // 明确标为 error 且文案指向未配置，才允许跳过。
   const stopButton = page.getByTestId("stop-button");
-  const started = await stopButton
-    .waitFor({ state: "visible", timeout: 30_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (!started) {
-    // 未配 LLM 时回合可能瞬间结束：显式标注跳过原因，避免伪装成通过
-    test.skip(true, "该环境未产生可中断的流（未配置 LLM）");
-  }
+  await expect(stopButton).toBeVisible({ timeout: 30_000 });
   await stopButton.click();
 
   const stoppedBubble = page.locator('[data-role="assistant"][data-status="stopped"]');
-  await expect(stoppedBubble).toBeVisible({ timeout: 20_000 });
+  const stopWorked = await stoppedBubble
+    .waitFor({ state: "visible", timeout: 20_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!stopWorked) {
+    // 区分「停止失效」与「压根没开始生成」：只有后者（未配 LLM 的即时 error）可跳过
+    const errorBubble = page.locator('[data-role="assistant"][data-status="error"]');
+    const isLlmMissing =
+      (await errorBubble.count()) > 0 &&
+      (await errorBubble.first().textContent())?.includes("未配置");
+    if (isLlmMissing) {
+      test.skip(true, "该环境未配置 LLM（无中断的流），停止弧不可测");
+    }
+    throw new Error("点击停止后未出现 stopped 终态（停止链路失效）");
+  }
   await expect(stoppedBubble).toContainText("（已停止）");
   // 停止后不再增长：记录一次长度，等待后应保持不变
   const lenAfterStop = (await stoppedBubble.textContent())?.length ?? 0;

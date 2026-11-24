@@ -209,8 +209,8 @@ test.describe("UI2 体验收口", () => {
 
   test("流式增量渲染：首段 delta 到达即上屏（不等 done 整段出现）", async ({ page }) => {
     // 审查 Blocker 回归：store 曾用 push 前的 raw 对象写增量，Vue 不触发渲染，
-    // 整个流式退化为「生成结束才整段出现」。夹具把 meta 与首个 delta 分块下发、
-    // 之后 hold 1.5s，因此这个窗口内正文可见只可能来自 delta 自身的渲染。
+    // 整个流式退化为「生成结束才整段出现」。夹具把 meta 与首个 delta 分块下发
+    // （首 delta 在 +400ms），再 hold 2.5s 后才发末段。
     const HOLD_MS = 2500;
     await mockSlowStream(page, { holdMs: HOLD_MS });
     await page.goto("/chat");
@@ -219,17 +219,12 @@ test.describe("UI2 体验收口", () => {
 
     const streamingBubble = page.locator('[data-role="assistant"][data-status="streaming"]');
     await expect(streamingBubble).toBeVisible({ timeout: 5_000 });
-    // 关键：必须在 hold 窗口内做一次**即时快照**。toContainText 会一直重试到
-    // 末段到达后（那时整段出现），对「增量没渲染」毫无分辨力——这是本用例
-    // 第一版漏掉该缺陷的原因。这里等待「首段已写入但末段未到」的时刻再读 DOM。
-    await page.waitForTimeout(600);
-    const snapshot = await page.evaluate(() => {
-      const bubble = document.querySelector('[data-role="assistant"][data-status="streaming"]');
-      return bubble?.textContent ?? "";
-    });
-    // hold 期间末段（含 [1]）不可能出现：此刻文本必须只有首段
-    expect(snapshot).toContain("根据学校规定，");
-    expect(snapshot).not.toContain("[1]");
+    // 关键：在**末段到达前**确认首段已上屏。用有上限的 auto-wait（2s < 2.9s 末段
+    // 时刻），既不会像固定 sleep 那样在慢机器上假红，也不会等到末段后失去分辨力
+    // （末段到达时气泡已是 final，此选择器就匹配不到了）。
+    await expect(streamingBubble).toContainText("根据学校规定，", { timeout: 2_000 });
+    // 此刻末段（含 [1]）尚未下发：正文不应出现引用编号
+    expect((await streamingBubble.textContent()) ?? "").not.toContain("[1]");
 
     // 末段到达后进入终态
     await expect(page.locator('[data-role="assistant"][data-status="final"]')).toContainText(

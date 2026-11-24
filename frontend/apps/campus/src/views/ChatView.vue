@@ -152,8 +152,12 @@ async function onSubmitFeedback(): Promise<void> {
       feedbackTags.value,
       feedbackComment.value.trim() || undefined,
     );
-    // 未提交（已反馈/并发中）不提示成功——避免「toast 说成功但没落库」
-    if (!submitted) return;
+    // 未提交（已反馈/并发中）不提示成功——避免「toast 说成功但没落库」，
+    // 但也不能静默：用户点了提交却毫无反馈等于假死。
+    if (!submitted) {
+      feedbackError.value = "该回答已反馈过，无需重复提交";
+      return;
+    }
     showFeedbackForm.value = false;
     showToast("反馈已提交，谢谢你的帮助");
   } catch (err) {
