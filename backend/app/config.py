@@ -223,6 +223,9 @@ class Settings(BaseSettings):
     # A8 映射：连接 5s / 首 token 15s；回合级 30s 总预算由 Loop 层承担（简报 D4）。
     llm_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     llm_first_token_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    # 回合首字硬超时（Loop 层 asyncio.timeout 包生成段首事件）；默认 30 对齐 A8，
+    # 可配置以适配慢模型剖面（TD-354：生产默认紧，dev/e2e 经 .env 放宽）。
+    llm_turn_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     # 首 token 前最大尝试次数 = 1 次初始 + N-1 次重试（A8 口径 = 3）。
     llm_max_attempts: int = Field(default=3, ge=1, le=5)
     # 熔断（A8）：窗口内失败阈值 / 窗口秒 / 开路秒；进程内实现（简报 TD-P1）。

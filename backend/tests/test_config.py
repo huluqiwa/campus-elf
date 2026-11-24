@@ -362,6 +362,16 @@ def test_llm_defaults_unset_and_a8_timeouts() -> None:
     assert settings.llm_breaker_window_seconds == 60.0
     assert settings.llm_breaker_open_seconds == 30.0
     assert settings.llm_retry_backoff_seconds == 0.5
+    assert settings.llm_turn_timeout_seconds == 30.0
+
+
+def test_llm_turn_timeout_bounds() -> None:
+    """回合首字硬超时可配置（TD-354）：默认 30，gt=0/le=300，非法值拒。"""
+
+    assert Settings(_env_file=None, llm_turn_timeout_seconds=120.0).llm_turn_timeout_seconds == 120.0
+    for bad in (0.0, -1.0, 301.0):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, llm_turn_timeout_seconds=bad)
 
 
 def test_llm_config_group_must_be_complete() -> None:

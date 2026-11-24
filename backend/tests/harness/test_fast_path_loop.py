@@ -433,6 +433,28 @@ async def test_turn_timeout_yields_llm_timeout() -> None:
     assert sink.turns[-1].stop_reason.value == "TIMEOUT"
 
 
+async def test_relaxed_turn_timeout_lets_slow_first_token_complete() -> None:
+    """TD-354：放宽回合首字硬超时后，慢首字（>默认 30s 剖面）不再被误杀→正常 done。"""
+
+    retriever = StubRetriever(hits=[hit_meta("c1")], evidence=[evidence("c1", "内容。")])
+    sink = InMemoryTraceSink()
+    loop = FastPathLoop(
+        llm_port=_SlowFirstTokenLlm(delay_s=1.0),
+        retriever=retriever,
+        prompt_registry=build_default_registry(),
+        trace_sink=sink,
+        audit_sink=StubAuditSink(),
+        turn_timeout_s=2.0,
+    )
+    events = await collect(
+        loop.run(tenant_id=uuid4(), user_id=uuid4(), turn_id=uuid4(), message="校历")
+    )
+
+    assert all(name != "error" for name in types_of(events))
+    assert types_of(events)[-1] == "done"
+    assert any(name == "delta" for name in types_of(events))
+
+
 async def test_load_texts_timeout_yields_retrieval_failed() -> None:
     """回查超时回归（审查 M3）：证据回查无界→wait_for 上限，超时 error(RETRIEVAL_FAILED)。"""
 

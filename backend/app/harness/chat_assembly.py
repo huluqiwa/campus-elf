@@ -52,6 +52,7 @@ def build_chat_loop(
         audit_sink=audit_sink,
         guard_events_sink=guard_events_sink,
         ref_checker=ref_checker,
+        turn_timeout_s=settings.llm_turn_timeout_seconds,
     )
     react_loop = ReactLoop(
         llm_port=llm_port,
@@ -61,6 +62,7 @@ def build_chat_loop(
         audit_sink=audit_sink,
         guard_events_sink=guard_events_sink,
         ref_checker=ref_checker,
+        turn_timeout_s=settings.llm_turn_timeout_seconds,
         max_decisions=settings.react_max_model_decisions,
         max_tool_calls=settings.react_max_tool_calls,
         max_retrievals=settings.react_max_retrievals,
