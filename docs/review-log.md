@@ -1176,3 +1176,17 @@
 - **第 2 轮聚焦复审（2026-11-22，同审查员）**：**不通过**——Major-1/4、Minor-1/2/3/4/6 修复到位，但 Major-2 **修错**（vant List 无自动 loading 复位，死锁换位）、Major-3 **部分修复**（重挂主路径未覆盖）。
 - **第 3 轮修复与复审（2026-11-22，同审查员）**：M2→loadPage finally 复位 loading（vant 官方要求手动置回）；M3→onMounted 无 id 复位 + watch 无 id 先 abort；E2E 补「多页翻页」「SPA 内新对话复位」两弧（复审员点名防掩盖弧形）；**复审通过（0B/0M；2 Minor 残余降级可自愈）**，附合并前条件 3 项（SPA 内导航弧改真路径/文档回填/残余子路径收口）——已全部落地。
 - 判例：①**vant List 的 loading 必须在 onLoad 收尾手动复位**（组件只镜像不自动置回——死锁换位案例）；②**SPA 内路由复用组件时 watch 是唯一复位入口，onMounted 只覆盖重挂**——两条路径缺一即回归；③**mock E2E 的 goto("/") 全页重载会清 Pinia，测不到 SPA 状态语义**——防掩盖弧必须走 SPA 内导航；④**盲转型 session.request<T>() 是契约漂移的结构性根源**——跨包 API 在客户端层显式映射并配运行时断言。
+
+### M4 UI2 C 端体验收口（三轮：1 Blocker + 5 Major → 修复 → 2 Major → 修复）
+
+- 日期：2026-11-24
+- 范围：分支 `feature/m4-ui2-experience`（简报 `0b0c1d2` + 实现 `948037d` + 自审修复 `2ba59e7`/`687fd58` + 审查修复 `9b70d61`/`935633e`；12 文件 +1000 量级）
+- 对照：简报 `docs/design-briefs/M4-UI2-experience.md`（决策卡五张全按推荐；A1–A6）
+- **第 1 轮独立审查（2026-11-24）**：**1 Blocker / 5 Major / 12 Minor**，验收 A1–A6 中 A5「逐 chunk 到达」实际不成立。
+  Blocker-1（实证）：`send()` 把 `push` 前的 **raw 对象**交给 `_applyEvent`，Vue 不追踪其字段写入 → delta/reasoning_summary/citation 全不触发渲染，流式退化为「生成结束整段出现」，首 token 体验与 A5 均失效（该写法源自 UI1，非本点引入，但本点把它写进验收并宣称通过）。
+  Major-1：简报 A5 要求的**停止弧**整条缺失（UI1 明确移交全栈 E2E）；Major-2：反馈入口限「仅最后一条」，追问后上一条永久无法评价且未登记；Major-3：链⑤ `test.skip(!hasFeedback)` 会中止整个 test，把反馈+清空弧静默跳过；Major-4：链⑤ 60s 配置超时与内部 60s/90s 轮询冲突（必超时/flaky）；Major-5：种子用静态口令入库并加 gitleaks 放行（违反随机口令惯例）。
+- **第 1 轮修复（`9b70d61`）**：Blocker→push 后取响应式代理 + 新增「流式增量渲染」mock 弧（`fetch` 覆写 → 真分块 SSE，meta 与首 delta 间隔 400ms、hold 2.5s；已验证 raw 版必红、修复版绿）；M1→补停止弧（stopped 尾标 + 长度不再增长 + 回可发送态）；M2→去掉 lastAssistant 限制；M3→error 终态改正向断言「无入口」；M4→前置 240s/聊天与停止弧 180s；M5→`secrets.token_urlsafe` 随机口令。Minor 一并处置（反馈权限位/按钮可访问性/reduced-motion 覆盖光标/submitFeedback 返 boolean/枚举契约测试/chunk_id 断言换长串/清空回待机弧/`on conflict do nothing`）。
+- **第 2 轮聚焦复审（2026-11-24）**：Blocker 与 D/E 通过；**2 Major** —— ①删掉 gitleaks 放行条目但该静态串仍在历史提交 `948037d`，而 security 是 `fetch-depth: 0` + `--log-opts=--no-merges` 全历史扫描 → PR 的 security job 必红；②停止弧的 skip 判定用「停止按钮是否可见」，与**被测对象本身**耦合（按钮回归时静默 skip，未配 LLM 时还可能 180s 悬挂）。
+- **第 2 轮修复（`935633e`）**：①恢复精确放行并批注「仅历史残留、现行代码已无此串」；②按钮必须出现（缺失即失败），只有终态明确 `error` 且文案含「未配置」才跳过；顺带把流式用例的固定 `waitForTimeout(600)` 换成 2s 上限 auto-wait（消除慢机器假红且保留分辨力）、`mockSlowStream` 守卫已关闭流、反馈重复提交给出可读提示。
+- **复测**：vitest 124+203、mock E2E 193、全栈链⑤ 3 例（前置/聊天/停止弧）连续多轮全绿；prettier/eslint/vue-tsc、种子脚本 ruff+mypy 通过。
+- 判例：①**流式增量必须写入响应式代理**——`ref([]).push(raw)` 后写 raw 不触发渲染，「看起来有流式」往往只是旁边某个 ref 变化顺带刷新了整表；②**「一次性返回全文」的 SSE mock 无法证明流式**——必须有真分块 + 末段前的时间窗断言；③**skip 条件不得取自被测对象**——否则功能失效时套件仍报绿；④**删 gitleaks 放行前先查历史**——全历史扫描下，历史提交里的常量仍需放行，否则 PR CI 必红；⑤**测试只断言终态文字会在流式中途误通过**——需先等 `data-status` 离开 streaming。
