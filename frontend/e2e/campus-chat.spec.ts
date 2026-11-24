@@ -5,7 +5,7 @@
 import { expect, test } from "@playwright/test";
 
 import { mockAuth } from "./helpers/auth-mock";
-import { CHAT_PERMISSION, mockChatApi } from "./helpers/chat-mock";
+import { CHAT_PERMISSION, mockChatApi, mockSlowStream } from "./helpers/chat-mock";
 
 test.describe("聊天入口权限渲染", () => {
   test("持 campus.kb.qa → 显示「开始 AI 问答」入口", async ({ page }) => {
@@ -201,9 +201,41 @@ test.describe("UI2 体验收口", () => {
     mockAuth(page, {
       user: {
         ...{ realm: "tenant", roles: ["student"] },
-        permissions: [CHAT_PERMISSION, "campus.chat.use"],
+        // 反馈入口要求 campus.feedback.create（后端强制），与真实 student 角色一致
+        permissions: [CHAT_PERMISSION, "campus.chat.use", "campus.feedback.create"],
       },
     });
+  });
+
+  test("流式增量渲染：首段 delta 到达即上屏（不等 done 整段出现）", async ({ page }) => {
+    // 审查 Blocker 回归：store 曾用 push 前的 raw 对象写增量，Vue 不触发渲染，
+    // 整个流式退化为「生成结束才整段出现」。夹具把 meta 与首个 delta 分块下发、
+    // 之后 hold 1.5s，因此这个窗口内正文可见只可能来自 delta 自身的渲染。
+    const HOLD_MS = 2500;
+    await mockSlowStream(page, { holdMs: HOLD_MS });
+    await page.goto("/chat");
+    await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
+    await page.getByTestId("send-button").click();
+
+    const streamingBubble = page.locator('[data-role="assistant"][data-status="streaming"]');
+    await expect(streamingBubble).toBeVisible({ timeout: 5_000 });
+    // 关键：必须在 hold 窗口内做一次**即时快照**。toContainText 会一直重试到
+    // 末段到达后（那时整段出现），对「增量没渲染」毫无分辨力——这是本用例
+    // 第一版漏掉该缺陷的原因。这里等待「首段已写入但末段未到」的时刻再读 DOM。
+    await page.waitForTimeout(600);
+    const snapshot = await page.evaluate(() => {
+      const bubble = document.querySelector('[data-role="assistant"][data-status="streaming"]');
+      return bubble?.textContent ?? "";
+    });
+    // hold 期间末段（含 [1]）不可能出现：此刻文本必须只有首段
+    expect(snapshot).toContain("根据学校规定，");
+    expect(snapshot).not.toContain("[1]");
+
+    // 末段到达后进入终态
+    await expect(page.locator('[data-role="assistant"][data-status="final"]')).toContainText(
+      "差旅报销需要发票和审批单",
+      { timeout: 15_000 },
+    );
   });
 
   test("待机精灵：空闲态渲染（data-testid），发消息后消失", async ({ page }) => {
@@ -214,6 +246,21 @@ test.describe("UI2 体验收口", () => {
     await page.getByTestId("send-button").click();
     await expect(page.getByTestId("idle-mascot")).toHaveCount(0);
     await expect(page.getByTestId("messages")).toContainText("差旅报销需要发票和审批单");
+  });
+
+  test("待机精灵：进入无消息会话（清空后空态）重新出现", async ({ page }) => {
+    // 清空/空历史是「回到待机态」的路径之一（另一条是 /chat 新对话），
+    // 全栈链⑤ 覆盖了真库路径，这里用 mock 固定住 UI 判定：messages 为空即显示。
+    mockChatApi(page, { mode: "normal" });
+    await page.route("**/api/v1/campus/conversations/*/messages*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ messages: [] }),
+      });
+    });
+    await page.goto("/chat/conv-e2e");
+    await expect(page.getByTestId("idle-mascot")).toBeVisible();
   });
 
   test("思考折叠：步骤计数 + 默认收起 + 展开可见明细", async ({ page }) => {
@@ -244,7 +291,8 @@ test.describe("UI2 体验收口", () => {
     await expect(drawer).toContainText("[1] 财务报销手册");
     await expect(drawer).toContainText("第一章");
     await expect(drawer).toContainText("第 3 页");
-    expect(await drawer.textContent()).not.toContain("c1");
+    // chunk_id 绝不进 UI：用完整长串断言，短串（如 "c1"）近乎恒真
+    expect(await drawer.innerHTML()).not.toContain("chunk-uuid-0001-abcdef");
   });
 
   test("反馈入口：👍 → 表单提交 → 已反馈标记 + 幂等不再显示入口", async ({ page }) => {

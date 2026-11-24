@@ -69,8 +69,10 @@ TEACHER_PASSWORD = "E2E-Teacher-Pass-1"
 STUDENT_LOGIN_ID = "e2e-student"
 STUDENT_PASSWORD = "E2E-Student-Init-1"
 # C 端聊天链（UI1/UI2）专用：不强制改密（链可重复跑）、独立口令（不与首登改密用例共用）。
+# 口令随机生成（同 KB 账号惯例）：静态串会长期有效，且需要往 gitleaks 放行名单里
+# 加常量——等于给"把凭证形状字符串提交进仓库"开口子。
 CAMPUS_CHAT_LOGIN_ID = "e2e-campus-chat"
-CAMPUS_CHAT_PASSWORD = "Campus-Elf-ChatD-2026x"
+CAMPUS_CHAT_PASSWORD = f"Chat-{secrets.token_urlsafe(18)}"
 # 重置流程专用账号：忘记密码用例会改掉它的口令，避免与教师/运营账号的登录用例互踩。
 RESETTER_LOGIN_ID = "e2e-resetter"
 RESETTER_EMAIL = "resetter@e2e-scenario.edu"
@@ -175,7 +177,7 @@ async def _bind_builtin_role(
         await session.execute(
             text(
                 "insert into user_roles (tenant_id, user_id, role_id) "
-                "values (:tenant_id, :user_id, :role_id)"
+                "values (:tenant_id, :user_id, :role_id) on conflict do nothing"
             ),
             {"tenant_id": tenant_id, "user_id": user_id, "role_id": role_id},
         )

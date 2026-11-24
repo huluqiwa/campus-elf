@@ -30,6 +30,10 @@ const feedbackComment = ref("");
 const feedbackError = ref("");
 
 const canChat = computed(() => auth.user?.permissions?.includes("campus.kb.qa") ?? false);
+/** 提交反馈需 campus.feedback.create（后端强制）；没有该码就不显示入口，避免白填表单。 */
+const canFeedbackPerm = computed(
+  () => auth.user?.permissions?.includes("campus.feedback.create") ?? false,
+);
 /** 引用抽屉的数据源（打开时锁定的气泡）。 */
 const drawerCitations = computed(() => {
   const msg = chat.messages.find((m) => m.id === citationMsgId.value);
@@ -108,13 +112,16 @@ const TAG_LABELS: Record<string, string> = {
   other: "其他",
 };
 
-/** 反馈入口（卡 3）：final/fallback 且已回填 turn_id 且未反馈 → 显示 👍/👎。 */
+/** 反馈入口（卡 3）：final/fallback 且已回填 turn_id 且未反馈 → 显示 👍/👎。
+ *
+ * 不限制「必须是最后一条」：早先只在末条显示，导致用户追问后上一条回答的入口
+ * 凭空消失、再也无法评价（独立审查 Major）。turnId 是反馈键，任何终态气泡都可用。 */
 function canFeedback(msg: ChatMessage): boolean {
   return (
+    canFeedbackPerm.value &&
     (msg.status === "final" || msg.status === "fallback") &&
     !!msg.turnId &&
-    !msg.feedbackRating &&
-    msg === chat.lastAssistant
+    !msg.feedbackRating
   );
 }
 
@@ -139,12 +146,14 @@ async function onSubmitFeedback(): Promise<void> {
     return;
   }
   try {
-    await chat.submitFeedback(
+    const submitted = await chat.submitFeedback(
       feedbackMsgId.value,
       feedbackRating.value,
       feedbackTags.value,
       feedbackComment.value.trim() || undefined,
     );
+    // 未提交（已反馈/并发中）不提示成功——避免「toast 说成功但没落库」
+    if (!submitted) return;
     showFeedbackForm.value = false;
     showToast("反馈已提交，谢谢你的帮助");
   } catch (err) {
@@ -245,15 +254,24 @@ function statusTail(status: string): string {
 
             <!-- 反馈入口（M4-UI2 卡 3）：👍/👎；已反馈显示标记 -->
             <div v-if="canFeedback(msg)" class="feedback-row" data-testid="feedback-row">
-              <span class="fb-btn" data-testid="fb-helpful" @click="openFeedback(msg, 'helpful')"
-                >👍 有用</span
+              <van-button
+                size="small"
+                plain
+                class="fb-btn"
+                data-testid="fb-helpful"
+                @click="openFeedback(msg, 'helpful')"
               >
-              <span
+                👍 有用
+              </van-button>
+              <van-button
+                size="small"
+                plain
                 class="fb-btn"
                 data-testid="fb-unhelpful"
                 @click="openFeedback(msg, 'unhelpful')"
-                >👎 无用</span
               >
+                👎 无用
+              </van-button>
             </div>
             <div v-else-if="msg.feedbackRating" class="tail" data-testid="feedback-done">
               已反馈（{{ msg.feedbackRating === "helpful" ? "有用" : "无用" }}）
@@ -442,8 +460,6 @@ function statusTail(status: string): string {
 .fb-btn {
   color: #1989fa;
   font-size: 13px;
-  cursor: pointer;
-  user-select: none;
 }
 .retry-row {
   margin-top: 6px;
@@ -499,7 +515,8 @@ function statusTail(status: string): string {
 }
 @media (prefers-reduced-motion: reduce) {
   .mascot,
-  .mascot-eyes {
+  .mascot-eyes,
+  .cursor {
     animation: none;
   }
 }

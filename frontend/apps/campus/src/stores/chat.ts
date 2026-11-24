@@ -11,6 +11,7 @@ import type {
   CampusMessageView,
   ChatApiError,
   ChatStreamEvent,
+  FeedbackRating,
   FeedbackTag,
 } from "@campus-elf/api-client";
 import { createFeedbackApi } from "@campus-elf/api-client";
@@ -39,7 +40,7 @@ export interface ChatMessage {
   /** meta 事件的 turn_id（AI-05 反馈键）——占位气泡由 meta 回填。 */
   turnId?: string;
   /** 已提交反馈（UI2：防重复提交；刷新后丢失可接受——后端幂等兜底 TD-345）。 */
-  feedbackRating?: "helpful" | "unhelpful";
+  feedbackRating?: FeedbackRating;
   /** 思考折叠展开态（UI2 卡 3：默认收起——undefined 即收起）。 */
   stepsOpen?: boolean;
 }
@@ -135,8 +136,12 @@ export const useChatStore = defineStore("chat", () => {
       citations: [],
       status: "final",
     });
-    const placeholder = _placeholder();
-    messages.value.push(placeholder);
+    messages.value.push(_placeholder());
+    // 关键：必须拿 push 之后的**响应式代理**写增量。直接持有 _placeholder() 的
+    // raw 对象改字段不会触发渲染——Vue 在 push 时只把 raw 存进数组，读取时才包代理
+    // （实测：改 raw 触发 0 次渲染，改 proxy 触发 1 次）。用 raw 会让整个流式退化成
+    // 「生成结束才整段出现」，首 token 指标也无法在客户端测出。
+    const placeholder = messages.value[messages.value.length - 1] as ChatMessage;
     phase.value = "streaming";
     controller = new AbortController();
     try {
@@ -209,6 +214,9 @@ export const useChatStore = defineStore("chat", () => {
     if (phase.value === "streaming") return;
     conversationId.value = id;
     messages.value = [];
+    // 切会话必须清 turn→trace 映射：否则上一个会话的键值残留在 Map 里（只增不减），
+    // 同一 turn_id 复用时会把别处的 trace_id 发给后端，快照定位失败 → 404 提交失败。
+    traceIdOfTurn.clear();
     const { messages: history } = await chatApi.getConversationMessages(id);
     messages.value = history.map((m: CampusMessageView) => ({
       id: nextId(),
@@ -243,15 +251,16 @@ export const useChatStore = defineStore("chat", () => {
   });
   const submittingFeedback = ref(false);
 
+  /** 提交反馈；返回 false = 本来就不该提交（已反馈/进行中），调用方不要提示成功。 */
   async function submitFeedback(
     msgId: string,
-    rating: "helpful" | "unhelpful",
+    rating: FeedbackRating,
     reasonTags: string[],
     comment?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const msg = messages.value.find((m) => m.id === msgId);
-    if (!msg?.turnId || !conversationId.value || submittingFeedback.value) return;
-    if (msg.feedbackRating) return; // 已反馈防重复（幂等兜底在后端）
+    if (!msg?.turnId || !conversationId.value || submittingFeedback.value) return false;
+    if (msg.feedbackRating) return false; // 已反馈防重复（幂等兜底在后端）
     // 后端 trace_id 必填（min_length=1）：历史消息/丢 meta 时没有映射，直接发出会被
     // 422 拒绝且用户只看到「提交失败」。这里显式拦下并给出可读原因。
     const traceId = traceIdOfTurn.get(msg.turnId);
@@ -269,6 +278,7 @@ export const useChatStore = defineStore("chat", () => {
         comment,
       });
       msg.feedbackRating = rating;
+      return true;
     } finally {
       submittingFeedback.value = false;
     }

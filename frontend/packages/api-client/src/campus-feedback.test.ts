@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createFeedbackApi } from "./campus-feedback";
+import { createFeedbackApi, FEEDBACK_RATINGS, FEEDBACK_TAGS } from "./campus-feedback";
 
 function makeApi() {
   const request = vi.fn(async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -71,5 +71,18 @@ describe("campusFeedback", () => {
     expect(result.anonymized).toBe(true);
     expect(request.mock.calls[0][0]).toBe("/api/v1/campus/feedback/fb-1");
     expect((request.mock.calls[0][1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("枚举契约：rating/tag 取值与后端 REASON_TAGS、RATING_VALUES 一致", () => {
+    // 后端改枚举前端不会编译失败，只会在运行时 400。这里按后端契约固定取值：
+    // backend/app/feedback/service.py 的 RATING_VALUES / REASON_TAGS。
+    expect([...FEEDBACK_RATINGS]).toEqual(["helpful", "unhelpful"]);
+    expect([...FEEDBACK_TAGS]).toEqual([
+      "inaccurate",
+      "irrelevant",
+      "outdated",
+      "harmful",
+      "other",
+    ]);
   });
 });

@@ -64,6 +64,8 @@ async function apiCall<T>(
 test.describe.configure({ mode: "serial" });
 
 test("链⑤-前置：API 驱动发布 KB（上传→审批→ACL→构建→测试集→TEST_PASSED→发布）", async () => {
+  // 轮询上限 60s（构建）+ 90s（测试运行）> 配置默认 60s 总超时：冷缓存时必超时。
+  test.setTimeout(240_000);
   // 各步用种子里的专职账号（school_ops 无 KB 权限——第 2 轮实测 403 教训）；
   // ACL/构建/测试/发布用 kb_publisher（acl.manage 等码），审批用 kb_approver
   const uploaderToken = await apiLogin(accounts.kb_uploader);
@@ -190,7 +192,10 @@ test("链⑤-前置：API 驱动发布 KB（上传→审批→ACL→构建→测
   expect(publish.status).toBe(200);
 });
 
-test("链⑤：学生登录 → 提问 → 流式/兜底 → 反馈提交 → 清空 → 该会话消息为空", async ({ page }) => {
+test("链⑤：学生登录 → 提问 → 流式 → 引用 → 反馈 → 停止弧 → 清空 → 消息为空", async ({ page }) => {
+  // 真 LLM 首 token + 生成 + 交互 + 清空：默认 60s 不够（配置 timeout 见
+  // playwright.fullstack.config.ts），这里显式放宽。
+  test.setTimeout(180_000);
   // 专用聊天学生（种子 `campus_chat`）：不强制改密 → 本链可重复运行；
   // 首登强改密弧由 campus-fullstack.spec 用 `student` 覆盖。
   const student = accounts.campus_chat;
@@ -205,7 +210,7 @@ test("链⑤：学生登录 → 提问 → 流式/兜底 → 反馈提交 → �
   await page.getByTestId("chat-input").locator("textarea").fill("差旅报销怎么办理？");
   await page.getByTestId("send-button").click();
 
-  // 终态三分支：真流式（FINAL_ANSWER+引用）/兜底（CAPABILITY_FALLBACK）/未配 LLM（error）。
+  // 终态三分支：真流式（FINAL_ANSWER）/兜底（CAPABILITY_FALLBACK）/未配 LLM（error）。
   // 必须先等 data-status 离开 streaming——正文首个 delta 就含关键词，只断言文字会在
   // 流式途中通过，后续反馈入口/引用的可见性判断全部落空。
   const messages = page.getByTestId("messages");
@@ -213,9 +218,10 @@ test("链⑤：学生登录 → 提问 → 流式/兜底 → 反馈提交 → �
     '[data-role="assistant"][data-status="final"], [data-role="assistant"][data-status="fallback"], [data-role="assistant"][data-status="error"]',
   );
   await expect(terminalBubble).toBeVisible({ timeout: 60_000 });
-  await expect(messages).toContainText(/差旅报销|抱歉|回答失败/);
+  // 真实文案三选一（含未配 LLM 的运维话术，否则「缺省兜底弧」会假红/假绿）
+  await expect(messages).toContainText(/差旅报销|抱歉|未配置|回答失败/);
 
-  // 引用抽屉（仅真流式弧有 citation）——可选断言：有引用按钮才打开
+  // 引用抽屉（仅真流式弧有 citation）：有按钮必须能打开且列明细
   const citationButton = page.getByTestId("citation-button");
   if (await citationButton.isVisible().catch(() => false)) {
     await citationButton.click();
@@ -227,18 +233,28 @@ test("链⑤：学生登录 → 提问 → 流式/兜底 → 反馈提交 → �
     await expect(drawer).toBeHidden();
   }
 
-  // 反馈提交（真库：断言 POST=201 首次落库；UI 侧断言「已反馈」标记）
+  // 反馈提交（真库：断言 POST=201 首次落库；UI 侧断言「已反馈」标记）。
+  // 不是 error 终态就必须有反馈入口——用 test.skip 会静默放过整条弧（含后面的
+  // 清空断言），所以这里显式断言可见性。
+  const isError = await page
+    .locator('[data-role="assistant"][data-status="error"]')
+    .isVisible()
+    .catch(() => false);
   const fbRow = page.getByTestId("feedback-row");
-  const hasFeedback = await fbRow.isVisible().catch(() => false);
-  test.skip(!hasFeedback, "该终态无反馈入口（error 非末条/无 turn_id）");
-  await page.getByTestId("fb-unhelpful").click();
-  await page.getByTestId("feedback-form").getByText("内容不准确").click();
-  const feedbackPost = page.waitForResponse(
-    (r) => r.url().includes("/api/v1/campus/feedback") && r.request().method() === "POST",
-  );
-  await page.getByTestId("feedback-submit").click();
-  expect((await feedbackPost).status()).toBe(201); // 201=首次写入（200 才是幂等重放）
-  await expect(page.getByTestId("feedback-done")).toContainText("无用");
+  if (isError) {
+    // error 态（未配 LLM / 超时）无反馈入口：正向断言，而不是跳过
+    await expect(fbRow).toHaveCount(0);
+  } else {
+    await expect(fbRow).toBeVisible();
+    await page.getByTestId("fb-unhelpful").click();
+    await page.getByTestId("feedback-form").getByText("内容不准确").click();
+    const feedbackPost = page.waitForResponse(
+      (r) => r.url().includes("/api/v1/campus/feedback") && r.request().method() === "POST",
+    );
+    await page.getByTestId("feedback-submit").click();
+    expect((await feedbackPost).status()).toBe(201); // 201=首次写入（200 才是幂等重放）
+    await expect(page.getByTestId("feedback-done")).toContainText("无用");
+  }
 
   // 清空 → 该会话消息为空（AI-07：软删消息，会话行保留——spec §AI-06/07）。
   // 断言真实 DELETE 响应里 cleared>0：证明本轮消息确实被软删，而不是「列表还有行」。
@@ -252,7 +268,62 @@ test("链⑤：学生登录 → 提问 → 流式/兜底 → 反馈提交 → �
   expect(cleared.status()).toBe(200);
   expect(((await cleared.json()) as { cleared: number }).cleared).toBeGreaterThan(0);
 
-  // 打开刚清空的会话（列表首条 = 本轮最新）：消息区为空（只剩待机精灵）
-  await page.locator('[data-testid^="conversation-"]').first().click();
+  // 从被清空会话的 URL 取出 id，再用真实 API 回读历史：必须为空。
+  // 不依赖「列表是否还有别的会话」（历史运行会留下其它会话，断言空态会误红）。
+  const clearedPath = new URL(cleared.url()).pathname; // /api/v1/campus/conversations/<id>/messages
+  const conversationId = clearedPath.split("/").at(-2) ?? "";
+  expect(conversationId).not.toBe("");
+  const studentToken = await apiLogin(accounts.campus_chat);
+  const history = await apiCall<{ messages: unknown[] }>(
+    studentToken,
+    `${API}/campus/conversations/${conversationId}/messages`,
+  );
+  expect(history.status).toBe(200);
+  expect(history.json?.messages).toEqual([]);
+
+  // 再进聊天页：空态显示待机精灵（消息区无残留）
+  await page.getByTestId("new-chat-link").click();
   await expect(page.getByTestId("idle-mascot")).toBeVisible({ timeout: 15_000 });
+});
+
+test("链⑤-停止弧：生成中点击停止 → 已停止尾标 + 不再增长", async ({ page }) => {
+  // UI1 把「停止」弧留给全栈 E2E（mock 无法模拟流中断）：这里补上
+  // 点击停止 → abort → ChatAbortError → status=stopped → 尾标「（已停止）」。
+  test.setTimeout(180_000);
+  const student = accounts.campus_chat;
+  await page.goto("/login");
+  await field(page, "school-code").fill(student.school_code);
+  await field(page, "login-id").fill(student.login_id);
+  await field(page, "password").fill(student.password);
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("go-chat")).toBeVisible({ timeout: 15_000 });
+  await page.getByTestId("go-chat").click();
+
+  await page
+    .getByTestId("chat-input")
+    .locator("textarea")
+    .fill("请详细介绍一下学校的差旅报销流程和注意事项。");
+  await page.getByTestId("send-button").click();
+
+  // 必须先进入 streaming（能看到停止按钮），才有可中断的流
+  const stopButton = page.getByTestId("stop-button");
+  const started = await stopButton
+    .waitFor({ state: "visible", timeout: 30_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!started) {
+    // 未配 LLM 时回合可能瞬间结束：显式标注跳过原因，避免伪装成通过
+    test.skip(true, "该环境未产生可中断的流（未配置 LLM）");
+  }
+  await stopButton.click();
+
+  const stoppedBubble = page.locator('[data-role="assistant"][data-status="stopped"]');
+  await expect(stoppedBubble).toBeVisible({ timeout: 20_000 });
+  await expect(stoppedBubble).toContainText("（已停止）");
+  // 停止后不再增长：记录一次长度，等待后应保持不变
+  const lenAfterStop = (await stoppedBubble.textContent())?.length ?? 0;
+  await page.waitForTimeout(2000);
+  expect((await stoppedBubble.textContent())?.length ?? 0).toBe(lenAfterStop);
+  // 停止后回到可发送态
+  await expect(page.getByTestId("send-button")).toBeVisible();
 });
