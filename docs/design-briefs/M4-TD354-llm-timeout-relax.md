@@ -9,7 +9,8 @@
 > - 测试：`test_config.py::test_llm_turn_timeout_bounds` + 默认断言；`tests/harness/test_chat_assembly.py`（接线 120/默认 30）；`test_fast_path_loop.py::test_relaxed_turn_timeout_lets_slow_first_token_complete`（慢首字 1s + 超时 2s → done，对照原 0.2s 超时弧）。
 > - 文档回写：design §A8/§ReAct TURN_TIMEOUT 注记、spec AI-01 验收 SLO 注记、tech-debt TD-354。
 > - **评估侧配套（eval 分支 af91235）**：`qa_runner.collect_all`/`qa_collect.collect_turn` 读超时 60→150s（>后端回合 120s），避免客户端先掐断慢回合。
-> - **真栈验证（2026-11-25）**：e2e 栈重建带修复（容器 env 实测读 90/回合 120/重试 2/熔断 10/180/10），冒烟 18 条并发 1 → **0 BREAKER_OPEN**（修复前 87/195）、1 LLM_TIMEOUT（capability_fallback 复杂用例固有慢、未连累后续）、失败率 48%→5.6%，cascade 消除。TD-354 改已完成；全量 195 有效基线留 eval 分支重跑。
+> - **真栈验证（2026-11-25）**：e2e 栈重建带修复（容器 env 实测读 90/回合 120/尝试 2/熔断 10/180/10），冒烟 18 条并发 1 → **0 BREAKER_OPEN**（修复前 87/195）、1 LLM_TIMEOUT（capability_fallback 复杂用例固有慢、未连累后续）、失败率 48%→5.6%，cascade 消除。TD-354 改已完成；全量 195 有效基线留 eval 分支重跑。
+> - **剖面内在上限（非缺陷，须知）**：回合 120s 只包生成段首事件，不覆盖路由段；单次读 90s×2 尝试最坏≈180s 可超回合预算，故极慢尾仍会残余个别 `LLM_TIMEOUT`（真栈已见 1 条）。120 不是「全部重试都装得下」的保证；放宽消除的是熔断 cascade，不是把慢模型变快。后续改进见 TD-357（记账放大）/TD-358（换快模型）/TD-359（路由段延迟）。
 
 ## 1. 目标与验收
 

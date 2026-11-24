@@ -932,7 +932,7 @@ navigate 结果作为入口证据并入 citations。ctx 权限从 principal 派�
 
 ### 6.7 恢复
 
-- LLM（A8 映射，2026-11-19 落定）：单次调用连接 5s / 读（首 token）15s，回合级 30s 总预算由 Loop 层承担；首 token 前最多 2 次重试（超时/429/5xx/连接类，指数退避），401/403 与其他 4xx 不重试；流中失败不重试、发 error + partial；熔断 5 次/60s 开 30s（进程内 `LlmCircuitBreaker`，多 worker 边界见 TD-326）。**TD-354（2026-11-25）**：以上均为可配置默认值（`LLM_FIRST_TOKEN_TIMEOUT_SECONDS`/`LLM_TURN_TIMEOUT_SECONDS`/`LLM_MAX_ATTEMPTS`/`LLM_BREAKER_*`），生产保持紧默认；dev/e2e 用放宽剖面（读 90s/回合首字 120s/重试 2/熔断 10 次 180s 开 10s，见 `deploy/docker-compose.e2e.yml` 与 `.env.example`）适配慢模型（首字实测中位 9.7s/p90 51s），消除批量 cascade 以产出有效评估基线。放宽只是不再误杀慢回答，模型本身不变快——延迟 SLO P95≤3s 仍须靠换快模型达标（SLO 数字不变，见 spec §性能注记）。
+- LLM（A8 映射，2026-11-19 落定）：单次调用连接 5s / 读（首 token）15s，回合级 30s 总预算由 Loop 层承担；首 token 前最多 2 次重试（超时/429/5xx/连接类，指数退避），401/403 与其他 4xx 不重试；流中失败不重试、发 error + partial；熔断 5 次/60s 开 30s（进程内 `LlmCircuitBreaker`，多 worker 边界见 TD-326）。**TD-354（2026-11-25）**：以上均为可配置默认值（`LLM_FIRST_TOKEN_TIMEOUT_SECONDS`/`LLM_TURN_TIMEOUT_SECONDS`/`LLM_MAX_ATTEMPTS`/`LLM_BREAKER_*`），生产保持紧默认；dev/e2e 用放宽剖面（读 90s/回合首字 120s/尝试 2（重试 1）/熔断 10 次 180s 开 10s，见 `deploy/docker-compose.e2e.yml` 与 `.env.example`）适配慢模型（首字实测中位 9.7s/p90 51s），消除批量 cascade 以产出有效评估基线。放宽只是不再误杀慢回答，模型本身不变快——延迟 SLO P95≤3s 仍须靠换快模型达标（SLO 数字不变，见 spec §性能注记）。
 - 嵌入/重排：超时降级；重排 300ms 跳过。
 - 工具：超时/权限/租户失败即返回结构化错误；不重试非幂等工具（MVP 全只读）。
 - 用户取消：取消下游任务；记录 `USER_CANCELLED`。
