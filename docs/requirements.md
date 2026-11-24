@@ -316,7 +316,8 @@
 - **Loop**：快路径（简单 KB 问答）+ 有界多步 ReAct（复杂问题最多 5 次模型决策、3 次工具、2 次检索、30s、12k token）。
   **MVP 边界注记（M4-AI01b，2026-11-19）**：快路径已落地为「单意图直通 + kb.search 检索 + LLM 流式 + 引用序号校验」；多意图 `intents[]` 合并作答与多步 ReAct（LLM 路由、工具自主选择、预算执行）归 ReAct 功能点。
   **M4-AI01c 落地注记（2026-11-20）**：ReAct 已落地——`ChatOrchestrator` 统一入口（LLM 路由 route_v1 分类→分派快路径/ReAct）；多意图逐节合并作答（全局引用编号、逐项兜底）；预算 5 决策/3 工具/2 检索/12k token（Settings 化，耗尽降级 GENERATE）；navigate 工具激活；TD-334 ctx 权限从 principal 派生（签名强制）。
-  **M4-AI04 落地注记（2026-11-22）**：引用校验三段收口——存在性/归属=RETRIEVE 证据 PG 回查；超范围 [n]=哨兵剔除（TD-332）；**语义相关=citation 事件前嵌入余弦校验**（答案全文 × 逐条被引证据，阈值 `kb_ref_min_similarity`=0.7 真实 TEI 探针校准；失效引用从 citation 事件剔除 + guard_events `output.ref_irrelevant` 留痕 + verify span）。citation 只含正文实际引用且通过校验的条目；正文残留 [n] 属可接受降级（前端以 citation 事件为准渲染，归 C 端聊天 UI 点）；nav: 入口证据豁免（决策器主动获取的确定性证据）。零证据兜底口径不变（零命中/人群空集 → CAPABILITY_FALLBACK）。
+    **M4-AI05 落地注记（2026-11-22 / C 端入口 2026-11-24）**：反馈采集后端（提交/幂等重放/自助匿名化删除 + B 端处理答复）已合并；**C 端入口随 M4-UI2 落地**——每个终态回答（final/fallback）气泡下提供 👍/👎，无用反馈必须选原因标签（inaccurate/irrelevant/outdated/harmful/other），可附 ≤500 字说明；提交成功即标「已反馈」并禁止重复提交（重复点击不再发请求；后端幂等兜底）。入口需 `campus.feedback.create`；撤回入口暂未提供（TD-344），刷新后已反馈标记丢失（TD-345）。
+**M4-AI04 落地注记（2026-11-22）**：引用校验三段收口——存在性/归属=RETRIEVE 证据 PG 回查；超范围 [n]=哨兵剔除（TD-332）；**语义相关=citation 事件前嵌入余弦校验**（答案全文 × 逐条被引证据，阈值 `kb_ref_min_similarity`=0.7 真实 TEI 探针校准；失效引用从 citation 事件剔除 + guard_events `output.ref_irrelevant` 留痕 + verify span）。citation 只含正文实际引用且通过校验的条目；正文残留 [n] 属可接受降级（前端以 citation 事件为准渲染，归 C 端聊天 UI 点）；nav: 入口证据豁免（决策器主动获取的确定性证据）。零证据兜底口径不变（零命中/人群空集 → CAPABILITY_FALLBACK）。
 - **Harness 六层**：
   1. 上下文精细化
   2. 工具系统（ToolSpec + ToolExecutor）

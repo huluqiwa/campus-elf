@@ -627,6 +627,7 @@ data: {"code":"LLM_TIMEOUT","message":"生成超时，请重试","retryable":tru
 - 思考摘要只在高层次；不发送原始 CoT/系统提示词/工具参数。
 - 用户停止：客户端 abort；服务端取消下游 LLM/工具任务。
 - 断线重连：客户端可用 turn_id 查询最终状态；不支持续传无限 token 流，重连后展示已完成部分/重试。
+- **C 端渲染口径（M4-UI1/UI2 落地）**：正文按 delta 逐段追加（实现须写入响应式代理，否则增量不触发渲染——UI2 审查 Blocker）；`step`/`tool_call`/`tool_result` 不直接展示，`reasoning_summary` 聚为「思考过程 (n)」折叠面板（默认收起、streaming 实时计数）；`citation` 聚合为气泡尾「引用来源 (n)」入口 → 底部抽屉列出 `[index] 文档 · 章节 · 页码`（**`chunk_id` 仅供内部定位，不进 UI**）；`done` 决定终态（FINAL_ANSWER=final / CAPABILITY_FALLBACK=fallback）；`error` 展示可读文案 + 可重试标记；用户点「停止」→ abort → `stopped` 尾标「（已停止）」。反馈入口按 turn（`meta.turn_id` + trace_id）提交，`POST /campus/feedback` 201=首次/200=幂等重放，提交后气泡标「已反馈」。
 - 兜底链（M4-AI01b 落地）：检索零命中/人群空集 → 兜底话术 delta + done(CAPABILITY_FALLBACK)，不提示「存在但无权」；LLM 未配置 → error(LLM_NOT_CONFIGURED) 无 done；LLM 失败按已发 delta 标 partial；客户端断开 → trace USER_CANCELLED。引用校验的解释口径：存在性/归属落在 RETRIEVE 的证据文本 PG 回查（检索结果本就租户+版本定域），VERIFY=引用序号一致性。
 
 ### 5.9 学校注册与审核（M1-B）
