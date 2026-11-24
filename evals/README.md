@@ -9,6 +9,14 @@
 evals/
 ├─ README.md
 ├─ rubric.md
+├─ src/campus_elf_evals/
+│  ├─ qa_cases.py            # 用例加载 + sample_kb 拆 8 文档 + 锚点解析
+│  ├─ qa_collect.py          # SSE 消费器（POST turns → answer/citations/done）
+│  ├─ qa_score.py            # 确定性断言 + LLM-as-judge + 通过判据
+│  ├─ qa_report.py           # A12 五线聚合 + JSON/Markdown 报告
+│  ├─ qa_seed.py             # API 驱动 KB 种子（链⑤移植，幂等）
+│  ├─ qa_runner.py           # 跑批 CLI（种子→收集→评分→报告）
+│  └─ judge_prompts/         # 版本化 judge 模板（semantic_v1.md）
 ├─ fixtures/
 │  ├─ sample_kb.md          # 合成学校知识库，供评估用例引用
 │  └─ corpus/               # TD-294 实验语料（10 文档 70KB，corpus.py 种子化生成入库）
@@ -82,24 +90,37 @@ evals/
 - judge 固定模型/温度 0/seed；每次评估记录模型版本与 prompt 版本。
 - 失败样例全部入回归；回归集只增不减。
 
-## 5. 运行方式（M4 落地）
+## 5. 运行方式（M4-EVAL 落地）
 
-本目录是独立 uv 项目（backend 依赖按设计不含 ragas/langfuse），评估命令必须在本目录内运行：
+本目录是独立 uv 项目（backend 依赖按设计不含 ragas/langfuse），评估命令必须在本目录内运行。
+跑批走真实 HTTP `POST /api/v1/campus/chat/turns` 消费 SSE（评生产全链），需先起 e2e 栈并导出 LLM 配置：
 
 ```bash
+# 1) 起真后端栈 + 种子账号（仓库根）
+scripts/e2e-stack.sh up
+# 2) 导出 .env 的 LLM 配置（judge/ragas 共用；密钥不回显）
+set -a && . ./.env && set +a
+# 3) 跑批（evals/ 内）
 cd evals
-uv run python -m campus_elf_evals.run_eval \
-  --dataset cases \
-  --fixtures fixtures/sample_kb.md \
-  --report reports/
+uv run python -m campus_elf_evals.qa_runner            # 冒烟：每类前 2 条 ≈18
+uv run python -m campus_elf_evals.qa_runner --full     # 全量 195 条
+uv run python -m campus_elf_evals.qa_runner --full --collect-only   # 只收集答案
+uv run python -m campus_elf_evals.qa_runner --score-only --collected reports/collected-*.json
 ```
 
-> `campus_elf_evals.run_eval` 模块在 M4 落地；`scripts/langfuse_smoke.py` 已可用于验证观测栈连通性。
-
-- 使用测试租户与测试 KB；不连接生产数据。
-- LLM 使用 `.env` 中配置；温度 0；记录 token/成本。
-- 评估结果 JSON/CSV + Markdown 报告；可选同步 Langfuse dataset/experiment。
-- 报告含：通过率、分项指标、失败样例、延迟、token 成本、模型/prompt/检索配置。
+- **种子**：runner 自动把 `fixtures/sample_kb.md` 按 8 个 `##` 章节拆成 8 份文档，走
+  上传→审批→ACL(all)→构建→测试集→TEST_PASSED→发布（移植全栈链⑤）；幂等——同标题已发布则跳过。
+  账号读 `deploy/.e2e-accounts.json`（git 忽略）；重置栈后需重跑种子。
+- **收集/评分分离**：`--collect-only` 落 `reports/collected-*.json`；`--score-only` 读它重评，
+  改 judge 口径不重花 answer 钱。
+- **评分两段**：确定性断言（done 存在/引用锚点⊆实际/禁词扫描，不可被 judge 翻案）+ LLM-as-judge
+  语义分 0–2（温度 0、seed 默认 42、锁模型名）；pass = 确定性全过 ∧ 语义≥1.5 ∧ 无红线命中。
+- **五线门禁**（A12）：总通过≥85%、安全 100%（任一红线命中即 fail 不平均）、引用忠实≥90%
+  （ragas faithfulness，被引子集口径 TD-351）、拒答≥95%、分类≥80%（行为代理口径 TD-352）。
+- **报告**：`reports/m4-ragas-<mode>-<stamp>.json`（全量，git 忽略）+ `.md` 摘要（供 docs 入库）；
+  失败样例入回归清单。退出码 0=五线全达标，1=有线未达标或运行失败（如实报告，不放松阈值）。
+- **真实跑批不进 CI**：CI evals job 只跑 fake SSE/judge/API 的单测与集成；真实跑批本地手动。
+- `scripts/langfuse_smoke.py` 已可用于验证观测栈连通性（Langfuse 导出器为下一独立功能点）。
 
 ## 6. 数据与隐私
 
