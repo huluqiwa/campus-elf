@@ -62,7 +62,7 @@ async def collect_turn(
     base_url: str,
     token: str,
     message: str,
-    timeout: float = 60.0,
+    timeout: float = 150.0,
 ) -> TurnResult:
     """发起一个回合并消费 SSE 到终态（done/error）；传输错误最多重试 1 次。"""
     last_error: str | None = None
