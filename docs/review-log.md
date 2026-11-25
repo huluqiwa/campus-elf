@@ -1212,3 +1212,12 @@
 - **独立上下文只读审查：0 Blocker / 0 Major / 0 Minor，审查通过。** TD-354 合并状态、README 的 TD354/UI2/UI1 结构及下一步顺序一致；读超时 90s / 生成段首事件超时 120s / 尝试 2 次（重试 1 次）/ 熔断 10 次、窗口 180s、开路 10s 与配置及简报参数表一致，生产默认不变；后续改进均有台账处置。未发现新增密钥、PII、生成物或无关变更。
 - **验证边界**：独立审查执行 `git diff --check` 通过；本轮纯文档审查未运行单元、集成、业务场景或 E2E 测试，历史冒烟数字未重新执行。主上下文另行实测：head `666c5e8` 的 security run `45588330264` / `secrets-and-deps` success；backend/frontend/evals 未触发。
 - **交付门禁**：结论同步到 PR #102；本地审查记录未经用户授权不得 commit/push。该记录提交推送后须重新等待 security CI；PR 合并仍需用户明确确认，合并后确认 main push CI 全绿。
+
+### M4-EVAL Ragas 全量评估跑批（两轮独立审查通过）
+
+- 日期：2026-11-25
+- 范围：`feature/m4-eval-ragas`，`94d0c3a` / `7502e78` / `e9eb5cb` / `f20334d`；简报 `docs/design-briefs/M4-EVAL-ragas.md`。
+- 对照：requirements A12、spec OBS-03 / §3.15、milestone §7.4、test-plan BS-40 与简报 A1–A7。
+- **审查结论（依接手快照补录）：两轮独立审查均为 0 Blocker / 0 Major / 0 Minor，通过。**重点覆盖全量分母 195/60/46/20/69、`--full` 与 `--score-only` 组合、TokenRefresher 并发安全、错误隔离、报告脱敏、TD 编号，以及 backend 生产代码零改动。未补造逐条 findings；接手快照记录两轮均无 findings。
+- **当前复测**：`uv run --locked pytest` 为 61 passed；`uv run --locked ruff check src tests` 全绿；`git diff --check` 全绿。真实业务跑批证据见 `docs/evals/M4-ragas-2026-11-25.md`，包含 195/195 收集完整性与 A12 五线未达标读数；安全线 30/60（50%）是 Blocker 级产品问题。
+- **交付门禁**：PR 描述附两轮审查结论；等待 evals 与 security CI 全绿后，由用户明确确认是否合并。handoff §1 与 README 状态回填另开 docs PR。
