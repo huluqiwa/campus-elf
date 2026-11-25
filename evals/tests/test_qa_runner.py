@@ -172,9 +172,9 @@ async def test_score_all_faithfulness_happy_error_and_skipped() -> None:
     by_id = {o.case.id: o for o in outcomes}
     assert by_id[happy.id].faithfulness == 0.95
     assert by_id[happy.id].passed
-    # 单条评估故障：如实记录，不拖垮整批、不偷偷改判 passed
+    # 单条评估故障：如实记录异常类型（脱敏后不保留原始消息），不拖垮整批、不偷偷改判 passed
     assert by_id[boom.id].faithfulness is None
-    assert "ragas 故障" in (by_id[boom.id].faithfulness_error or "")
+    assert "RuntimeError" in (by_id[boom.id].faithfulness_error or "")
     assert by_id[boom.id].passed
     # 零引用：不评 faithfulness
     assert by_id[no_cite.id].faithfulness is None

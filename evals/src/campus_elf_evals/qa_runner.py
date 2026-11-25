@@ -2,10 +2,10 @@
 
 用法（e2e 栈 + 真实 LLM，先 `set -a && . ./.env && set +a`）：
     cd evals
-    uv run python -m campus_elf_evals.qa_runner --smoke          # 每类前 2 条 ≈18
+    uv run python -m campus_elf_evals.qa_runner                  # 默认每类前 2 条 ≈18
     uv run python -m campus_elf_evals.qa_runner --full           # 195 条
-    uv run python -m campus_elf_evals.qa_runner --full --collect-only
-    uv run python -m campus_elf_evals.qa_runner --score-only --collected <json>
+    uv run python -m campus_elf_evals.qa_runner --full --collect-only --concurrency 1
+    uv run python -m campus_elf_evals.qa_runner --full --score-only --collected <json>
 
 收集与评分分离：重评（改 judge 口径）不重花 answer 钱。
 退出码：0 = 五线全达标；1 = 有线未达标或运行失败（如实报告，不放松阈值）。
@@ -39,11 +39,20 @@ from campus_elf_evals.qa_report import (
     build_run_meta,
     write_reports,
 )
-from campus_elf_evals.qa_score import OpenAIJudge, case_passed, deterministic_check
+from campus_elf_evals.qa_score import JudgeVerdict, OpenAIJudge, case_passed, deterministic_check
 from campus_elf_evals.qa_seed import TokenRefresher, fetch_chunk_text, seed_kb
 
 EVALS_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = EVALS_ROOT.parent
+
+
+def sanitize_exception(exc: BaseException) -> str:
+    """对异常做脱敏：只保留异常类型名，剥离原始消息（可能含 URL、主机名、堆栈片段）。
+
+    结构化报告字段（transport_error / error.message / judge.reason / faithfulness_error）
+    不得回显底层异常原文，与 gate note 及 AGENTS §3/§5 脱敏纪律保持同一口径。
+    """
+    return f"{type(exc).__name__}"
 
 
 async def collect_all(
@@ -73,10 +82,34 @@ async def collect_all(
 
     async def one(case: QaCase) -> tuple[str, TurnResult]:
         async with semaphore:
-            tok = await fresh_token()
-            turn = await collect_turn(
-                client, base_url=base_url, token=tok, message=case.input, timeout=timeout
-            )
+            try:
+                tok = await fresh_token()
+            except Exception as exc:  # 鉴权/刷新失败不取消整批，单条标记为传输错误
+                return case.id, TurnResult(
+                    answer="",
+                    citations=[],
+                    done=None,
+                    error={"code": "token_refresh_failed", "message": sanitize_exception(exc)},
+                    meta=None,
+                    transport_error=sanitize_exception(exc),
+                    first_delta_ms=None,
+                    latency_ms=0,
+                )
+            try:
+                turn = await collect_turn(
+                    client, base_url=base_url, token=tok, message=case.input, timeout=timeout
+                )
+            except Exception as exc:  # 单条回合传输错误不取消整批 gather
+                return case.id, TurnResult(
+                    answer="",
+                    citations=[],
+                    done=None,
+                    error={"code": "turn_transport_failed", "message": sanitize_exception(exc)},
+                    meta=None,
+                    transport_error=sanitize_exception(exc),
+                    first_delta_ms=None,
+                    latency_ms=0,
+                )
             return case.id, turn
 
     pairs = await asyncio.gather(*(one(c) for c in cases))
@@ -106,7 +139,14 @@ async def score_all(
     for case in cases:
         turn = turns[case.id]
         det = deterministic_check(case, turn)
-        verdict = await judge.score_case(case, turn)
+        try:
+            verdict = await judge.score_case(case, turn)
+        except Exception as exc:  # 纵深防御：单条 judge 故障保守判 0，不拖垮整批
+            verdict = JudgeVerdict(
+                score=0.0,
+                redline_hit=False,
+                reason=f"judge_exception:{sanitize_exception(exc)}",
+            )
         faith: float | None = None
         faith_error: str | None = None
         if (
@@ -118,7 +158,7 @@ async def score_all(
             try:
                 faith = await faithfulness_fn(case, turn)
             except Exception as exc:  # 单条评估故障不拖垮整批，如实记录
-                faith_error = f"{type(exc).__name__}: {exc}"
+                faith_error = sanitize_exception(exc)
         outcomes.append(
             CaseOutcome(
                 case=case,

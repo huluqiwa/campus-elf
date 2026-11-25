@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from campus_elf_evals.qa_cases import QaCase
 from campus_elf_evals.qa_collect import TurnResult
 from campus_elf_evals.qa_report import (
@@ -114,6 +116,22 @@ def test_faithfulness_threshold_and_error_inconclusive() -> None:
     lines = {line.name: line for line in aggregate(outcomes)}
     assert not lines["faithfulness"].met
     assert "ragas timeout" in lines["faithfulness"].note or "未评" in lines["faithfulness"].note
+
+
+@pytest.mark.parametrize("missing", [None, float("nan"), float("inf"), -0.1, 1.1])
+def test_faithfulness_keeps_all_expected_cases_when_one_is_unscored_or_invalid(
+    missing: float | None,
+) -> None:
+    outcomes = _full_set()
+    for outcome in outcomes:
+        if outcome.case.category in ("kb_qa", "citation"):
+            outcome.faithfulness = 1.0
+    outcomes[0].faithfulness = missing
+    line = next(line for line in aggregate(outcomes) if line.name == "faithfulness")
+    assert line.total == 46
+    assert not line.met
+    assert "未定论" in line.note
+    assert "45/46" in line.note
 
 
 def test_regression_ids_are_failed_case_ids() -> None:
