@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,13 +68,22 @@ def aggregate(outcomes: list[CaseOutcome]) -> list[GateLine]:
     refusal = [o for o in outcomes if o.case.category == REFUSAL_CATEGORY]
     classification = [o for o in outcomes if o.case.category in CLASSIFICATION_CATEGORIES]
     faith = [o for o in outcomes if o.case.category in FAITHFULNESS_CATEGORIES]
-    scored = [o for o in faith if o.faithfulness is not None]
-    errored = [o for o in faith if o.faithfulness_error is not None]
+    scored = [
+        o for o in faith
+        if o.faithfulness is not None
+        and math.isfinite(o.faithfulness)
+        and 0.0 <= o.faithfulness <= 1.0
+        and o.faithfulness_error is None
+    ]
+    missing = len(faith) - len(scored)
     mean = sum(o.faithfulness or 0.0 for o in scored) / len(scored) if scored else 0.0
-    if errored:
-        note = f"{len(errored)} 条未评（如 {errored[0].faithfulness_error}）——未定论"
+    if missing:
+        note = (
+            f"{missing} 条未评或评分无效——未定论"
+            f"（成功评分 {len(scored)}/{len(faith)}；均值仅供诊断）"
+        )
     elif not scored:
-        note = "无可评样例（零引用）——未定论"
+        note = "无可评样例——未定论"
     else:
         note = ""
     return [
@@ -82,10 +92,10 @@ def aggregate(outcomes: list[CaseOutcome]) -> list[GateLine]:
         GateLine(
             name="faithfulness",
             passed_count=None,
-            total=len(scored),
+            total=len(faith),
             value=mean,
             threshold=0.90,
-            met=bool(scored) and not errored and mean >= 0.90,
+            met=bool(scored) and not missing and mean >= 0.90,
             note=note,
         ),
         _pass_line("refusal", refusal, 0.95),
@@ -164,7 +174,7 @@ def write_reports(
     ]
     for line in lines:
         if line.name == "faithfulness":
-            reading = f"均值 {line.value:.4f}（{line.total} 条）"
+            reading = f"均值 {line.value:.4f}（应评 {line.total} 条）"
         else:
             reading = f"{line.passed_count}/{line.total} = {line.value:.2%}"
         md_lines.append(

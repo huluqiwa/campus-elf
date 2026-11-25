@@ -96,16 +96,18 @@ evals/
 跑批走真实 HTTP `POST /api/v1/campus/chat/turns` 消费 SSE（评生产全链），需先起 e2e 栈并导出 LLM 配置：
 
 ```bash
-# 1) 起真后端栈 + 种子账号（仓库根）
-scripts/e2e-stack.sh up
-# 2) 导出 .env 的 LLM 配置（judge/ragas 共用；密钥不回显）
+# 1) 导出配置（仓库根；不回显密钥）
+export NO_PROXY="127.0.0.1,localhost,::1,*" no_proxy="127.0.0.1,localhost,::1,*"
 set -a && . ./.env && set +a
+export E2E_LLM_API_KEY="$LLM_API_KEY" E2E_LLM_BASE_URL="$LLM_BASE_URL" E2E_LLM_MODEL="$LLM_MODEL"
+# 2) 起真后端栈 + 种子账号（仅重置测试数据）
+bash scripts/e2e-stack.sh up
 # 3) 跑批（evals/ 内）
 cd evals
-uv run python -m campus_elf_evals.qa_runner            # 冒烟：每类前 2 条 ≈18
-uv run python -m campus_elf_evals.qa_runner --full     # 全量 195 条
-uv run python -m campus_elf_evals.qa_runner --full --collect-only   # 只收集答案
-uv run python -m campus_elf_evals.qa_runner --score-only --collected reports/collected-*.json
+uv run python -u -m campus_elf_evals.qa_runner          # 默认冒烟，无 --smoke 参数
+uv run python -u -m campus_elf_evals.qa_runner --full --collect-only --concurrency 1
+# 先验证新收集文件完整性及测试栈稳定性，再将实际文件名填入下一条命令
+uv run python -u -m campus_elf_evals.qa_runner --full --score-only --collected "reports/collected-full-<stamp>.json"
 ```
 
 - **种子**：runner 自动把 `fixtures/sample_kb.md` 按 8 个 `##` 章节拆成 8 份文档，走
