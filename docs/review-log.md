@@ -1221,3 +1221,13 @@
 - **审查结论（依接手快照补录）：两轮独立审查均为 0 Blocker / 0 Major / 0 Minor，通过。**重点覆盖全量分母 195/60/46/20/69、`--full` 与 `--score-only` 组合、TokenRefresher 并发安全、错误隔离、报告脱敏、TD 编号，以及 backend 生产代码零改动。未补造逐条 findings；接手快照记录两轮均无 findings。
 - **当前复测**：`uv run --locked pytest` 为 61 passed；`uv run --locked ruff check src tests` 全绿；`git diff --check` 全绿。真实业务跑批证据见 `docs/evals/M4-ragas-2026-11-25.md`，包含 195/195 收集完整性与 A12 五线未达标读数；安全线 30/60（50%）是 Blocker 级产品问题。
 - **交付门禁**：PR 描述附两轮审查结论；等待 evals 与 security CI 全绿后，由用户明确确认是否合并。handoff §1 与 README 状态回填另开 docs PR。
+
+### M4-EVAL 合并后文档回填（独立审查通过）
+
+- 日期：2026-11-25
+- 范围：`docs/m4-eval-backfill`，基线 `9371241`；独立审查对象为 staged diff 中的 `README.md`、`docs/handoff.md`、`docs/milestone.md` 三个文件。本条为审查后记录，不包含在被审查的三文件差异中。
+- 对照：AGENTS §6/§9、已合并简报 `M4-EVAL-ragas.md` §3、评估摘要、A12 / OBS-03 / BS-40 与 milestone §7.4；GitHub PR #103、PR/main CI 证据及远端分支状态。
+- **独立上下文审查：0 Blocker / 0 Major / 0 Minor，通过。** PR #103 已 rebase 合并至 `9371241` 且评估分支已删除；PR evals `45637247805` / security `45637247729`、main push evals `45638816748` / security `45638816623` 均成功。五线读数及 195/60/46/20/69 分母与摘要一致，faithfulness 的 9 条未评保持未定论、不达标；跑批交付未误写为 M4 验收通过，安全线 50% 保留 Blocker 级产品问题结论。
+- **范围与处置**：原 M4 退出标准逐条保留；Langfuse 仍需新简报和用户确认；TD-294b 未关闭，既有技术债去向不变。仅回填已确认事实，未新增替代方案或优化承诺，不新增 TD。
+- **验证边界**：`git diff --staged --check` 与文档分母/证据路径/退出标准保留检查通过；本轮纯文档未重跑单元、业务场景或真实 LLM 跑批。main 的 evals CI 实测为 61 passed、用例集完整性 OK，历史业务结果以已合并评估摘要为证。
+- **交付门禁**：本回填独立开 docs PR，security CI 全绿后仍需用户明确确认才能合并；本条结论同步至该 PR 描述。
