@@ -1203,3 +1203,12 @@
 - **修复（`e4fcd21`）**：Major→新增 TD-357（记账放大，已延后/复查 M6 生产硬化）/TD-358（换快模型，已延后/生产选型）/TD-359（路由段延迟，已延后/M4 性能或 M6），TD-354 行补交叉引用；Minor①「重试 2」→「尝试 2（重试 1）」（design/tech-debt/brief 同步）；②补尾换行；③简报补「120 非全部重试上限」注记。
 - **复测**：受影响 59 单测全绿；ruff/mypy 通过；bandit 仅既有 nosec 提示无 finding。
 - 判例：①**放宽参数消除的是熔断 cascade，不是把慢模型变快**——SLO 数字保留、dev 不达标须诚实注记，根治靠换快模型（TD-358）；②**「已完成」的功能点若简报承诺了后续改进，必须当场登记 TD 处置**——否则关闭即失追踪（AGENTS §10）；③**`LLM_MAX_ATTEMPTS=N` 是尝试 N 次（重试 N-1）**——文档口径须与字段语义对齐，避免与 A8「最多 2 次重试」（=3 尝试）混淆；④**eval 与 backend 两分支同号 TD-354（观察 vs 修复）合并时须 reconcile 为一条**——eval 分支 TD-350~356 与 backend TD-354/357~359 编号需理顺。
+
+### PR #102 TD-354 收口文档回填（独立审查通过）
+
+- 日期：2026-11-25
+- 范围：`docs/td354-backfill`，base `506f566` → head `666c5e8`；实际 PR diff 仅 `README.md` 与 `docs/handoff.md`，3 增 2 删。本条为审查后的本地记录，不包含在被审查 head 中。
+- 对照：`AGENTS.md`、TD-354 已合并简报、e2e Compose、Settings、TD-357/358/359 台账，以及评估分支简报 `M4-EVAL-ragas.md` §2.1 已确认的 Ragas → Langfuse 独立点顺序。
+- **独立上下文只读审查：0 Blocker / 0 Major / 0 Minor，审查通过。** TD-354 合并状态、README 的 TD354/UI2/UI1 结构及下一步顺序一致；读超时 90s / 生成段首事件超时 120s / 尝试 2 次（重试 1 次）/ 熔断 10 次、窗口 180s、开路 10s 与配置及简报参数表一致，生产默认不变；后续改进均有台账处置。未发现新增密钥、PII、生成物或无关变更。
+- **验证边界**：独立审查执行 `git diff --check` 通过；本轮纯文档审查未运行单元、集成、业务场景或 E2E 测试，历史冒烟数字未重新执行。主上下文另行实测：head `666c5e8` 的 security run `45588330264` / `secrets-and-deps` success；backend/frontend/evals 未触发。
+- **交付门禁**：结论同步到 PR #102；本地审查记录未经用户授权不得 commit/push。该记录提交推送后须重新等待 security CI；PR 合并仍需用户明确确认，合并后确认 main push CI 全绿。
