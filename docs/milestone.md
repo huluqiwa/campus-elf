@@ -330,7 +330,7 @@ C 端可用：学校知识库问答、流式输出、引用、思考摘要、反
 
 **M4 A12 收口（2026-11-25 用户已确认 D1–D3；2026-11-26 严格重复 judge 已实现且真实验证未通过）**：安全与评分可信度优先于 Langfuse，逐点独立简报/PR。总简报 `docs/design-briefs/M4-A12-safety-triage.md`（TRI-A1–A6），裁定表 `docs/evals/M4-A12-safety-triage-2026-11-25.md`；TD-362 的 `strict-repeat-v1` 只是失败门禁，不改阈值或历史分数。
 
-- M4-A12-EVAL / TD-362：通用名词断言、内部术语必答、直接拒绝引用/可选预约口径；D2/D3 已确认。细化简报 `docs/design-briefs/M4-A12-EVAL.md`、稳定协议简报 `docs/design-briefs/M4-A12-JUDGE-STABILITY.md`，EVAL-A1–A8。2026-11-26 离线实现并新增 `strict-repeat-v1`（5 轮一致才稳定、最低分、红线并集、错误/冲突即失败）；受影响 141 tests、ruff、227 条完整性绿。最终临时模型 A8：31 条最多 155 次、实际 152 次，20/31 稳定，16 条合成对照 12/16；报告 SHA-256 `974410e2c577fca29f9104d8cb36b525b5c6279f778383f1cbbb44269a399fce`。EVAL-A8 和 TD-362 不验收，下一步独立审查与 TD-369。
+- M4-A12-EVAL / TD-362：通用名词断言、内部术语必答、直接拒绝引用/可选预约口径；D2/D3 已确认。细化简报 `docs/design-briefs/M4-A12-EVAL.md`、稳定协议简报 `docs/design-briefs/M4-A12-JUDGE-STABILITY.md`，EVAL-A1–A8。2026-11-26 离线实现并新增 `strict-repeat-v1`（5 轮一致才稳定、最低分、红线并集、错误/冲突即失败）；受影响 141 tests、ruff、227 条完整性绿。最终临时模型 A8：31 条最多 155 次、实际 152 次，20/31 稳定，16 条合成对照 12/16；报告 SHA-256 `974410e2c577fca29f9104d8cb36b525b5c6279f778383f1cbbb44269a399fce`。最终代码复审 0B/0M/1m 并已修复，实现提交 `471f01f`、草稿 PR #106，远端 evals/security CI 全绿；EVAL-A8 和 TD-362 不验收、PR 不合并，外部 key 轮换闭环后进入 TD-369。
 - M4-A12-CT / TD-361：首个 backend 跨租策略点，CT-A1–A8（不确认存在性、受信上下文、真实双租户、事件落库、混合合法意图）。
 - M4-A12-SC / TD-363：敏感内容分类/拒绝与合规支持，SC-A1/SC-A2；M4-A12-PI / TD-364：注入触发/来源复现与合法审批引导，PI-A1/PI-A2；各自独立点。
 - M4-A12-JUDGE / TD-365：46 条 faithfulness 有效评分完整性，9 条未评的有界诊断/恢复；不把缺失当作通过。
