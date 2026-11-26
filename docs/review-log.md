@@ -6,7 +6,7 @@
 
 ## 当前评审状态
 
-### M4-A12-EVAL / TD-362 离线实现（严格重复协议已实现；EVAL-A8 未通过；临时模型复审收尾中）
+### M4-A12-EVAL / TD-362 离线实现（严格重复协议已实现；代码复审通过；EVAL-A8 未通过）
 
 - 日期：2026-11-26；HEAD=`37d8904`。首轮独立审查对象为 22 个 staged 文件；最终复审检查修复后的完整 staged diff。
 - **首轮：0 Blocker / 1 Major / 1 Minor。** Major：SSE `error` 事件 payload 原样进入 `TurnResult.error`，报告会写出 message，可泄露 provider URL、凭证或个人信息。Minor：简报 §7 仍称本轮仅设计，与 §8 和 README/handoff 的离线实现记录冲突。
@@ -23,7 +23,8 @@
 - **第二轮修复**：确定性失败改为 `citation_missing:<索引>` / `forbidden_literal:<索引>`；`done` 只保留白名单 `stop_reason`；报告完全移除 API host；milestone 改为 141 tests。供应商侧撤销/轮换 key 槽位 3 仍为唯一未闭环 Major。
 - **复测**：六个受影响测试文件 **141 passed**；evals ruff 全绿；用例完整性 **227 条**通过；`git diff --check` 与 `git diff --cached --check` 通过。EVAL-A8 真实结果保持 20/31 稳定、合成对照 12/16，不因测试修复改判。
 - **最终代码复审（2026-11-26）**：**0 Blocker / 0 Major / 1 Minor，PASS**。Minor 为 `done_metadata_persisted=False` 与白名单 `stop_reason` 的字面歧义，以及 `_report_done` 非法/缺失/未知分支缺少报告回归；已改名为 `done_extra_metadata_persisted` 并补齐四类分支测试，复测六文件 **141 passed**、ruff 与 227 条完整性通过。
-- **整体交付结论：FAIL。** key 槽位 3 的供应商侧撤销/轮换仍未完成，属于未闭环外部 Major；EVAL-A8 仍为 20/31 稳定、合成对照 12/16，TD-362 不验收。外部 key 失效前不 commit/push/开 PR。
+- **整体交付结论：FAIL。** key 槽位 3 的供应商侧撤销/轮换仍未完成，属于未闭环外部 Major；EVAL-A8 仍为 20/31 稳定、合成对照 12/16，TD-362 不验收。
+- **交付状态回填（2026-11-26，机械状态）**：用户回复“按你说的办”后，按已审查的显式文件集提交 `471f01f`、推送 `feature/td-362-a12-eval` 并创建草稿 PR #106；远端 evals/security CI 全绿。PR 明确保留 EVAL-A8 与供应商侧 key 轮换两项未完成，未合并 main；CI 绿只证明代码门禁，不改变整体 FAIL。
 
 | 功能点 | 日期 | commit/diff | 审查人/agent | Blocker | Major | Minor | 修复/复测 | 结论 |
 |---|---|---|---|---|---|---|---|---|

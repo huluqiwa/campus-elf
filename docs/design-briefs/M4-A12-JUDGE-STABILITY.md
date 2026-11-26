@@ -6,7 +6,7 @@
 | 状态 | **方案 B 已实现且代码复审 0B/0M/1m；仅用临时供应商；EVAL-A8 未通过；key 槽位 3 外部轮换待用户处理** |
 | 关联功能点 | TD-362 的真实 judge 协议验收；TD-350 的当前阶段收口 |
 | 上游 | requirements A7/A12；spec AI-04/AI-08/AI-09；test-plan §6.2；milestone §7.2；`docs/design-briefs/M4-A12-EVAL.md`；`docs/tech-debt.md` TD-350/TD-369 |
-| Git 基线 | `feature/td-362-a12-eval`，基线 `37d8904`；当前实现与文档修改尚未提交 |
+| Git 基线 | `feature/td-362-a12-eval`，基线 `37d8904`；实现提交 `471f01f`，草稿 PR #106，远端 CI 全绿但未合并 |
 
 ## 1. 目标与验收
 
