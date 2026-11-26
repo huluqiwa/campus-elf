@@ -25,7 +25,7 @@
 - **最终代码复审（2026-11-26）**：**0 Blocker / 0 Major / 1 Minor，PASS**。Minor 为 `done_metadata_persisted=False` 与白名单 `stop_reason` 的字面歧义，以及 `_report_done` 非法/缺失/未知分支缺少报告回归；已改名为 `done_extra_metadata_persisted` 并补齐四类分支测试，复测六文件 **141 passed**、ruff 与 227 条完整性通过。
 - **整体交付结论：FAIL。** key 槽位 3 的供应商侧撤销/轮换仍未完成，属于未闭环外部 Major；EVAL-A8 仍为 20/31 稳定、合成对照 12/16，TD-362 不验收。
 - **交付状态回填（2026-11-26，机械状态）**：用户回复“按你说的办”后，按已审查的显式文件集提交 `471f01f`、推送 `feature/td-362-a12-eval` 并创建草稿 PR #106；远端 evals/security CI 全绿。PR 明确保留 EVAL-A8 与供应商侧 key 轮换两项未完成；随后按用户“临时额度已耗尽、继续操作”的指令将 PR 作为失败安全门禁合并，合并提交为 `799e58f`，PR 与 main push 的 evals/security CI 全绿。CI 绿只证明代码门禁，不改变 TD-362 整体 FAIL；供应商侧撤销记录仍开放。
-### M4-A12-INPUT / TD-369 收集输入完整性（四轮复审 0B/0M/1m，PASS；PR #107 CI 绿，待合并）
+### M4-A12-INPUT / TD-369 收集输入完整性（四轮复审 0B/0M/1m，PASS；PR #107 已合并）
 
 - 日期：2026-11-26；分支 `feature/td-369-a12-input`，基线 `799e58f`。范围：`docs/design-briefs/M4-A12-INPUT.md`、`qa_runner.py`、`test_qa_runner.py`、`qa_report.py`。
 - **首轮独立审查：0 Blocker / 2 Major / 2 Minor，FAIL。** Major：只按当前 `load_cases` 集合比较仍可在整类文件缺失时把 195 缩成 175；`TurnResult` 未校验字段运行时类型，错误类型可进入 judge。Minor：collected 校验后报告阶段重读文件形成哈希窗口；实现状态未回写。
@@ -36,7 +36,7 @@
 - **第三轮修复：** 回归改用真实 195 条源案例，桩化 seed/auth/collect 返回 194 条，断言采集确实执行、采集后门禁返回 1、`save_collected`/评分配置/报告均未调用；源 ID 在集合构造前校验为非空字符串；CLI 输出单行、完整摘要总长上限 500 字符的安全摘要，并补 missing/extra/duplicate 断言。
 - **第四轮独立审查：0 Blocker / 0 Major / 1 Minor，PASS。** 上一轮 Major 与两个 Minor 均已关闭。Minor：设计简报存在格式问题，“500 字符”未计追加后缀。
 - **Minor 修复与复测：** 修正简报格式；异常摘要改为正文加后缀总长不超过 500，并新增边界测试；四文件 **103 passed**、evals 全套 **199 passed**、ruff/mypy/bandit、227 条完整性、diff check 通过。
-- **交付状态回填（2026-11-26）：** 实现提交 `8d5e1c2`，PR #107 已创建；该提交的 evals run `45802814061`（199 passed、227 条完整性）与 security run `45802814089` 均成功。PR 尚未合并，最终文档状态提交与合并作为独立状态动作完成。
+- **交付状态回填（2026-11-26）：** 实现提交 `8d5e1c2`，PR #107 squash 合并为 `48d6cf0`，原分支已删。PR final-head evals run `45803145499`（199 passed、227 条完整性）与 security run `45803145507` 成功；合并后 main push evals run `45803368154` 与 security run `45803368297` 也成功。TD-369 完成并通过验收；A12 阈值、分母与历史结论不变。
 
 
 | 功能点 | 日期 | commit/diff | 审查人/agent | Blocker | Major | Minor | 修复/复测 | 结论 |
