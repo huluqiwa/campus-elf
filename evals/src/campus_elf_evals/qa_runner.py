@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -39,8 +38,15 @@ from campus_elf_evals.qa_report import (
     build_run_meta,
     write_reports,
 )
-from campus_elf_evals.qa_score import JudgeVerdict, OpenAIJudge, case_passed, deterministic_check
+from campus_elf_evals.qa_score import (
+    JudgeVerdict,
+    OpenAIJudge,
+    case_passed,
+    deterministic_check,
+    finalize_deterministic_check,
+)
 from campus_elf_evals.qa_seed import TokenRefresher, fetch_chunk_text, seed_kb
+from campus_elf_evals.temp_model import RotatingAsyncOpenAI, load_temp_model_settings
 
 EVALS_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = EVALS_ROOT.parent
@@ -146,7 +152,11 @@ async def score_all(
                 score=0.0,
                 redline_hit=False,
                 reason=f"judge_exception:{sanitize_exception(exc)}",
+                stable=False,
+                attempts=0,
+                successful_attempts=0,
             )
+        det = finalize_deterministic_check(case, turn, det, verdict)
         faith: float | None = None
         faith_error: str | None = None
         if (
@@ -185,6 +195,9 @@ def _smoke_subset(cases: list[QaCase]) -> list[QaCase]:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    if type(args.judge_repeats) is not int or args.judge_repeats < 5:
+        print("正式评估 --judge-repeats 至少 5 轮", file=sys.stderr)
+        return 1
     started = time.monotonic()
     started_at = datetime.now(UTC).isoformat(timespec="seconds")
     cases = load_cases(EVALS_ROOT / "cases")
@@ -202,7 +215,8 @@ async def _run(args: argparse.Namespace) -> int:
             if not args.collected:
                 print("--score-only 需要 --collected <json>", file=sys.stderr)
                 return 1
-            turns = load_collected(Path(args.collected))
+            collected_path = Path(args.collected)
+            turns = load_collected(collected_path)
             cases = [c for c in cases if c.id in turns]
         else:
             docs = split_sample_kb(
@@ -222,22 +236,28 @@ async def _run(args: argparse.Namespace) -> int:
             if args.collect_only:
                 return 0
 
-        api_key = os.environ.get("LLM_API_KEY")
-        judge_base = os.environ.get("LLM_BASE_URL")
-        model = os.environ.get("LLM_MODEL")
-        if not (api_key and judge_base and model):
-            print("评分需要环境变量 LLM_API_KEY/LLM_BASE_URL/LLM_MODEL", file=sys.stderr)
+        try:
+            temp_model = load_temp_model_settings(REPO_ROOT / ".env")
+        except ValueError as exc:
+            print(f"评分配置无效：{exc}", file=sys.stderr)
             return 1
-
-        from openai import AsyncOpenAI
+        model = temp_model.model
 
         # judge/ragas 外联客户端同样 trust_env=False（直连 provider，已实测可达）：
         # 规避环境 NO_PROXY 括号 IPv6 触发的 httpx InvalidURL；显式持有以便关闭。
         async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(120.0)) as judge_http:
-            openai_client = AsyncOpenAI(
-                api_key=api_key, base_url=judge_base, http_client=judge_http
+            openai_client = RotatingAsyncOpenAI(
+                api_keys=temp_model.api_keys,
+                base_url=temp_model.base_url,
+                http_client=judge_http,
+                max_retries=0,
             )
-            judge = OpenAIJudge(client=openai_client, model=model, seed=args.seed)
+            judge = OpenAIJudge(
+                client=openai_client,
+                model=model,
+                seed=args.seed,
+                repeats=args.judge_repeats,
+            )
 
             faith_fn: Callable[[QaCase, TurnResult], Awaitable[float]] | None = None
             if not args.no_faithfulness:
@@ -277,8 +297,10 @@ async def _run(args: argparse.Namespace) -> int:
 
     lines = aggregate(outcomes)
     meta = build_run_meta(
-        model=model, seed=args.seed, base_url=base_url, mode=mode,
+        model=model, seed=args.seed, judge_repeats=args.judge_repeats,
+        base_url=base_url, mode=mode,
         started_at=started_at, duration_s=time.monotonic() - started,
+        cases=cases, cases_dir=EVALS_ROOT / "cases", collected_path=collected_path,
     )
     json_path, md_path = write_reports(outcomes, lines, meta, reports_dir)
     for line in lines:
@@ -302,6 +324,12 @@ def main() -> int:
     parser.add_argument("--reports-dir", default=str(EVALS_ROOT / "reports"))
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--judge-repeats",
+        type=int,
+        default=5,
+        help="每个用例独立 judge 次数；默认严格 5 轮（生产评估不得靠重试覆盖失败）",
+    )
     args = parser.parse_args()
     return asyncio.run(_run(args))
 

@@ -4,6 +4,27 @@
 > 详细清单见 `docs/code-review-checklist.md`。
 > 历史段落中的「本 PR」指该段对应的 PR；合并后的提交哈希见同段或后续回填块。
 
+## 当前评审状态
+
+### M4-A12-EVAL / TD-362 离线实现（严格重复协议已实现；EVAL-A8 未通过；临时模型复审收尾中）
+
+- 日期：2026-11-26；HEAD=`37d8904`。首轮独立审查对象为 22 个 staged 文件；最终复审检查修复后的完整 staged diff。
+- **首轮：0 Blocker / 1 Major / 1 Minor。** Major：SSE `error` 事件 payload 原样进入 `TurnResult.error`，报告会写出 message，可泄露 provider URL、凭证或个人信息。Minor：简报 §7 仍称本轮仅设计，与 §8 和 README/handoff 的离线实现记录冲突。
+- **第二轮：0 Blocker / 2 Major / 1 Minor。** Major：旧 collected 文件中的 `transport_error` 原文进入评分失败原因与 JSON 报告；SSE `error` 事件的 JSON `null` payload 被误作无错误，可由后续成功 `done` 通过。
+- **修复**：SSE error 事件无论 payload 类型都固定归一为 `{"code":"stream_error"}`；`TurnResult` 加载旧 collected 数据时归一化 error 与 transport_error，评分失败原因不嵌入可变错误文本，报告序列化再次过滤。增加错误对象/`null` SSE/旧 collected 传输错误贯穿业务链回归；同步简报状态与所有测试计数，并更新 evals README/rubric/test-plan 字段契约。
+- **复测**：五个受影响测试文件共 **115 passed**；evals ruff 全绿；用例完整性 **227 条**（195 QA + 32 chunk_grid）通过；`git diff --cached --check` 通过。
+- **最终复审：0 Blocker / 0 Major / 1 Minor，通过。** Minor 为本简报仍有一处旧 113 测试数；已改为注明初版历史值并列出当前 115 passed。审查复核了条件引用、硬失败不可翻案、迁移哈希、报告排他创建、旧错误载入与 TD-369 范围。
+- **EVAL-A8 实际运行（2026-11-26）**：首轮 `DeepSeek-V4.1-Flash-1017` 评 15 条历史答案 + 16 条合成对照，共 43 次 create/HTTP；只用临时 key 槽位 1，无余额耗尽、无轮换，SDK HTTP 重试 0。首轮 6/15 历史答案、3/16 合成对照最终解析失败；原始诊断报告 `evals/reports/td362-a8-protocol-20261125T192536Z.json`，SHA-256 `3b80a48e9f84d64c5e744a58c083ab6ff5271240318ba108226394be04742d8c`。
+- **追加诊断结果**：39 次请求，仅 key 槽位 1、无轮换、SDK retries=0，累计 30,376 输入 / 29,586 输出 tokens。`max_tokens=512` 时 8/9 失败项因 `finish_reason=length` 且正文为空；提升上限后失败项均取得可解析 verdict。16 条合成 fixture 在 4096 上限下 16/16 可解析、15/16 符合预期；contrast-04 同模型、同 prompt、temperature=0、seed=42、max_tokens=4096 的 5 次结果为 3 次通过、2 次失败，响应类型在 `safe_refusal_no_school_facts` 与 `school_facts` 间变化。复测报告 `evals/reports/td362-a8-diagnostic-followup-20261126.json`，SHA-256 `f78bdcfb9f0d65898caefbaeb7b1afe82507d61738fdf61202f07878a38e4440`；不含原始回答、reason 或 key。
+- **边界与结论**：TD-369 的 score-only ID 交集缩分母问题仍独立未修；mock judge 只证明协议接线。输出截断已定位，但真实 judge 有语义重复性波动，EVAL-A8/TD-362 不验收；不改历史分数。TD-350 补录固定 seed 未消除波动的真实证据。独立代码审查通过；尚未 commit/push/开 PR，不代表 EVAL-A8 或 TD-362 全部验收完成，也不授予提交/推送/合并授权。
+- **严格重复与临时模型首轮独立复审（2026-11-26）**：**0 Blocker / 1 Major / 2 Minor**。Major：一次失败测试输出暴露 `TEMP_API_KEY_3` 的值；本地已清空该槽位，未提交 `.env`，但供应商侧撤销和轮换仍必须由用户执行，当前不能把风险视为关闭。
+- **首轮修复**：临时 key 池、设置与轮换客户端的诊断表示统一脱敏；测试侧增加 autouse 熔断，漏 mock 时在读取仓库 `.env` 前失败；额度判定纳入结构化 provider body；报告不再保存引用文档名、章节或 chunk ID，改为数量与锚点 SHA-256；未知自定义额度格式登记 TD-370。
+- **临时模型第二轮独立复审（2026-11-26）**：**0 Blocker / 4 Major / 1 Minor**。除 key 槽位 3 外部安全动作外，Major：确定性失败原因仍夹带引用/禁出原文；`done` 任意字段直接落盘；内部 API host 落盘。Minor：milestone 仍写 119 tests。
+- **第二轮修复**：确定性失败改为 `citation_missing:<索引>` / `forbidden_literal:<索引>`；`done` 只保留白名单 `stop_reason`；报告完全移除 API host；milestone 改为 141 tests。供应商侧撤销/轮换 key 槽位 3 仍为唯一未闭环 Major。
+- **复测**：六个受影响测试文件 **141 passed**；evals ruff 全绿；用例完整性 **227 条**通过；`git diff --check` 与 `git diff --cached --check` 通过。EVAL-A8 真实结果保持 20/31 稳定、合成对照 12/16，不因测试修复改判。
+- **最终代码复审（2026-11-26）**：**0 Blocker / 0 Major / 1 Minor，PASS**。Minor 为 `done_metadata_persisted=False` 与白名单 `stop_reason` 的字面歧义，以及 `_report_done` 非法/缺失/未知分支缺少报告回归；已改名为 `done_extra_metadata_persisted` 并补齐四类分支测试，复测六文件 **141 passed**、ruff 与 227 条完整性通过。
+- **整体交付结论：FAIL。** key 槽位 3 的供应商侧撤销/轮换仍未完成，属于未闭环外部 Major；EVAL-A8 仍为 20/31 稳定、合成对照 12/16，TD-362 不验收。外部 key 失效前不 commit/push/开 PR。
+
 | 功能点 | 日期 | commit/diff | 审查人/agent | Blocker | Major | Minor | 修复/复测 | 结论 |
 |---|---|---|---|---|---|---|---|---|
 | 文档阶段（非代码） | 2026-10-19 | docs/* | 待用户确认 | 0 | 0 | 0 | N/A | 已确认 |
@@ -1242,3 +1263,16 @@
 - **验证边界**：`git diff --staged --check`、本地结构性计数/哈希/路径/TD/退出标准与表格列数检查通过；未运行单元、业务场景、真实 LLM、数据库或向量库验证。源文件中的显式密钥形态检查不替代未来 PR security CI。
 - **当前门禁**：本轮仅提交可审查的设计产物给用户，尚未 commit/push/开 PR；AGENTS §11 要求新租户隔离/护栏简报确认后再编码。后续文档提交与 PR、实现点、合并均按相应授权及独立审查/CI 门禁执行，不以此条审查自动授权实现或合并。
 - **审查后确认回填（2026-11-25）**：用户明确确认 D1-B/D2/D3，顺序为先独立 TD-362、再细化 TD-361。仅将相关文档的待确认状态改为已确认并记录授权边界；上述独立审查仍对应确认前的六文件差异，未将后补确认记录冒称为原审查范围。原报告/用例/代码与 A12 门槛均未改，不含 commit/push 或合并授权。
+
+
+### M4-A12-EVAL / TD-362 本地设计与测试准备（独立复审通过，尚未实施）
+
+- 日期：2026-11-26。
+- 范围：`feature/td-362-a12-eval`，HEAD=`310b92f`；独立上下文 `review_td362_preparation` 审查五份 staged 文档：新简报 `docs/design-briefs/M4-A12-EVAL.md`、README、handoff、milestone、tech-debt。本条及简报末尾审查结果为通过后机械补录，不冒称属于原五文件审查范围。
+- **首轮：0 Blocker / 1 Major / 0 Minor。** Major：31 条×每条两次 judge 尝试仅约束 SDK create 次数，未计 SDK 内建重试，误称最多 62 次请求，可能低估运行授权/成本边界。
+- **修正与复核**：本地只读核实锁定 SDK 的 AsyncOpenAI 默认 `max_retries=2`；简报 §5 改为最多 62 次 SDK create、沿用当前默认时最多 186 次 HTTP 尝试，运行前按实际重试配置、输入长度、响应上限和价格估算费用。未改客户端或依赖；未来关闭 SDK 重试须记录决策。此为纠正文档计数，不新增独立优化承诺。
+- **有界复审：0 Blocker / 0 Major / 0 Minor，通过，可交付本地准备。** 独立核对 15 条局部迁移（8 字面/4 术语/2 引用/1 可选预约）、16 组待写测试、原必要语义/锚点/硬失败不可翻案、未知分支不豁免、fake judge 与真实语义证据区分、原分母与历史产物保留。
+- **新发现与处置**：TD-369 准确指向 score-only 在聚合前按 ID 取交集的缩分母缺口，区别于 TD-360；已登记独立 M4-A12-INPUT，并有 milestone §7.2 目标（M4 最终 full 重评前完成）。有效旧收集已核验 195 个 ID、missing=0、extra=0，但临时核对不等于修复自动门禁。
+- **本轮验证**：文档 diff/表格与编号/15 个目标 ID/16 个测试组/8 个验收项、195/60 数量、8 份源码/模板/用例未改及 2 份历史产物 SHA 检查通过；`git diff --staged --check` 通过。未写测试代码、未运行 pytest/业务场景/真实 LLM/数据库或向量库，不能写成已红或已绿。
+- **授权与停止点**：本轮仅交付用户已授权的本地设计准备，未 commit/push 或开 TD-362 PR；#105 原提交不变且合并授权保留。仍须先完成 #105 合并与 main push CI 全绿、整理本分支基线，再实施；复审不扩大为真实评分、提交推送或后续 PR 合并授权。A12 旧读数和 M4 未退出状态不变。
+- **后续合并与基线核验（2026-11-26，机械状态回填）**：沿用用户既有授权，CLI 已将 #105 rebase 合并至 `37d8904`；PR security run `45650435764` 与 main security run `45659032307` 均成功，backend/frontend/evals 按文档路径未触发。原文档分支本地/远端已删；`main` fast-forward、未推送 main；准备分支整理至新 main 后，保存/恢复的 index tree 精确一致，6 份准备文档完整保留，临时 stash 已清理。更新上述“待合并”现状不改变独立审查的历史对象与技术方案；尚未新增测试/评分代码、真实调用或 TD-362 commit/push，下一步红相测试。

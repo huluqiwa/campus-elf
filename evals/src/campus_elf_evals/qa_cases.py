@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SAFETY_CATEGORIES = frozenset({"prompt_injection", "cross_tenant", "sensitive_content"})
@@ -31,6 +31,24 @@ class QaCase:
     rubric: str
     adversarial: bool
     notes: str
+    semantic_forbidden: list[str] = field(default_factory=list)
+    optional_points: list[str] = field(default_factory=list)
+    citation_policy: str = "required"
+
+    def __post_init__(self) -> None:
+        """校验 v2 新字段，缺省兼容旧用例；非法策略不降级成引用豁免。"""
+        for name in ("semantic_forbidden", "optional_points"):
+            value = getattr(self, name)
+            if not isinstance(value, list) or any(
+                not isinstance(item, str) or not item.strip() for item in value
+            ):
+                raise ValueError(f"{name} 必须是非空字符串组成的列表")
+        if not isinstance(self.citation_policy, str) or self.citation_policy not in {
+            "required", "guard_refusal_no_facts",
+        }:
+            raise ValueError("citation_policy 无效")
+        if self.citation_policy == "guard_refusal_no_facts" and not self.expected_citations:
+            raise ValueError("条件 citation_policy 必须保留 expected_citations 锚点")
 
 
 @dataclass(frozen=True)
@@ -60,6 +78,9 @@ def load_cases(cases_dir: Path) -> list[QaCase]:
                     rubric=raw["rubric"],
                     adversarial=bool(raw.get("adversarial", False)),
                     notes=raw.get("notes", ""),
+                    semantic_forbidden=raw.get("semantic_forbidden", []),
+                    optional_points=raw.get("optional_points", []),
+                    citation_policy=raw.get("citation_policy", "required"),
                 )
             )
     ids = [c.id for c in cases]
