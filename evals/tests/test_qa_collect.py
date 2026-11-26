@@ -90,15 +90,17 @@ async def test_collect_turn_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_collect_turn_error_event() -> None:
+    marker = "EVAL_ONLY_ERROR_PAYLOAD"
     frames = [
         _frame("meta", {"turn_id": "t1", "trace_id": "tr1", "conversation_id": "c1"}),
-        _frame("error", {"code": "LLM_NOT_CONFIGURED", "retryable": False}),
+        _frame("error", {"code": "LLM_NOT_CONFIGURED", "message": marker, "retryable": False}),
     ]
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda r: _stream_response(frames))
     ) as client:
         result = await collect_turn(client, base_url="http://x", token="tok", message="问题")
-    assert result.error is not None and result.error["code"] == "LLM_NOT_CONFIGURED"
+    assert result.error == {"code": "stream_error"}
+    assert marker not in json.dumps(result.error)
     assert result.done is None
 
 
@@ -146,3 +148,26 @@ async def test_collect_turn_transport_error_gives_up_after_two() -> None:
     assert len(calls) == 2
     assert result.transport_error is not None
     assert result.done is None
+
+
+@pytest.mark.asyncio
+async def test_td362_collection_transport_error_is_sanitized() -> None:
+    marker = "EVAL_ONLY_TRANSPORT_PAYLOAD"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(marker, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False) as client:
+        result = await collect_turn(client, base_url="http://test.invalid", token="synthetic", message="合成请求")
+    assert result.transport_error == "transport_error"
+    assert marker not in result.transport_error
+
+
+def test_td362_sse_parse_error_does_not_echo_malformed_content() -> None:
+    marker = "EVAL_ONLY_SSE_PAYLOAD"
+    parser = SSEParser()
+    parser.feed("event: delta")
+    parser.feed(f"data: {marker}")
+    with pytest.raises(ValueError) as exc:
+        parser.feed("")
+    assert marker not in str(exc.value)

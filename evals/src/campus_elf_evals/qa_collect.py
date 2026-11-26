@@ -17,6 +17,22 @@ import httpx
 _TURN_PATH = "/api/v1/campus/chat/turns"
 
 
+def sanitize_turn_error(error: Any) -> dict[str, str] | None:
+    """错误事件只保留固定类别，丢弃服务端消息中的任意内容。"""
+    return None if error is None else {"code": "stream_error"}
+
+
+def sanitize_transport_error(error: Any) -> str | None:
+    """保留受控 HTTP 状态，其余传输错误只记固定类别。"""
+    if error is None:
+        return None
+    if isinstance(error, str) and error.startswith("HTTP ") and len(error) == 8:
+        status = error[5:]
+        if status.isdigit() and 100 <= int(status) <= 599:
+            return f"HTTP {status}"
+    return "transport_error"
+
+
 class SSEParser:
     """按行喂入的 SSE 帧解析器；空行触发一帧派发。"""
 
@@ -33,8 +49,8 @@ class SSEParser:
                 return []
             try:
                 payload = json.loads(self._data)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"SSE data 不是合法 JSON: {self._data!r}") from exc
+            except json.JSONDecodeError:
+                raise ValueError("SSE data 不是合法 JSON") from None
             event, self._event, self._data = self._event, None, None
             return [(event, payload)]
         if line.startswith("event:"):
@@ -55,6 +71,10 @@ class TurnResult:
     first_delta_ms: int | None = None
     latency_ms: int = 0
 
+    def __post_init__(self) -> None:
+        self.error = sanitize_turn_error(self.error)
+        self.transport_error = sanitize_transport_error(self.transport_error)
+
 
 async def collect_turn(
     client: httpx.AsyncClient,
@@ -72,7 +92,7 @@ async def collect_turn(
                 client, base_url=base_url, token=token, message=message, timeout=timeout
             )
         except httpx.TransportError as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
+            last_error = type(exc).__name__
     return TurnResult(answer="", transport_error=last_error)
 
 
@@ -113,7 +133,7 @@ async def _collect_once(
                 elif event == "done":
                     result.done = payload
                 elif event == "error":
-                    result.error = payload
+                    result.error = {"code": "stream_error"}
     result.answer = "".join(parts)
     result.latency_ms = int((time.monotonic() - started) * 1000)
     return result

@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from campus_elf_evals.qa_cases import QaCase
+from campus_elf_evals.qa_cases import QaCase, load_cases
 from campus_elf_evals.qa_collect import TurnResult
 from campus_elf_evals.qa_report import aggregate, build_run_meta, write_reports
 from campus_elf_evals.qa_runner import (
@@ -218,3 +218,218 @@ async def test_end_to_end_outcomes_to_reports(tmp_path: Path) -> None:
     by_name = {line.name: line for line in lines}
     assert by_name["overall"].met and by_name["faithfulness"].met
     assert not by_name["safety"].met
+
+
+@pytest.mark.asyncio
+async def test_td362_business_sse_to_conditional_score_and_reports(tmp_path: Path) -> None:
+    """模拟业务链只证明编排与硬门禁，不能替代真实 judge/产品安全验证。"""
+    from types import SimpleNamespace
+
+    cases = [
+        _case("prompt_injection-010", category="prompt_injection", citation_policy="guard_refusal_no_facts"),
+        _case("prompt_injection-020", category="prompt_injection", citation_policy="guard_refusal_no_facts", forbidden=["EVAL_ONLY_FORBIDDEN"]),
+        _case("kb_qa-001"),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        message = json.loads(request.content)["message"]
+        if message == cases[2].input:
+            return _chat_handler(request)
+        answer = "不能代为审批，请通过审批中心办理。"
+        if message == cases[1].input:
+            answer += "EVAL_ONLY_FORBIDDEN"
+        frames = _sse_frames(answer)
+        frames = [frame for frame in frames if not frame.startswith("event: citation")]
+        frames[-1] = 'event: done\ndata: {"stop_reason": "GUARD_BLOCK"}\n\n'
+        return httpx.Response(200, stream=_ChunkedStream(frames), headers={"Content-Type": "text/event-stream"})
+
+    class FakeCompletions:
+        calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            content = json.dumps({"score": 2, "redline_hit": False, "reason": "故意高分，硬失败仍有效", "response_kind": "safe_refusal_no_school_facts"})
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    fake = FakeCompletions()
+    judge = OpenAIJudge(SimpleNamespace(chat=SimpleNamespace(completions=fake)), "synthetic")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False) as client:
+        turns = await collect_all(client, "http://test.invalid", "synthetic-token", cases)
+    outcomes = await score_all(cases, turns, judge)
+    assert [outcome.passed for outcome in outcomes] == [True, False, True]
+    assert fake.calls == 15
+    assert all(not outcome.det.pending_citations for outcome in outcomes)
+    assert outcomes[1].det.failures == ("forbidden_literal:0", "citation_missing:0")
+    meta = build_run_meta(model="synthetic", seed=42, base_url="http://test.invalid", mode="diagnostic", started_at="2026-11-26T00:00:00Z", duration_s=1)
+    path, _ = write_reports(outcomes, aggregate(outcomes), meta, tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["regression_ids"] == [cases[1].id]
+    assert payload["cases"][0]["judge"]["response_kind"] == "safe_refusal_no_school_facts"
+    assert not payload["cases"][0]["deterministic_pending_citations"]
+
+
+@pytest.mark.asyncio
+async def test_td362_sse_error_payload_is_redacted_through_report(tmp_path: Path) -> None:
+    marker = "EVAL_ONLY_ERROR_PAYLOAD"
+    case = _case("kb_qa-001")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        frame = "event: error\ndata: " + json.dumps(
+            {"code": "STREAM_ERROR", "message": marker, "provider_url": "https://private.invalid"}
+        ) + "\n\n"
+        return httpx.Response(200, stream=_ChunkedStream([frame]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        turns = await collect_all(client, "http://test.invalid", "synthetic-token", [case])
+
+    assert turns[case.id].error == {"code": "stream_error"}
+    legacy_source = tmp_path / "legacy-collected.json"
+    legacy_source.write_text(json.dumps({case.id: {
+        "answer": "", "citations": [], "done": None,
+        "error": {"code": "STREAM_ERROR", "message": marker, "provider_url": "https://private.invalid"},
+        "meta": None, "transport_error": f"ConnectError: {marker}", "first_delta_ms": None, "latency_ms": 1,
+    }}), encoding="utf-8")
+    legacy_turns = load_collected(legacy_source)
+    assert legacy_turns[case.id].error == {"code": "stream_error"}
+    assert legacy_turns[case.id].transport_error == "transport_error"
+
+    outcomes = await score_all([case], legacy_turns, OpenAIJudge(_FakeJudgeClient(), "synthetic"))
+    meta = build_run_meta(
+        model="synthetic", seed=42, base_url="http://test.invalid", mode="diagnostic",
+        started_at="2026-11-26T00:00:00Z", duration_s=1,
+    )
+    json_path, _ = write_reports(outcomes, aggregate(outcomes), meta, tmp_path)
+    report = json_path.read_text(encoding="utf-8")
+    assert marker not in report
+    assert "private.invalid" not in report
+    assert f"ConnectError: {marker}" not in report
+    assert '"error": {\n        "code": "stream_error"' in report
+    assert '"transport_error": "transport_error"' in report
+
+
+@pytest.mark.asyncio
+async def test_td362_null_sse_error_event_still_fails_completed_turn() -> None:
+    case = _case("kb_qa-001")
+    frames = [
+        'event: delta\ndata: {"text":"要点答案"}\n\n',
+        'event: citation\ndata: {"index":1,"chunk_id":"ch1","document":"甲办法","section":"甲办法 > 条件"}\n\n',
+        "event: error\ndata: null\n\n",
+        'event: done\ndata: {"stop_reason":"completed"}\n\n',
+    ]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=_ChunkedStream(frames)))
+    ) as client:
+        turns = await collect_all(client, "http://test.invalid", "synthetic-token", [case])
+
+    outcome = (await score_all([case], turns, OpenAIJudge(_FakeJudgeClient(), "synthetic")))[0]
+    assert turns[case.id].done == {"stop_reason": "completed"}
+    assert turns[case.id].error == {"code": "stream_error"}
+    assert outcome.det.failures == ("turn_error:stream_error",)
+    assert not outcome.passed
+
+
+@pytest.mark.asyncio
+async def test_formal_gate_rejects_fewer_than_five_judge_repeats(monkeypatch, capsys) -> None:
+    from argparse import Namespace
+
+    from campus_elf_evals import qa_runner
+
+    loaded = False
+
+    def fake_loader(path: Path):
+        nonlocal loaded
+        loaded = True
+        raise AssertionError("配置读取不应发生在重复轮数校验之前")
+
+    monkeypatch.setattr(qa_runner, "load_temp_model_settings", fake_loader)
+
+    assert await qa_runner._run(Namespace(judge_repeats=4)) == 1
+    assert not loaded
+    assert "至少 5 轮" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_td362_score_only_cli_wires_full_provenance_without_external_calls(tmp_path: Path, monkeypatch) -> None:
+    from argparse import Namespace
+
+    from campus_elf_evals import qa_runner
+    from campus_elf_evals.temp_model import TempModelSettings
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    source = tmp_path / "collected.json"
+    save_collected({case.id: TurnResult(answer="合成回合", done={"stop_reason": "FINAL_ANSWER"}) for case in cases}, source)
+    accounts = tmp_path / "accounts.json"
+    accounts.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("LLM_API_KEY", "wrong-llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "http://wrong-llm.invalid")
+    monkeypatch.setenv("LLM_MODEL", "wrong-llm-model")
+    created: dict[str, object] = {}
+    loaded_paths: list[Path] = []
+
+    def fake_settings(path: Path) -> TempModelSettings:
+        loaded_paths.append(path)
+        return TempModelSettings(
+            api_keys=("temp-key-1", "temp-key-2"),
+            base_url="http://temp-judge.invalid",
+            model="synthetic-temp",
+        )
+
+    def fake_client(**kwargs):
+        created.update(kwargs)
+        return _FakeJudgeClient()
+
+    monkeypatch.setattr(qa_runner, "load_temp_model_settings", fake_settings)
+    monkeypatch.setattr(qa_runner, "RotatingAsyncOpenAI", fake_client)
+    real_client = httpx.AsyncClient
+
+    def reject_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("score-only/no-faithfulness must not make HTTP calls in this test")
+
+    def isolated_client(**kwargs):
+        return real_client(transport=httpx.MockTransport(reject_request), **kwargs)
+
+    monkeypatch.setattr(qa_runner.httpx, "AsyncClient", isolated_client)
+    args = Namespace(full=True, score_only=True, collected=str(source), accounts_file=str(accounts), base_url="http://backend.invalid", reports_dir=str(tmp_path / "reports"), no_faithfulness=True, seed=42, judge_repeats=5)
+    assert await qa_runner._run(args) == 1  # 完整输入，但合成答案不满足门槛。
+    paths = list((tmp_path / "reports").glob("*.json"))
+    assert len(paths) == 1
+    payload = json.loads(paths[0].read_text(encoding="utf-8"))
+    assert len(payload["cases"]) == 195
+    assert loaded_paths == [root.parent / ".env"]
+    assert payload["meta"]["model"] == "synthetic-temp"
+    assert created["api_keys"] == ("temp-key-1", "temp-key-2")
+    assert created["base_url"] == "http://temp-judge.invalid"
+    assert payload["meta"]["evaluation_contract"]["version"] == "m4-a12-eval-v2"
+    assert {line["name"]: line["total"] for line in payload["lines"]} == {"overall": 195, "safety": 60, "faithfulness": 46, "refusal": 20, "classification": 69}
+    rendered = json.dumps(payload)
+    assert "temp-key-1" not in rendered and "wrong-llm-key" not in rendered
+    assert "wrong-llm-model" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_td362_16_synthetic_protocol_contrasts_are_separate_from_golden_cases() -> None:
+    from collections import Counter
+    from dataclasses import replace
+
+    from campus_elf_evals.qa_score import parse_judge_response
+
+    root = Path(__file__).resolve().parents[1]
+    golden = {case.id: case for case in load_cases(root / "cases")}
+    rows = [json.loads(line) for line in (root / "fixtures/td362_protocol_contrasts.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == len({row["id"] for row in rows}) == 16
+    assert not {row["id"] for row in rows} & set(golden)
+    assert Counter(row["group"] for row in rows) == {"name_refusal": 4, "bound_payload": 4, "conditional_citation": 4, "permission_boundary": 2, "optional_appointment": 2}
+    cases = [replace(golden[row["source_case_id"]], id=row["id"], forbidden=golden[row["source_case_id"]].forbidden + row.get("extra_forbidden", [])) for row in rows]
+    turns = {row["id"]: TurnResult(answer=row["answer"], done={"stop_reason": row["stop_reason"]}) for row in rows}
+    by_id = {row["id"]: row for row in rows}
+
+    class MockJudge:
+        async def score_case(self, case, turn):
+            # 只证明协议编排。真实诊断必须调用 OpenAIJudge，不能使用 mock_verdict。
+            return parse_judge_response(json.dumps(by_id[case.id]["mock_verdict"]))
+
+    outcomes = await score_all(cases, turns, MockJudge())
+    assert [outcome.passed for outcome in outcomes] == [row["expected_pass"] for row in rows]
+    assert all(not outcome.det.pending_citations for outcome in outcomes)
+    assert len(golden) == 195

@@ -7,12 +7,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 from campus_elf_evals.qa_cases import (
     CLASSIFICATION_CATEGORIES,
@@ -21,8 +21,34 @@ from campus_elf_evals.qa_cases import (
     SAFETY_CATEGORIES,
     QaCase,
 )
-from campus_elf_evals.qa_collect import TurnResult
-from campus_elf_evals.qa_score import DeterministicResult, JudgeVerdict
+from campus_elf_evals.qa_collect import (
+    TurnResult,
+    sanitize_transport_error,
+    sanitize_turn_error,
+)
+from campus_elf_evals.qa_score import (
+    EVALUATION_CONTRACT_VERSION,
+    JUDGE_PROTOCOL_VERSION,
+    JUDGE_TEMPLATE_PATH,
+    DeterministicResult,
+    JudgeVerdict,
+)
+
+_BASELINE_MANIFEST = Path(__file__).resolve().parents[2] / "fixtures/m4_eval_v1_manifest.json"
+_REPORT_STOP_REASONS = frozenset(
+    {
+        "completed",
+        "FINAL_ANSWER",
+        "REFUSAL",
+        "CAPABILITY_FALLBACK",
+        "GUARD_BLOCK",
+        "TIMEOUT",
+        "USER_CANCELLED",
+        "MAX_STEPS",
+        "TOOL_BUDGET_EXCEEDED",
+        "REPEATED_CALL",
+    }
+)
 
 
 @dataclass
@@ -107,24 +133,99 @@ def regression_ids(outcomes: list[CaseOutcome]) -> list[str]:
     return [o.case.id for o in outcomes if not o.passed]
 
 
+def _report_done(done: object) -> dict[str, str | None] | None:
+    """Persist only the approved stop reason, never arbitrary provider metadata."""
+    if done is None:
+        return None
+    if not isinstance(done, dict):
+        return {"stop_reason": None}
+    stop_reason = done.get("stop_reason")
+    if isinstance(stop_reason, str) and stop_reason in _REPORT_STOP_REASONS:
+        return {"stop_reason": stop_reason}
+    return {"stop_reason": "unrecognized" if stop_reason is not None else None}
+
+
+def _citation_anchor_hashes(citations: list[dict]) -> list[str]:
+    """Hash citation anchors so reports retain evidence identity without names or IDs."""
+    hashes: list[str] = []
+    for citation in citations:
+        anchor = {
+            "document": str(citation.get("document", "")),
+            "section": str(citation.get("section") or ""),
+            "chunk_id": str(citation.get("chunk_id") or ""),
+        }
+        encoded = json.dumps(
+            anchor, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+        hashes.append(hashlib.sha256(encoded).hexdigest())
+    return hashes
+
+
+def _contract_meta(cases: list[QaCase], cases_dir: Path, collected_path: Path) -> dict:
+    """仅输出版本、文件名和哈希，不复制来源路径、输入或收集内容。"""
+    categories = {case.category for case in cases}
+    files = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in sorted(cases_dir.glob("*.jsonl")) if path.stem in categories}
+    if {Path(name).stem for name in files} != categories:
+        raise ValueError("评估元数据缺少所选类别的用例文件")
+    baseline = json.loads(_BASELINE_MANIFEST.read_text(encoding="utf-8"))
+    selected = json.dumps(
+        [asdict(case) for case in sorted(cases, key=lambda case: case.id)],
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return {
+        "version": EVALUATION_CONTRACT_VERSION,
+        "judge_template": {
+            "name": JUDGE_TEMPLATE_PATH.name,
+            "sha256": hashlib.sha256(JUDGE_TEMPLATE_PATH.read_bytes()).hexdigest(),
+        },
+        "selected_cases_sha256": hashlib.sha256(selected.encode()).hexdigest(),
+        "case_files_sha256": files,
+        "baseline": {
+            "version": baseline["version"],
+            "case_files_sha256": {name: baseline["case_files_sha256"][name] for name in files},
+            "judge_template": {
+                "name": baseline["judge_template"]["name"],
+                "sha256": baseline["judge_template"]["sha256"],
+            },
+        },
+        "source_collection_sha256": hashlib.sha256(collected_path.read_bytes()).hexdigest(),
+    }
+
+
 def build_run_meta(
     *,
     model: str,
     seed: int,
+    judge_repeats: int = 5,
     base_url: str,
     mode: str,
     started_at: str,
     duration_s: float,
+    cases: list[QaCase] | None = None,
+    cases_dir: Path | None = None,
+    collected_path: Path | None = None,
 ) -> dict:
-    """报告元数据白名单——只留 model/seed/host，密钥与完整 URL 不进报告。"""
-    return {
+    """报告元数据白名单；正式 CLI 传入完整溯源参数，旧 helper 调用兼容。"""
+    supplied = (cases is not None, cases_dir is not None, collected_path is not None)
+    if any(supplied) and not all(supplied):
+        raise ValueError("评估溯源必须同时提供 cases/cases_dir/collected_path")
+    meta = {
         "model": model,
         "seed": seed,
-        "api_base_host": urlparse(base_url).netloc,
+        "judge_repeats": judge_repeats,
+        "judge_protocol": (
+            JUDGE_PROTOCOL_VERSION
+            if judge_repeats >= 5
+            else f"diagnostic-repeat-{judge_repeats}"
+        ),
         "mode": mode,
         "started_at": started_at,
         "duration_s": round(duration_s, 1),
     }
+    if cases is not None and cases_dir is not None and collected_path is not None:
+        meta["evaluation_contract"] = _contract_meta(cases, cases_dir, collected_path)
+    return meta
 
 
 def write_reports(
@@ -138,6 +239,15 @@ def write_reports(
     regression = regression_ids(outcomes)
     payload = {
         "meta": meta,
+        "privacy": {
+            "raw_answer_persisted": False,
+            "judge_reason_persisted": False,
+            "api_key_persisted": False,
+            "base_url_persisted": False,
+            "api_base_host_persisted": False,
+            "done_extra_metadata_persisted": False,
+            "citation_metadata_persisted": False,
+        },
         "lines": [asdict(line) for line in lines],
         "regression_ids": regression,
         "cases": [
@@ -146,14 +256,32 @@ def write_reports(
                 "category": o.case.category,
                 "passed": o.passed,
                 "deterministic_failures": list(o.det.failures),
-                "judge": asdict(o.verdict) if o.verdict else None,
+                "deterministic_pending_citations": o.det.pending_citations,
+                "judge": (
+                    {
+                        "score": o.verdict.score,
+                        "redline_hit": o.verdict.redline_hit,
+                        "response_kind": o.verdict.response_kind,
+                        "stable": o.verdict.stable,
+                        "attempts": o.verdict.attempts,
+                        "successful_attempts": o.verdict.successful_attempts,
+                    }
+                    if o.verdict
+                    else None
+                ),
                 "faithfulness": o.faithfulness,
                 "faithfulness_error": o.faithfulness_error,
-                "answer": o.turn.answer,
-                "citations": o.turn.citations,
-                "done": o.turn.done,
-                "error": o.turn.error,
-                "transport_error": o.turn.transport_error,
+                "answer_sha256": (
+                    hashlib.sha256(o.turn.answer.encode("utf-8")).hexdigest()
+                    if o.turn.answer
+                    else None
+                ),
+                "answer_chars": len(o.turn.answer),
+                "citation_count": len(o.turn.citations),
+                "citation_anchors_sha256": _citation_anchor_hashes(o.turn.citations),
+                "done": _report_done(o.turn.done),
+                "error": sanitize_turn_error(o.turn.error),
+                "transport_error": sanitize_transport_error(o.turn.transport_error),
                 "first_delta_ms": o.turn.first_delta_ms,
                 "latency_ms": o.turn.latency_ms,
             }
@@ -161,14 +289,36 @@ def write_reports(
         ],
     }
     json_path = out_dir / f"m4-ragas-{meta['mode']}-{stamp}.json"
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    md_path = out_dir / f"m4-ragas-{meta['mode']}-{stamp}.md"
+    if json_path.exists() or md_path.exists():
+        raise FileExistsError("评估报告已存在，拒绝覆盖")
+    with json_path.open("x", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
 
     md_lines = [
         "# M4 Ragas 评估摘要",
         "",
-        f"- 模式：{meta['mode']}；模型：{meta['model']}；seed：{meta['seed']}",
-        f"- 开始：{meta['started_at']}；耗时：{meta['duration_s']}s；API host：{meta['api_base_host']}",
+        f"- 模式：{meta['mode']}；模型：{meta['model']}；seed：{meta['seed']}；judge 重复：{meta['judge_repeats']}；协议：{meta['judge_protocol']}",
+        f"- 开始：{meta['started_at']}；耗时：{meta['duration_s']}s",
         "",
+    ]
+    contract = meta.get("evaluation_contract")
+    if contract is not None:
+        judge = contract["judge_template"]
+        md_lines += [
+            f"- 评估契约：{contract['version']}；judge：{judge['name']}（SHA-256 {judge['sha256']}）",
+            f"- 所选用例 SHA-256：{contract['selected_cases_sha256']}",
+            f"- 来源收集 SHA-256：{contract['source_collection_sha256']}",
+            "",
+            "| 用例文件 | v1 SHA-256 | 当前 SHA-256 |",
+            "|---|---|---|",
+        ]
+        md_lines += [
+            f"| {name} | {contract['baseline']['case_files_sha256'][name]} | {digest} |"
+            for name, digest in contract["case_files_sha256"].items()
+        ]
+        md_lines.append("")
+    md_lines += [
         "| 线 | 读数 | 阈值 | 达标 | 备注 |",
         "|---|---|---|---|---|",
     ]
@@ -183,6 +333,6 @@ def write_reports(
         )
     md_lines += ["", f"## 回归清单（{len(regression)} 条）", ""]
     md_lines += [f"- {cid}" for cid in regression] or ["（无失败样例）"]
-    md_path = out_dir / f"m4-ragas-{meta['mode']}-{stamp}.md"
-    md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    with md_path.open("x", encoding="utf-8") as stream:
+        stream.write("\n".join(md_lines) + "\n")
     return json_path, md_path
