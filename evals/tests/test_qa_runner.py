@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from campus_elf_evals.qa_runner import (
     _smoke_subset,
     collect_all,
     load_collected,
+    load_collected_snapshot,
     save_collected,
     score_all,
 )
@@ -121,6 +123,32 @@ def test_collected_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "sub" / "collected.json"
     save_collected(turns, path)
     assert load_collected(path) == turns
+
+
+def test_td369_source_hash_uses_loaded_snapshot_not_later_file(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    source = tmp_path / "collected.json"
+    save_collected(_complete_turns(cases), source)
+    snapshot_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    loaded, captured_hash = load_collected_snapshot(source)
+    assert set(loaded) == {case.id for case in cases}
+    assert captured_hash == snapshot_hash
+
+    source.write_text('{"kb_qa-001":{}}', encoding="utf-8")
+    meta = build_run_meta(
+        model="synthetic",
+        seed=42,
+        base_url="http://test.invalid",
+        mode="full",
+        started_at="2026-11-26T00:00:00Z",
+        duration_s=1,
+        cases=cases,
+        cases_dir=root / "cases",
+        collected_path=source,
+        source_collection_sha256=captured_hash,
+    )
+    assert meta["evaluation_contract"]["source_collection_sha256"] == snapshot_hash
 
 
 class _FakeCompletions:
@@ -327,6 +355,422 @@ async def test_td362_null_sse_error_event_still_fails_completed_turn() -> None:
     assert outcome.det.failures == ("turn_error:stream_error",)
     assert not outcome.passed
 
+
+def _complete_turns(cases: list[QaCase]) -> dict[str, TurnResult]:
+    return {
+        case.id: TurnResult(answer="合成回合", done={"stop_reason": "FINAL_ANSWER"})
+        for case in cases
+    }
+
+
+def test_td369_source_manifest_rejects_whole_category_loss() -> None:
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    shrunken = [case for case in cases if case.category != "cross_tenant"]
+    assert len(shrunken) == 175
+
+    with pytest.raises(ValueError, match="missing=20"):
+        qa_runner._validate_source_case_set(shrunken)
+
+
+def test_td369_source_manifest_rejects_category_mismatch() -> None:
+    from dataclasses import replace
+
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    index = next(i for i, case in enumerate(cases) if case.category == "cross_tenant")
+    cases[index] = replace(cases[index], category="kb_qa")
+
+    with pytest.raises(ValueError, match="逐条类别"):
+        qa_runner._validate_source_case_set(cases)
+
+
+def test_td369_source_manifest_rejects_balanced_category_swap() -> None:
+    from dataclasses import replace
+
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    cross_index = next(
+        i for i, case in enumerate(cases) if case.category == "cross_tenant"
+    )
+    kb_index = next(i for i, case in enumerate(cases) if case.category == "kb_qa")
+    cases[cross_index] = replace(cases[cross_index], category="kb_qa")
+    cases[kb_index] = replace(cases[kb_index], category="cross_tenant")
+
+    with pytest.raises(ValueError, match="逐条类别与基准 manifest 不一致：2 条"):
+        qa_runner._validate_source_case_set(cases)
+
+
+def test_td369_source_manifest_rejects_duplicate_case_ids() -> None:
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    cases.append(cases[0])
+
+    with pytest.raises(ValueError, match="duplicate=1"):
+        qa_runner._validate_source_case_set(cases)
+
+
+@pytest.mark.parametrize("bad_id", [123, ["unhashable"]])
+def test_td369_source_manifest_rejects_non_string_ids(bad_id: object) -> None:
+    from dataclasses import replace
+
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    cases[0] = replace(cases[0], id=bad_id)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="ID 必须是非空字符串"):
+        qa_runner._validate_source_case_set(cases)
+
+
+def test_td369_bounded_exception_summary_caps_full_length() -> None:
+    from campus_elf_evals import qa_runner
+
+    summary = qa_runner._bounded_exception_summary(
+        ValueError("first line\n" + "x" * 10_000), limit=80
+    )
+
+    assert len(summary) == 80
+    assert "\n" not in summary
+    assert summary.endswith(" ... (truncated)")
+
+
+def test_td369_full_and_smoke_expected_ids_must_match_exactly() -> None:
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    assert len(cases) == 195
+
+    qa_runner._validate_case_id_set(cases, _complete_turns(cases))
+
+    smoke = _smoke_subset(cases)
+    assert len(smoke) == 18
+    qa_runner._validate_case_id_set(smoke, _complete_turns(smoke))
+
+
+def test_td369_missing_and_extra_ids_are_rejected_without_shrinking_denominator() -> None:
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+
+    missing = _complete_turns(cases)
+    missing.pop(cases[0].id)
+    with pytest.raises(ValueError, match="missing=1"):
+        qa_runner._validate_case_id_set(cases, missing)
+
+    extra = _complete_turns(cases)
+    extra["unknown-case-999"] = TurnResult(answer="未知收集")
+    with pytest.raises(ValueError, match="extra=1"):
+        qa_runner._validate_case_id_set(cases, extra)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"kb_qa-001":{"answer":"a"},"kb_qa-001":{"answer":"b"}}',
+        '{"kb_qa-001":{"answer":"a","citations":[{"chunk_id":"a","chunk_id":"b"}]}}',
+    ],
+)
+def test_td369_collected_json_rejects_duplicate_keys_at_any_depth(
+    tmp_path: Path, payload: str
+) -> None:
+    source = tmp_path / "collected.json"
+    source.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="重复对象键"):
+        load_collected(source)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("answer", 123),
+        ("citations", "not-a-list"),
+        ("citations", ["not-an-object"]),
+        ("done", []),
+        ("error", []),
+        ("meta", []),
+        ("transport_error", 123),
+        ("first_delta_ms", True),
+        ("first_delta_ms", -1),
+        ("latency_ms", None),
+        ("latency_ms", True),
+        ("latency_ms", -1),
+        ("latency_ms", 1.5),
+    ],
+)
+def test_td369_collected_turn_fields_reject_invalid_runtime_types(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    payload = TurnResult(answer="ok").__dict__.copy()
+    payload[field] = value
+    source = tmp_path / "collected.json"
+    source.write_text(json.dumps({"kb_qa-001": payload}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=field):
+        load_collected(source)
+
+
+def test_td369_collected_turn_requires_latency_ms(tmp_path: Path) -> None:
+    payload = TurnResult(answer="ok").__dict__.copy()
+    payload.pop("latency_ms")
+    source = tmp_path / "collected.json"
+    source.write_text(json.dumps({"kb_qa-001": payload}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="latency_ms"):
+        load_collected(source)
+
+
+@pytest.mark.parametrize("payload", ["[]", "{}"])
+def test_td369_collected_json_requires_non_empty_object_root(
+    tmp_path: Path, payload: str
+) -> None:
+    source = tmp_path / "collected.json"
+    source.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="根必须是非空对象"):
+        load_collected(source)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_kind",
+    [
+        "balanced_category_swap",
+        "missing",
+        "extra",
+        "duplicate",
+        "bad_type",
+        "latency_none",
+        "latency_missing",
+        "latency_bad",
+    ],
+)
+async def test_td369_invalid_score_only_fails_before_judge_or_reports(
+    tmp_path: Path, monkeypatch, capsys, input_kind: str
+) -> None:
+    from argparse import Namespace
+
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    if input_kind == "balanced_category_swap":
+        from dataclasses import replace
+
+        cross_index = next(
+            i for i, case in enumerate(cases) if case.category == "cross_tenant"
+        )
+        kb_index = next(i for i, case in enumerate(cases) if case.category == "kb_qa")
+        cases[cross_index] = replace(cases[cross_index], category="kb_qa")
+        cases[kb_index] = replace(cases[kb_index], category="cross_tenant")
+        monkeypatch.setattr(qa_runner, "load_cases", lambda path: cases)
+    turns = _complete_turns(cases)
+    source = tmp_path / "collected.json"
+
+    if input_kind == "duplicate":
+        first = next(iter(turns.items()))
+        item = json.dumps(first[0], ensure_ascii=False) + ":" + json.dumps(
+            first[1].__dict__, ensure_ascii=False
+        )
+        source.write_text("{" + item + "," + item + "}", encoding="utf-8")
+    else:
+        if input_kind == "missing":
+            turns.pop(cases[0].id)
+        elif input_kind == "extra":
+            turns["unknown-case-999"] = TurnResult(answer="未知收集")
+        elif input_kind == "latency_none":
+            turns[cases[0].id].latency_ms = None  # type: ignore[assignment]
+        elif input_kind == "latency_missing":
+            payload = turns[cases[0].id].__dict__.copy()
+            payload.pop("latency_ms")
+            save_collected(turns, source)
+            raw = json.loads(source.read_text(encoding="utf-8"))
+            raw[cases[0].id] = payload
+            source.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+            turns = {}
+        elif input_kind == "latency_bad":
+            turns[cases[0].id].latency_ms = -1
+        elif input_kind == "bad_type":
+            turns[cases[0].id].answer = 123  # type: ignore[assignment]
+        if input_kind != "latency_missing":
+            save_collected(turns, source)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("非法收集不得读取评分配置、创建 judge 或写报告")
+
+    monkeypatch.setattr(qa_runner, "load_temp_model_settings", forbidden)
+    monkeypatch.setattr(qa_runner, "RotatingAsyncOpenAI", forbidden)
+    monkeypatch.setattr(qa_runner, "score_all", forbidden)
+    monkeypatch.setattr(qa_runner, "write_reports", forbidden)
+    monkeypatch.setattr(qa_runner.httpx, "AsyncClient", forbidden)
+
+    reports = tmp_path / "reports"
+    args = Namespace(
+        full=True,
+        score_only=True,
+        collected=str(source),
+        accounts_file=str(tmp_path / "must-not-be-read.json"),
+        base_url="http://backend.invalid",
+        reports_dir=str(reports),
+        no_faithfulness=False,
+        seed=42,
+        judge_repeats=5,
+    )
+    assert await qa_runner._run(args) == 1
+    assert not reports.exists()
+    assert "输入无效" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_td369_score_only_rejects_manifest_shrink_before_judge(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from argparse import Namespace
+
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    all_cases = load_cases(root / "cases")
+    cases = [case for case in all_cases if case.category != "cross_tenant"]
+    source = tmp_path / "collected.json"
+    save_collected(_complete_turns(cases), source)
+
+    monkeypatch.setattr(qa_runner, "load_cases", lambda path: cases)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("源用例缩集合不得读取账户、创建 judge 或写报告")
+
+    monkeypatch.setattr(qa_runner, "load_temp_model_settings", forbidden)
+    monkeypatch.setattr(qa_runner, "RotatingAsyncOpenAI", forbidden)
+    monkeypatch.setattr(qa_runner, "write_reports", forbidden)
+
+    reports = tmp_path / "reports"
+    args = Namespace(
+        full=True,
+        score_only=True,
+        collected=str(source),
+        accounts_file=str(tmp_path / "must-not-be-read.json"),
+        base_url="http://backend.invalid",
+        reports_dir=str(reports),
+        no_faithfulness=True,
+        seed=42,
+        judge_repeats=5,
+    )
+    assert await qa_runner._run(args) == 1
+    assert not reports.exists()
+    error = capsys.readouterr().err
+    assert "源用例输入无效" in error
+    assert "missing=20" in error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [("extra", "extra=1"), ("duplicate", "duplicate=1")],
+)
+async def test_td369_source_cli_emits_bounded_manifest_diagnostic(
+    tmp_path: Path, monkeypatch, capsys, mutation: str, expected: str
+) -> None:
+    from argparse import Namespace
+
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    if mutation == "extra":
+        cases.append(_case("unknown-case-999"))
+    else:
+        cases.append(cases[0])
+    monkeypatch.setattr(qa_runner, "load_cases", lambda path: cases)
+
+    args = Namespace(
+        full=True,
+        score_only=True,
+        collected=None,
+        accounts_file=str(tmp_path / "must-not-be-read.json"),
+        base_url="http://backend.invalid",
+        reports_dir=str(tmp_path / "reports"),
+        no_faithfulness=False,
+        seed=42,
+        judge_repeats=5,
+    )
+    assert await qa_runner._run(args) == 1
+    error = capsys.readouterr().err
+    assert "源用例输入无效" in error
+    assert expected in error
+
+
+@pytest.mark.asyncio
+async def test_td369_collect_only_rejects_incomplete_collection_before_save(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from campus_elf_evals import qa_runner
+
+    root = Path(__file__).resolve().parents[1]
+    cases = load_cases(root / "cases")
+    accounts = tmp_path / "accounts.json"
+    accounts.write_text(json.dumps({"campus_chat": {}, "kb_publisher": {}}), encoding="utf-8")
+    reports = tmp_path / "reports"
+
+    monkeypatch.setattr(qa_runner, "split_sample_kb", lambda text: [])
+    monkeypatch.setattr(qa_runner, "seed_kb", lambda *args, **kwargs: _async_value([]))
+    monkeypatch.setattr(
+        qa_runner,
+        "TokenRefresher",
+        lambda *args, **kwargs: SimpleNamespace(get=lambda: _async_value("token")),
+    )
+    collected_calls: list[int] = []
+
+    async def fake_collect(*args, **kwargs):
+        collected_calls.append(1)
+        return _complete_turns(cases[1:])
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("采集不完整时不得保存 collected、读取评分配置或写报告")
+
+    monkeypatch.setattr(qa_runner, "collect_all", fake_collect)
+    monkeypatch.setattr(qa_runner, "save_collected", forbidden)
+    monkeypatch.setattr(qa_runner, "load_temp_model_settings", forbidden)
+    monkeypatch.setattr(qa_runner, "write_reports", forbidden)
+
+    args = Namespace(
+        full=True,
+        score_only=False,
+        collect_only=True,
+        collected=None,
+        accounts_file=str(accounts),
+        base_url="http://backend.invalid",
+        reports_dir=str(reports),
+        no_faithfulness=True,
+        seed=42,
+        judge_repeats=5,
+        concurrency=1,
+    )
+    assert await qa_runner._run(args) == 1
+    assert not reports.exists()
+    assert collected_calls == [1]
+    error = capsys.readouterr().err
+    assert "收集输入无效" in error
+    assert "missing=1" in error
+
+
+async def _async_value(value):
+    return value
 
 @pytest.mark.asyncio
 async def test_formal_gate_rejects_fewer_than_five_judge_repeats(monkeypatch, capsys) -> None:

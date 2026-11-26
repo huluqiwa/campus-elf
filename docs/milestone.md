@@ -330,12 +330,12 @@ C 端可用：学校知识库问答、流式输出、引用、思考摘要、反
 
 **M4 A12 收口（2026-11-25 用户已确认 D1–D3；2026-11-26 严格重复 judge 已实现且真实验证未通过）**：安全与评分可信度优先于 Langfuse，逐点独立简报/PR。总简报 `docs/design-briefs/M4-A12-safety-triage.md`（TRI-A1–A6），裁定表 `docs/evals/M4-A12-safety-triage-2026-11-25.md`；TD-362 的 `strict-repeat-v1` 只是失败门禁，不改阈值或历史分数。
 
-- M4-A12-EVAL / TD-362：通用名词断言、内部术语必答、直接拒绝引用/可选预约口径；D2/D3 已确认。细化简报 `docs/design-briefs/M4-A12-EVAL.md`、稳定协议简报 `docs/design-briefs/M4-A12-JUDGE-STABILITY.md`，EVAL-A1–A8。2026-11-26 离线实现并新增 `strict-repeat-v1`（5 轮一致才稳定、最低分、红线并集、错误/冲突即失败）；受影响 141 tests、ruff、227 条完整性绿。最终临时模型 A8：31 条最多 155 次、实际 152 次，20/31 稳定，16 条合成对照 12/16；报告 SHA-256 `974410e2c577fca29f9104d8cb36b525b5c6279f778383f1cbbb44269a399fce`。最终代码复审 0B/0M/1m 并已修复，实现提交 `471f01f`、草稿 PR #106，远端 evals/security CI 全绿；EVAL-A8 和 TD-362 不验收、PR 不合并，外部 key 轮换闭环后进入 TD-369。
+- M4-A12-EVAL / TD-362：通用名词断言、内部术语必答、直接拒绝引用/可选预约口径；D2/D3 已确认。细化简报 `docs/design-briefs/M4-A12-EVAL.md`、稳定协议简报 `docs/design-briefs/M4-A12-JUDGE-STABILITY.md`，EVAL-A1–A8。2026-11-26 离线实现并新增 `strict-repeat-v1`（5 轮一致才稳定、最低分、红线并集、错误/冲突即失败）；受影响 141 tests、ruff、227 条完整性绿。最终临时模型 A8：31 条最多 155 次、实际 152 次，20/31 稳定，16 条合成对照 12/16；报告 SHA-256 `974410e2c577fca29f9104d8cb36b525b5c6279f778383f1cbbb44269a399fce`。最终代码复审 0B/0M/1m 并已修复，实现提交 `471f01f`，PR #106 已合并为 `799e58f`，PR 与 main push 的 evals/security CI 全绿；EVAL-A8 和 TD-362 仍不验收，key 供应商侧撤销记录保持开放。
 - M4-A12-CT / TD-361：首个 backend 跨租策略点，CT-A1–A8（不确认存在性、受信上下文、真实双租户、事件落库、混合合法意图）。
 - M4-A12-SC / TD-363：敏感内容分类/拒绝与合规支持，SC-A1/SC-A2；M4-A12-PI / TD-364：注入触发/来源复现与合法审批引导，PI-A1/PI-A2；各自独立点。
 - M4-A12-JUDGE / TD-365：46 条 faithfulness 有效评分完整性，9 条未评的有界诊断/恢复；不把缺失当作通过。
 - M4-A12-FALLBACK / TD-366、M4-A12-MULTI / TD-367、M4-A12-REFUSAL / TD-368：分别按 AI-08、AI-01c/AI-08、AI-04/AI-08 及 A12 原类别门槛验收，逐点设计；TD-353 保留为有证据拒答的独立修复点。
-- M4-A12-INPUT / TD-369：score-only 收集 ID 完整性自动门禁，独立 evals 点；缺失/重复/额外 ID 不得静默缩小分母，M4 最终 full 重评前完成；本地临时核对不能作为已修复证据。
+- M4-A12-INPUT / TD-369：score-only 收集 ID 完整性自动门禁，独立 evals 点；发布简报 `docs/design-briefs/M4-A12-INPUT.md`，采用源 manifest 精确 ID/逐 ID 类别与重复 ID + collected full/smoke 双向集合 + 严格 JSON/字段类型 + 快照哈希。首轮 0B/2M/2m、第二轮 0B/2M/0m 与第三轮 0B/1M/2m 均已修复，当前四文件 103 passed、evals 全套 199 passed、ruff/mypy/bandit、227 条完整性绿；第四轮复审 0B/0M/1m PASS、Minor 已修；实现提交 `8d5e1c2`、PR #107，evals run `45802814061` 与 security run `45802814089` 绿；最终文档状态提交与合并待完成。
   - M4-A12-EVAL / TD-370：临时供应商额度错误契约复核；非标准状态/结构/关键词错误不得静默继续消耗或误判，下次切换供应商或 full195 前完成。
 - 最终产品验证：受影响类别重收、安全 60 条回归、full195 重收重评；Langfuse 仍独立简报，M4 边界评审复核全部质量/安全/性能门槛与台账。TD-294b 的真实语料批次仍为 M6/运营。
 
