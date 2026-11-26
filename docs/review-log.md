@@ -24,7 +24,19 @@
 - **复测**：六个受影响测试文件 **141 passed**；evals ruff 全绿；用例完整性 **227 条**通过；`git diff --check` 与 `git diff --cached --check` 通过。EVAL-A8 真实结果保持 20/31 稳定、合成对照 12/16，不因测试修复改判。
 - **最终代码复审（2026-11-26）**：**0 Blocker / 0 Major / 1 Minor，PASS**。Minor 为 `done_metadata_persisted=False` 与白名单 `stop_reason` 的字面歧义，以及 `_report_done` 非法/缺失/未知分支缺少报告回归；已改名为 `done_extra_metadata_persisted` 并补齐四类分支测试，复测六文件 **141 passed**、ruff 与 227 条完整性通过。
 - **整体交付结论：FAIL。** key 槽位 3 的供应商侧撤销/轮换仍未完成，属于未闭环外部 Major；EVAL-A8 仍为 20/31 稳定、合成对照 12/16，TD-362 不验收。
-- **交付状态回填（2026-11-26，机械状态）**：用户回复“按你说的办”后，按已审查的显式文件集提交 `471f01f`、推送 `feature/td-362-a12-eval` 并创建草稿 PR #106；远端 evals/security CI 全绿。PR 明确保留 EVAL-A8 与供应商侧 key 轮换两项未完成，未合并 main；CI 绿只证明代码门禁，不改变整体 FAIL。
+- **交付状态回填（2026-11-26，机械状态）**：用户回复“按你说的办”后，按已审查的显式文件集提交 `471f01f`、推送 `feature/td-362-a12-eval` 并创建草稿 PR #106；远端 evals/security CI 全绿。PR 明确保留 EVAL-A8 与供应商侧 key 轮换两项未完成；随后按用户“临时额度已耗尽、继续操作”的指令将 PR 作为失败安全门禁合并，合并提交为 `799e58f`，PR 与 main push 的 evals/security CI 全绿。CI 绿只证明代码门禁，不改变 TD-362 整体 FAIL；供应商侧撤销记录仍开放。
+### M4-A12-INPUT / TD-369 收集输入完整性（四轮复审 0B/0M/1m，PASS；Minor 已修）
+
+- 日期：2026-11-26；分支 `feature/td-369-a12-input`，基线 `799e58f`。范围：`docs/design-briefs/M4-A12-INPUT.md`、`qa_runner.py`、`test_qa_runner.py`、`qa_report.py`。
+- **首轮独立审查：0 Blocker / 2 Major / 2 Minor，FAIL。** Major：只按当前 `load_cases` 集合比较仍可在整类文件缺失时把 195 缩成 175；`TurnResult` 未校验字段运行时类型，错误类型可进入 judge。Minor：collected 校验后报告阶段重读文件形成哈希窗口；实现状态未回写。
+- **首轮修复：** 源 cases 必须精确匹配仓库 manifest 的 195 ID；collected full/smoke 双向精确集合；JSON 任意层级重复键、非空对象根、answer/citations/done/error/meta/transport_error/时延字段类型显式校验；非法输入在账户、HTTP、judge、Ragas 和报告前返回 1；报告使用 `load_collected_snapshot` / `save_collected` 返回的同一次 SHA-256。
+- **第二轮独立审查：0 Blocker / 2 Major / 0 Minor，FAIL。** Major：类别只比较汇总数量，等量互换 `cross_tenant` 与 `kb_qa` 可绕过；`latency_ms=None` 与可选 `first_delta_ms` 共用规则后被接受并进入评分链。
+- **第二轮修复：** manifest ID 逐条映射到 ID 前缀类别并拒绝重复 ID；`first_delta_ms` 允许非负整数/null，`latency_ms` 必须存在且为非负整数；新增平衡互换、重复 ID、latency null/缺失/负值及非法 score-only 零账户/HTTP/judge/score/report 回归。首轮新增的整类丢失、类别重分配、full/smoke 缺失/额外、顶层/嵌套重复键、错误根、字段类型、collect-only 不保存坏集合、快照哈希不随文件后改仍保留。
+- **第三轮独立审查：0 Blocker / 1 Major / 2 Minor，FAIL。** Major：collect-only 回归只给 2 条源用例，在 manifest 校验阶段即退出，未触达采集后 ID 校验和保存门禁。Minor：非字符串源案例 ID 产生未封装 TypeError；CLI 只显示 `ValueError`，丢失 missing/extra/duplicate 的有界诊断。
+- **第三轮修复：** 回归改用真实 195 条源案例，桩化 seed/auth/collect 返回 194 条，断言采集确实执行、采集后门禁返回 1、`save_collected`/评分配置/报告均未调用；源 ID 在集合构造前校验为非空字符串；CLI 输出单行、完整摘要总长上限 500 字符的安全摘要，并补 missing/extra/duplicate 断言。
+- **第四轮独立审查：0 Blocker / 0 Major / 1 Minor，PASS。** 上一轮 Major 与两个 Minor 均已关闭。Minor：设计简报存在格式问题，“500 字符”未计追加后缀。
+- **Minor 修复与复测：** 修正简报格式；异常摘要改为正文加后缀总长不超过 500，并新增边界测试；四文件 **103 passed**、evals 全套 **199 passed**、ruff/mypy/bandit、227 条完整性、diff check 通过。
+
 
 | 功能点 | 日期 | commit/diff | 审查人/agent | Blocker | Major | Minor | 修复/复测 | 结论 |
 |---|---|---|---|---|---|---|---|---|

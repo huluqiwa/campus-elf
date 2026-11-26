@@ -161,7 +161,12 @@ def _citation_anchor_hashes(citations: list[dict]) -> list[str]:
     return hashes
 
 
-def _contract_meta(cases: list[QaCase], cases_dir: Path, collected_path: Path) -> dict:
+def _contract_meta(
+    cases: list[QaCase],
+    cases_dir: Path,
+    collected_path: Path,
+    source_collection_sha256: str | None = None,
+) -> dict:
     """仅输出版本、文件名和哈希，不复制来源路径、输入或收集内容。"""
     categories = {case.category for case in cases}
     files = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
@@ -189,7 +194,11 @@ def _contract_meta(cases: list[QaCase], cases_dir: Path, collected_path: Path) -
                 "sha256": baseline["judge_template"]["sha256"],
             },
         },
-        "source_collection_sha256": hashlib.sha256(collected_path.read_bytes()).hexdigest(),
+        "source_collection_sha256": (
+            source_collection_sha256
+            if source_collection_sha256 is not None
+            else hashlib.sha256(collected_path.read_bytes()).hexdigest()
+        ),
     }
 
 
@@ -205,6 +214,7 @@ def build_run_meta(
     cases: list[QaCase] | None = None,
     cases_dir: Path | None = None,
     collected_path: Path | None = None,
+    source_collection_sha256: str | None = None,
 ) -> dict:
     """报告元数据白名单；正式 CLI 传入完整溯源参数，旧 helper 调用兼容。"""
     supplied = (cases is not None, cases_dir is not None, collected_path is not None)
@@ -224,7 +234,12 @@ def build_run_meta(
         "duration_s": round(duration_s, 1),
     }
     if cases is not None and cases_dir is not None and collected_path is not None:
-        meta["evaluation_contract"] = _contract_meta(cases, cases_dir, collected_path)
+        meta["evaluation_contract"] = _contract_meta(
+            cases,
+            cases_dir,
+            collected_path,
+            source_collection_sha256=source_collection_sha256,
+        )
     return meta
 
 
