@@ -3,10 +3,10 @@
 | 项 | 内容 |
 |---|---|
 | 日期 / ID | 2026-11-26 / M4-A12-INPUT / TD-369 |
-| 当前阶段 | 精确集合门禁已实现；首轮 0B/2M/2m、第二轮 0B/2M/0m 与第三轮 0B/1M/2m 均已修复，当前四文件 103 passed、evals 全套 199 passed / ruff/mypy/bandit / 227 条完整性绿；第四轮复审 0B/0M/1m PASS、Minor 已修；实现提交 `8d5e1c2`，PR #107；evals run `45802814061` 与 security run `45802814089` 均成功 |
+| 当前阶段 | 精确集合门禁已实现；首轮 0B/2M/2m、第二轮 0B/2M/0m 与第三轮 0B/1M/2m 均已修复，当前四文件 103 passed、evals 全套 199 passed / ruff/mypy/bandit / 227 条完整性绿；第四轮复审 0B/0M/1m PASS、Minor 已修；实现提交 `8d5e1c2`，PR #107 已 squash 合并为 `48d6cf0`；PR final-head 与 main push 的 evals/security CI 全绿 |
 | 授权依据 | 用户确认按既定 TD-369 方案继续，并明确临时额度风险不再阻塞后续开发；本点仍按独立分支/PR、测试、独立审查与 CI 门禁交付 |
 | 上游 | requirements A12；spec AI-08/AI-09；milestone §7.2；test-plan §6.2；`docs/design-briefs/M4-A12-EVAL.md`；`docs/tech-debt.md` TD-369 |
-| Git 基线 | `feature/td-369-a12-input` 从 TD-362 合并后的 `799e58f` 分出；当前改动未 commit/push |
+| Git 基线 | 从 TD-362 合并后的 `799e58f` 分出 `feature/td-369-a12-input`；实现提交 `8d5e1c2` 已 squash 合并为 `48d6cf0`，原分支已删除 |
 | 本点非目标 | 不改 A12 五线阈值/分母、不修 judge 语义稳定性、不重评产品答案、不实现 backend 或 Langfuse 功能 |
 
 ## 1. 目标与验收
@@ -113,4 +113,4 @@
 
 - 受影响四文件 `test_qa_runner` / `test_qa_collect` / `test_qa_report` / `test_qa_cases`：**103 passed**；evals 全套 **199 passed**。
 - evals `ruff check .` 全绿；改动生产文件 `qa_runner.py` 经隔离 mypy 冷跑无错误、bandit 无发现；`check_eval_cases.py` 核对 **227 条**（195 QA + 32 chunk_grid）通过；`git diff --check` 通过。
-- 第四轮独立复审已 PASS；实现提交 `8d5e1c2`，PR #107 的 evals run `45802814061`（199 passed、227 条完整性）与 security run `45802814089` 均成功。最终文档状态提交与合并完成后 TD-369 才可交付。
+- 第四轮独立复审已 PASS；实现提交 `8d5e1c2`，PR #107 squash 合并为 `48d6cf0`。PR final-head evals run `45803145499` / security run `45803145507` 与 main push evals run `45803368154` / security run `45803368297` 全绿，TD-369 已交付。
