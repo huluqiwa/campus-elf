@@ -25,7 +25,6 @@ from app.db.models.ai import Conversation
 from app.db.repository import ScopeBypass, TenantScopedRepository
 from app.db.session import db_session, dispose_engine
 from app.harness.chat_assembly import build_chat_loop
-from app.harness.llm import LlmResponse
 from app.harness.persistence import get_recent_messages, save_message
 from app.harness.trace_db import DbTraceSink
 from app.main import create_app
@@ -38,7 +37,7 @@ from tests.support.db import (
     upgrade_test_database,
 )
 from tests.support.dsn import assert_test_database_dsn
-from tests.support.llm import FakeLlm
+from tests.support.llm import AllowRouteFakeLlm
 
 pytestmark = [pytest.mark.integration]
 
@@ -104,29 +103,18 @@ async def conv_env(db_env: None) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 async def turn_env(db_env: None) -> AsyncIterator[tuple[AsyncClient, UUID, UUID]]:
-    """带 FakeLlm + DbTraceSink 的应用客户端（回合落库弧专用）。
+    """带合法 route_v3 FakeLlm + DbTraceSink 的应用客户端（回合落库弧专用）。
 
     无已发布知识库 → 检索在活跃版本发现即短路为空 → CAPABILITY_FALLBACK 兜底弧
     （确定性，不依赖 TEI/Qdrant 行为）。
     """
 
     tenant_id, user_id = await _identity()
-    fake = FakeLlm(
-        complete_scripts=[_route_response(), _route_response()], stream_scripts=[],
-    )
+    fake = AllowRouteFakeLlm()
     loop = build_chat_loop(get_settings(), trace_sink=DbTraceSink(), llm_port=fake)
     transport = ASGITransport(app=create_app(chat_loop=loop))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, tenant_id, user_id
-
-
-def _route_response() -> LlmResponse:
-    """路由脚本：kb_qa 意图（无已发布版本 → 检索空 → CAPABILITY_FALLBACK）。"""
-
-    return LlmResponse(
-        text=json.dumps({"intents": [{"name": "kb_qa", "query": "测试问题"}]}),
-        finish_reason="stop",
-    )
 
 
 async def _identity() -> tuple[UUID, UUID]:

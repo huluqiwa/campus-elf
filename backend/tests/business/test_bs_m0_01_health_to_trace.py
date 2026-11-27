@@ -41,6 +41,7 @@ from tests.support.db import (
 )
 from tests.support.dsn import assert_disposable_redis_dsn, assert_test_database_dsn
 from tests.support.fakes import FAKE_AUDIT_SECRET
+from tests.support.llm import AllowRouteFakeLlm
 
 pytestmark = [pytest.mark.business, pytest.mark.integration]
 
@@ -126,7 +127,7 @@ async def student(
     finally:
         await admin_engine.dispose()
 
-    transport = ASGITransport(app=create_app(trace_sink=sink))
+    transport = ASGITransport(app=create_app(trace_sink=sink, llm_port=AllowRouteFakeLlm()))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, tenant_id, user_id
 

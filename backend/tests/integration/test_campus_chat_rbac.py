@@ -36,6 +36,7 @@ from tests.support.db import (
     upgrade_test_database,
 )
 from tests.support.dsn import assert_test_database_dsn
+from tests.support.llm import AllowRouteFakeLlm
 from tests.support.metrics import counter_value
 
 pytestmark = [pytest.mark.integration]
@@ -105,7 +106,7 @@ async def chat_env(
     await revocation.reset_client()
 
     sink = InMemoryTraceSink()
-    transport = ASGITransport(app=create_app(trace_sink=sink))
+    transport = ASGITransport(app=create_app(trace_sink=sink, llm_port=AllowRouteFakeLlm()))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, sink
 
@@ -286,7 +287,7 @@ async def test_other_tenant_identity_is_not_leaked_into_trace(
         client, school_code=OTHER_SCHOOL_CODE, login_id="S-2001", password=TENANT_PASSWORD
     )
 
-    response = await client.post(ENDPOINT, json={"message": "跨租身份检查"}, headers=login)
+    response = await client.post(ENDPOINT, json={"message": "图书馆几点开门"}, headers=login)
 
     assert response.status_code == 200, response.text
     record = sink.turns[-1]

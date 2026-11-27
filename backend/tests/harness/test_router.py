@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from app.harness.llm import LlmError, LlmErrorCode, LlmResponse
 from app.harness.prompt_loading import build_default_registry
 from app.harness.router import PROMPT_VERSION, LlmRouter, ScopeDecision
-from tests.support.llm import FakeLlm
+from tests.support.llm import AllowRouteFakeLlm, FakeLlm
 
 
 def _response(payload: dict[str, Any]) -> LlmResponse:
@@ -31,6 +33,19 @@ def test_route_v3_is_current_and_older_versions_stay_registered() -> None:
     for version in ("v1", "v2", "v3"):
         assert registry.get("route", version).version == version
 
+
+async def test_allow_route_fake_rejects_older_prompt_versions() -> None:
+    """业务链路专用假路由必须拒绝 route_v2，避免测试静默接受错误版本。"""
+
+    fake = AllowRouteFakeLlm()
+    router = LlmRouter(
+        llm_port=fake,
+        prompt_registry=build_default_registry(),
+        prompt_version="v2",
+    )
+
+    with pytest.raises(RuntimeError, match="route_v3"):
+        await router.route("本校校历怎么查")
 
 async def test_route_v3_allow_carries_scope_and_intents() -> None:
     router, fake = router_with(

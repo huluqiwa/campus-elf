@@ -227,6 +227,9 @@
 - **v3 最终验收复审（0 Blocker / 1 Major / 0 Minor，已修复；窄范围独立复核 0B/0M PASS）**：Major：引述内跨租指令先由 `classify_tenant_scope()` 标为 `redact`，随后 `scope_plan = semantic_plan` 丢掉规则码，成功回答最终仍把未经替换的原文保存为 completed。修复为在覆盖前冻结不可变 `quote_redacted` 标志，成功与失败路径的上下文资格都同时检查该标志；user/assistant 均保存 partial，普通历史可见、`get_context_messages()` 为空。新增内存成功回答回归，并把真实 PostgreSQL 用例扩展为 guard/trace/状态/历史/上下文完整断言。
 - **v3 修复后最终本地门禁**：完整 `tests/harness` **306 passed**；真实 PG/Qdrant/SSE 目标批次 **47 passed / 9 skipped（302.46 秒）**；租户范围数据库专项 **13 passed（178.53 秒）**；临时模型校准 **87/87 matched / 0 fragment failures**（早拒 27、模型 53、本地 7）；Ruff、Mypy（`app tests` 340 + `scripts` 3）、Bandit、Alembic check 与 diff check 全绿。
 - **v3 最后一次窄范围独立复核**：确认 `quote_redacted` 在 semantic plan 覆盖前冻结，成功/失败路径的上下文资格均受该标志约束；内存与真实 PostgreSQL 回归证明引述净化回合只作普通历史、不进入模型上下文。结论 **0 Blocker / 0 Major，PASS**。
+- **final-head CI 测试夹具处置（2026-11-28）**：backend run `46055521721` 为 **5 failed / 1524 passed / 19 skipped**。其中会话落库/RBAC/M0 业务场景仍使用 v3 前的 intent-only 假路由，被严格 v3 正确判为 `LLM_ROUTER_UNAVAILABLE`；另一租户 trace 用例的旧输入“跨租身份检查”被身份声称护栏早拒，因而没有 trace。仅改测试层：新增 `AllowRouteFakeLlm`，从 Git 版本化 v3 prompt 提取用户原文并返回合法 allow；router 契约测试继续使用可逐条控制响应的 `FakeLlm`。RBAC 用例改回中性本校问题“图书馆几点开门”，继续只验证认证主体到 trace 的租户/用户绑定；外校/身份拦截由既有独立用例覆盖。生产 v3 解析、fail-closed 与数据面边界未改。
+- **测试夹具独立窄范围复审（2026-11-28）**：首轮 **0 Blocker / 0 Major / 1 Minor**。Minor 为 `AllowRouteFakeLlm` 只检查旧/新 prompt 共有的消息 marker，误接 route_v2 时也可能通过；已改为校验 v3 独有的首行标志，并新增 `route_v2` 必须拒绝的 harness 回归。修复后无新增 Blocker/Major，依赖既有“Minor 不触发复审”门禁。
+- **夹具修复后复测**：三条受影响文件 **18 passed / 1 warning（64.46 秒）**；完整 `tests/harness` **307 passed**；Ruff、Mypy（`app tests` 340 文件）、Bandit（app）、测试库 Alembic check（No new upgrade operations detected）与 diff check 全绿。未重算 A12 分母、门槛、历史分数或评估语料，M4 仍未退出。
 
 
 ## 记录模板

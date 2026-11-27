@@ -4,6 +4,7 @@
 上一条脚本）。请求逐条记录供断言。
 """
 
+import json
 from collections.abc import AsyncIterator, Sequence
 
 from app.harness.llm import LlmRequest, LlmResponse, LlmStreamEvent
@@ -77,3 +78,44 @@ class FakeLlm:
             if isinstance(item, Exception):
                 raise item
             yield item
+
+
+_ROUTE_V3_PROMPT_MARKER = "你是「校园陪伴精灵」的租户范围语义路由器。"
+_ROUTE_MESSAGE_MARKER = "用户消息：\n"
+
+
+def route_v3_allow_response(message: str) -> LlmResponse:
+    """为一条原文消息构造合法的 route_v3 放行响应。"""
+
+    return LlmResponse(
+        text=json.dumps(
+            {
+                "scope": "allow",
+                "blocked_count": 0,
+                "safe_fragments": [],
+                "intents": [
+                    {"name": "kb_qa", "query": message, "confidence": 0.9}
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        finish_reason="stop",
+    )
+
+
+class AllowRouteFakeLlm(FakeLlm):
+    """从 Git 版本化 route_v3 prompt 提取用户原文并返回合法放行结论。
+
+    只用于不验证路由器本身的业务链路测试；router 契约的严格失败路径由
+    ``tests/harness/test_router.py`` 使用脚本化 FakeLlm 单独覆盖。
+    """
+
+    async def complete(self, request: LlmRequest) -> LlmResponse:
+        self.requests.append(request)
+        prompt = request.messages[-1].content
+        if prompt.count(_ROUTE_V3_PROMPT_MARKER) != 1:
+            raise RuntimeError("AllowRouteFakeLlm 只接受 route_v3 prompt")
+        message = prompt.rsplit(_ROUTE_MESSAGE_MARKER, 1)[1].strip()
+        if not message:
+            raise RuntimeError("route_v3 prompt 缺少用户消息")
+        return route_v3_allow_response(message)
