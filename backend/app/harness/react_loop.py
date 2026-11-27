@@ -76,8 +76,11 @@ LLM_UNCONFIGURED_TEXT = "AI 回答能力尚未配置，请联系管理员。"
 def _intents_block(route: RouterOutcome) -> str:
     """路由意图 → 模板块（逐意图子问题清单）。"""
 
+    route_result = route.route
+    if route_result is None:
+        return ""
     lines = []
-    for index, intent in enumerate(route.route.intents, start=1):
+    for index, intent in enumerate(route_result.intents, start=1):
         query = intent.args.get("query") if isinstance(intent.args, dict) else None
         lines.append(f"{index}. [{intent.name}] {query or ''}")
     return "\n".join(lines)
@@ -150,6 +153,9 @@ class ReactLoop:
             skip_route_stage: True = orchestrator 已发 meta/step(route)（本 loop 跳过）。
         """
 
+        route_result = route.route
+        if route_result is None:
+            raise ValueError("ReAct 需要非空路由结果")
         resolved_trace = trace_id if trace_id is not None else uuid4().hex
         conversation = conversation_id if conversation_id is not None else uuid4()
         started = time.perf_counter()
@@ -204,7 +210,7 @@ class ReactLoop:
                     user_id=user_id,
                     conversation_id=conversation,
                     turn_id=turn_id,
-                    intents=[intent.name for intent in route.route.intents],
+                    intents=[intent.name for intent in route_result.intents],
                     route_path="react",
                     provider=self._llm_port.provider_name if self._llm_port else "",
                     model=self._llm_port.model_name if self._llm_port else "",
@@ -274,7 +280,7 @@ class ReactLoop:
                 yield event(
                     AgentEventType.STEP, {"stage": "route", "label": "正在理解问题"}
                 )
-            intent_count = len(route.route.intents)
+            intent_count = len(route_result.intents)
             yield event(
                 AgentEventType.REASONING_SUMMARY,
                 {

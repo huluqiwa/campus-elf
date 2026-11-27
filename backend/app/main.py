@@ -55,6 +55,7 @@ class ChatTurnRunner(Protocol):
         message: str,
         conversation_id: UUID | None = None,
         permissions: frozenset[str],
+        school_names: frozenset[str] = frozenset(),
     ) -> AsyncIterator[AgentEvent]: ...
 
 logger = logging.getLogger(__name__)

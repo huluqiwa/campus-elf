@@ -7,6 +7,7 @@
 from typing import Any
 from uuid import uuid4
 
+from app.harness.audit import InMemoryAuditSink
 from app.harness.chat_tools import (
     CAMPUS_NAVIGATE,
     KB_READ_CHUNK,
@@ -16,6 +17,8 @@ from app.harness.chat_tools import (
 )
 from app.harness.contracts import TenantContext, ToolCall, ToolResult, ToolSpec
 from app.harness.registry import ToolRegistry
+from app.harness.tools import ToolExecutor
+from app.harness.trace import InMemoryTraceSink, TraceRecorder
 from app.kb.chat_retrieval import ChatEvidence, ChatRetrievalError, ChatRetriever
 from app.kb.embedding import TEIEmbedder
 
@@ -120,6 +123,32 @@ async def test_kb_search_handler_maps_retrieval_error_code() -> None:
     assert result.error_code == "CHAT_SEARCH_FAILED"
 
 
+async def test_tenant_id_in_tool_args_is_rejected() -> None:
+    """工具面不接受模型/调用方伪造 tenant_id；租户只来自 TenantContext。"""
+
+    registry = build_turn_tools(retriever=StubRetriever(), state=TurnToolState())
+    executor = ToolExecutor(
+        registry,
+        trace=TraceRecorder(InMemoryTraceSink()),
+        audit=InMemoryAuditSink("fake-audit-secret-0123456789"),
+    )
+    ctx = TenantContext(
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        permissions=frozenset({"campus.chat.use"}),
+    )
+    result = await executor.execute(
+        ToolCall(
+            tool=KB_SEARCH,
+            args={"query": "本校校历", "tenant_id": str(uuid4())},
+        ),
+        ctx,
+    )
+
+    assert result.ok is False
+    assert result.error_code == "INVALID_ARGS"
+
+
 async def test_kb_read_chunk_allows_only_turn_evidence() -> None:
     """证据映射守卫：本轮证据内的块可读（含文本/版本），映射外拒绝（防越人群读任意块）。"""
 
@@ -142,9 +171,7 @@ async def test_kb_read_chunk_allows_only_turn_evidence() -> None:
     registry = build_turn_tools(retriever=StubRetriever(), state=state)
     handler = registry.get_handler(KB_READ_CHUNK)
 
-    inside = await handler(
-        ToolCall(tool=KB_READ_CHUNK, args={"chunk_id": "c1"}), tenant_ctx()
-    )
+    inside = await handler(ToolCall(tool=KB_READ_CHUNK, args={"chunk_id": "c1"}), tenant_ctx())
     assert inside.ok is True
     assert inside.data == {"chunk_id": "c1", "text": "证据文本", "version_id": "v1"}
 
@@ -166,9 +193,7 @@ async def test_navigate_returns_static_entry() -> None:
 
     registry = build_turn_tools(retriever=StubRetriever(), state=TurnToolState())
     handler = registry.get_handler(CAMPUS_NAVIGATE)
-    known = await handler(
-        ToolCall(tool=CAMPUS_NAVIGATE, args={"target": "请假"}), tenant_ctx()
-    )
+    known = await handler(ToolCall(tool=CAMPUS_NAVIGATE, args={"target": "请假"}), tenant_ctx())
     assert known.ok is True
     assert known.data["route"]
     unknown = await handler(

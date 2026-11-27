@@ -77,6 +77,8 @@ class Principal:
     scope_types: frozenset[str] = frozenset()
     # class 范围的 scope_id 集合（M2-ORG01-03 D1；空集 = 没有班级范围授权）
     class_ids: frozenset[UUID] = frozenset()
+    # 认证租户的权威学校名称/代码（TD-361 范围分类；不接受请求体覆盖）
+    school_names: frozenset[str] = frozenset()
     # 当前会话是否完成过 MFA（来自访问令牌 amr；改密重签时原样保留）
     mfa_verified: bool = False
 
@@ -108,6 +110,7 @@ class _Identity:
     permissions: frozenset[str]
     scope_types: frozenset[str] = frozenset()
     class_ids: frozenset[UUID] = frozenset()
+    school_names: frozenset[str] = frozenset()
 
 
 async def _must_change_password(
@@ -150,7 +153,9 @@ async def _tenant_identity(session: AsyncSession, user_id: UUID) -> _Identity:
     row = (
         await session.execute(
             text(
-                "select status, token_version from users where id = :uid"
+                "select u.status, u.token_version, t.name as school_name, "
+                "t.school_code from users u "
+                "join tenants t on t.id = u.tenant_id where u.id = :uid"
             ),
             {"uid": user_id},
         )
@@ -196,6 +201,9 @@ async def _tenant_identity(session: AsyncSession, user_id: UUID) -> _Identity:
         permissions=frozenset(str(code) for code in permission_rows),
         scope_types=scope.scope_types,
         class_ids=scope.class_ids,
+        school_names=frozenset(
+            value for value in (row["school_name"], row["school_code"]) if value
+        ),
     )
 
 
@@ -315,6 +323,7 @@ async def get_current_principal(
         permissions=identity.permissions,
         scope_types=identity.scope_types,
         class_ids=identity.class_ids,
+        school_names=identity.school_names,
         mfa_verified=claims.mfa_verified,
     )
 

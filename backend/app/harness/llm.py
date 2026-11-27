@@ -85,6 +85,7 @@ class LlmRequest(BaseModel):
     model: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0, le=2)
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
     tool_specs: tuple[dict[str, Any], ...] = ()
     # 只允许收紧超时（Loop 层做回合级预算时使用）；0/负数会放大超时，直接拒绝。
     timeout_override_s: float | None = Field(default=None, gt=0)
@@ -384,6 +385,8 @@ class OpenAICompatLlm:
         max_tokens = request.max_tokens if request.max_tokens is not None else self._max_tokens
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if request.reasoning_effort is not None:
+            payload["reasoning_effort"] = request.reasoning_effort
         if request.tool_specs:
             payload["tools"] = list(request.tool_specs)
         if stream:

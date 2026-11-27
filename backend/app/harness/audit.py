@@ -47,6 +47,13 @@ _MOBILE_RE = re.compile(r"(?<!\d)1[3-9]\d(?:\s?\d{4}){2}(?!\d)")
 _ID_CARD_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 _ID_CARD_15_RE = re.compile(r"(?<!\d)\d{15}(?!\d)")
 _BEARER_RE = re.compile(r"(?i)Bearer\s+[A-Za-z0-9._-]+")
+_HASH_METADATA_KEYS = frozenset({"prompt_hash", "router_prompt_hash"})
+_PROMPT_METADATA_KEYS = frozenset(
+    {"prompt_name", "prompt_version", "router_prompt_name", "router_prompt_version"}
+)
+_TOKEN_COUNT_METADATA_KEYS = frozenset({"router_tokens_in", "router_tokens_out"})
+_SAFE_METADATA_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 
 
 def _redact_string(value: str) -> str:
@@ -76,7 +83,25 @@ def redact_mapping(value: Any) -> Any:
         result: dict[str, Any] = {}
         for key, item in value.items():
             lowered = key.lower()
-            if any(part in lowered for part in _SENSITIVE_KEY_PARTS):
+            digest_metadata = (
+                lowered in _HASH_METADATA_KEYS
+                and isinstance(item, str)
+                and _SHA256_HEX_RE.fullmatch(item) is not None
+            )
+            prompt_metadata = (
+                lowered in _PROMPT_METADATA_KEYS
+                and isinstance(item, str)
+                and _SAFE_METADATA_TEXT_RE.fullmatch(item) is not None
+            )
+            count_metadata = (
+                lowered in _TOKEN_COUNT_METADATA_KEYS
+                and isinstance(item, int)
+                and not isinstance(item, bool)
+                and item >= 0
+            )
+            if digest_metadata or prompt_metadata or count_metadata:
+                result[key] = item
+            elif any(part in lowered for part in _SENSITIVE_KEY_PARTS):
                 result[key] = "***"
             else:
                 result[key] = redact_mapping(item)

@@ -5,7 +5,10 @@ from typing import Any
 from uuid import uuid4
 
 from app.harness.llm import LlmError, LlmErrorCode, LlmResponse, LlmStreamEvent
-from app.harness.orchestrator import ChatOrchestrator
+from app.harness.orchestrator import (
+    ROUTER_UNAVAILABLE_CODE,
+    ChatOrchestrator,
+)
 from app.harness.prompt_loading import build_default_registry
 from app.harness.router import LlmRouter
 from app.harness.trace import InMemoryTraceSink
@@ -122,7 +125,16 @@ def types_of(events: list[Any]) -> list[str]:
 def router_json_single() -> LlmResponse:
     """单 kb_qa 路由 JSON（simple）。"""
 
-    return LlmResponse(text=json.dumps({"intents": [{"name": "kb_qa", "query": "校历"}]}))
+    return LlmResponse(
+        text=json.dumps(
+            {
+                "scope": "allow",
+                "blocked_count": 0,
+                "safe_fragments": [],
+                "intents": [{"name": "kb_qa", "query": "校历", "confidence": 0.9}],
+            }
+        )
+    )
 
 
 def router_json_multi() -> LlmResponse:
@@ -131,10 +143,13 @@ def router_json_multi() -> LlmResponse:
     return LlmResponse(
         text=json.dumps(
             {
+                "scope": "allow",
+                "blocked_count": 0,
+                "safe_fragments": [],
                 "intents": [
-                    {"name": "kb_qa", "query": "差旅报销怎么办理？"},
-                    {"name": "navigate", "query": "请假入口在哪？"},
-                ]
+                    {"name": "kb_qa", "query": "差旅报销怎么办理？", "confidence": 0.9},
+                    {"name": "navigate", "query": "请假入口在哪？", "confidence": 0.9},
+                ],
             }
         )
     )
@@ -215,15 +230,16 @@ async def test_multi_intent_dispatches_react() -> None:
     assert any("识别到 2 个问题" in summary for summary in summaries)
 
 
-async def test_router_failure_degrades_to_fast_path() -> None:
-    """路由 LLM 异常（D2）：降级 simple → 快路径事件序。"""
+async def test_router_failure_stops_before_data_plane() -> None:
+    """范围路由器异常时保留固定脱敏错误，不把原文送入检索或答案模型。"""
 
+    fast_llm = FakeLlm(
+        stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="不应生成。"),
+                         LlmStreamEvent(kind="finish", finish_reason="stop")]],
+    )
     orchestrator, _sink = build_orchestrator(
         router_complete=LlmError(LlmErrorCode.TIMEOUT, retryable=True),
-        fast_llm=FakeLlm(
-            stream_scripts=[[LlmStreamEvent(kind="delta", text_delta="兜底回答。"),
-                             LlmStreamEvent(kind="finish", finish_reason="stop")]],
-        ),
+        fast_llm=fast_llm,
         react_llm=FakeLlm(),
         evidence=None,
     )
@@ -235,17 +251,9 @@ async def test_router_failure_degrades_to_fast_path() -> None:
         )
     )
 
-    assert types_of(events) == [
-        "meta",
-        "step",
-        "step",
-        "tool_call",
-        "tool_result",
-        "reasoning_summary",
-        "delta",
-        "done",
-    ]  # 零命中兜底链（无证据 → CAPABILITY_FALLBACK）
-    assert events[-1].payload["stop_reason"] == "CAPABILITY_FALLBACK"
+    assert types_of(events) == ["meta", "step", "error"]
+    assert events[-1].payload["code"] == ROUTER_UNAVAILABLE_CODE
+    assert fast_llm.requests == []
 
 
 async def test_permissions_forwarded_to_loops() -> None:

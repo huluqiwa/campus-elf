@@ -6,6 +6,7 @@ from app.harness.guard_events_db import GuardEventsDbSink
 from app.harness.llm import LlmPort
 from app.harness.loop import FastPathLoop
 from app.harness.orchestrator import ChatOrchestrator
+from app.harness.persistence import TenantScopePersister
 from app.harness.prompt_loading import build_default_registry
 from app.harness.react_loop import ReactLoop
 from app.harness.ref_semantics import RefSemanticChecker
@@ -42,7 +43,8 @@ def build_chat_loop(
     guard_events_sink = GuardEventsDbSink()
     # 引用语义校验（M4-AI04）：两条路径同一 checker（同 embedder 同阈值——A5）
     ref_checker = RefSemanticChecker(
-        embedder=embedder, min_similarity=settings.kb_ref_min_similarity,
+        embedder=embedder,
+        min_similarity=settings.kb_ref_min_similarity,
     )
     fast_loop = FastPathLoop(
         llm_port=llm_port,
@@ -70,6 +72,10 @@ def build_chat_loop(
     )
     router = LlmRouter(llm_port=llm_port, prompt_registry=registry)
     return ChatOrchestrator(
-        router=router, fast_loop=fast_loop, react_loop=react_loop,
-        guard_events_sink=guard_events_sink, trace_sink=trace_sink,
+        router=router,
+        fast_loop=fast_loop,
+        react_loop=react_loop,
+        guard_events_sink=guard_events_sink,
+        trace_sink=trace_sink,
+        scope_persister=TenantScopePersister(),
     )
