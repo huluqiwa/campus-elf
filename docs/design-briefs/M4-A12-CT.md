@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 日期 / ID | 2026-11-26 / M4-A12-CT / TD-361 |
-| 当前阶段 | 用户已确认 v3；实现完成，最终复审 0B/1M 的引述净化历史问题已修复，独立复核 0B/0M PASS，待 PR CI 与合并授权 |
+| 当前阶段 | 用户已确认 v3；实现完成，最终复审 0B/1M 的引述净化历史问题已修复，独立复核 0B/0M PASS；PR #109 final code-head CI 全绿（backend run 46067099625 / security run 46067099758），等待用户明确合并授权 |
 | 授权依据 | 用户 2026-11-26 明确要求按“本校正常回答；外校直接拒绝；混合问题先答本校、再拒绝外校；身份冒充不改变认证范围”实现，并确认本简报 §8 六项决策 |
 | 上游 | requirements A6/A7/A12/A23；spec §3.4、§3.7 AI-01/AI-04/AI-08/AI-09/AI-10；design §6；milestone §7.2；test-plan BS-05/BS-40/隔离矩阵；`docs/design-briefs/M4-A12-safety-triage.md` CT-A1–A8；TD-361/TD-356/TD-367 |
 | Git 基线 | TD-369 交付状态合并后的 `5cc428b`；分支 `feature/td-361-a12-cross-tenant` |
@@ -194,7 +194,7 @@ TenantScopePlan
 
 用户已确认上述六项并明确按该效果实现。全新或超出上述范围的方案仍需先修订 Spec/design 与本简报并再次确认。
 
-## 9. 当前 v3 实施结果（2026-11-28，最终独立复核 PASS，待 PR CI 与合并授权）
+## 9. 当前 v3 实施结果（2026-11-28，最终独立复核 PASS，PR #109 final code-head CI 全绿，等待用户明确合并授权）
 
 - `route_v3` 把范围判定和本校意图合成一次模型调用：高置信显式外校取数请求仍由确定性证据零模型早拒；其余外校证据在检索、工具、citation 和答案生成前完成 `allow/block/mixed/restriction/identity_claim` 判定。
 - v3 JSON 顶层字段与 intent 字段采用闭集；scope/intent 枚举、confidence 范围、query 原文可追溯性、blocked_count 与 safe_fragments 关系均严格校验。缺 `scope`、重复 JSON 键与附加字段在 `route_v3` 中一律视为不可用；只有显式选择 `route_v1/v2` 才接受 intent-only 兼容响应。非法/冲突输出、provider 异常或安全片段不可追溯时，有外校证据即 fail-closed。
@@ -203,7 +203,7 @@ TenantScopePlan
 - 被拒绝、MIXED、身份声称、输入护栏与引述净化回合的用户原文和固定回答以 `status=partial` 保存；普通历史接口可见，模型上下文只查 `status=completed`，被拦截原文不会在下轮回灌。
 - semantic router 的 provider、实际或配置 model、prompt name/version/hash、tokens 与 latency 进入无正文 trace/span/usage；纯拒绝使用同事务记录，MIXED 使用 scope span，集成测试断言真实元数据。
 - 本校正式名称和学校代码继续从认证租户权威记录派生，请求体伪造租户/角色/权限不改变 Principal；PG RLS、Qdrant collection/alias 和工具证据白名单继续独立承重。
-- 首轮 0B/3M/0m、二次复审 0B/2M/1m 与最终复审 0B/1M/0m 均已修复：路由不可用、MIXED 生成失败等未确认安全的原文改为 `partial`，不会作为下一轮模型上下文；router usage 补齐 ALLOW、输入护栏、路由不可用及拒绝分支；router span、ALLOW usage 与审计脱敏边界由 FakeLlm 和真实 PostgreSQL/SSE 断言；引述净化的不可变 `quote_redacted` 标志使成功 user/assistant 消息均为 partial，历史接口可见而模型上下文为空。二次复审修复后的最终本地门禁：完整 `tests/harness` **306 passed**；真实 PG/Qdrant/SSE 受影响批次 **47 passed / 9 skipped，302.46 秒**；租户范围数据库专项 **13 passed，178.53 秒**；临时模型校准 **87/87 matched / 0 fragment failures**；Ruff、Mypy（`app tests` 340 + `scripts` 3）、Bandit、Alembic check 与 `git diff --check` 全部通过。最终独立复核为 0 Blocker / 0 Major，PASS；当前等待 commit/push 与 PR #109 CI。A12 历史分母 `195/60/46/20/69`、门槛 `85/100/90/95/80`、旧分数和评估语料均未修改；本点完成不等于 A12 达标或 M4 退出。
+- 首轮 0B/3M/0m、二次复审 0B/2M/1m 与最终复审 0B/1M/0m 均已修复：路由不可用、MIXED 生成失败等未确认安全的原文改为 `partial`，不会作为下一轮模型上下文；router usage 补齐 ALLOW、输入护栏、路由不可用及拒绝分支；router span、ALLOW usage 与审计脱敏边界由 FakeLlm 和真实 PostgreSQL/SSE 断言；引述净化的不可变 `quote_redacted` 标志使成功 user/assistant 消息均为 partial，历史接口可见而模型上下文为空。二次复审修复后的本地生产代码门禁：完整 `tests/harness` **306 passed**；真实 PG/Qdrant/SSE 受影响批次 **47 passed / 9 skipped，302.46 秒**；租户范围数据库专项 **13 passed，178.53 秒**；临时模型校准 **87/87 matched / 0 fragment failures**；Ruff、Mypy（`app tests` 340 + `scripts` 3）、Bandit、Alembic check 与 `git diff --check` 全部通过。最终独立复核为 0 Blocker / 0 Major，PASS；最终测试夹具修复后，本地完整 `tests/harness` 为 **307 passed**、三条受影响业务/集成文件为 **18 passed**。代码提交 `79b84ab` 的 PR #109 final code-head CI 全绿（backend run `46067099625`：**1530 passed / 19 skipped**；security run `46067099758`），等待用户明确合并授权。A12 历史分母 `195/60/46/20/69`、门槛 `85/100/90/95/80`、旧分数和评估语料均未修改；本点完成不等于 A12 达标或 M4 退出。
 - A12 历史分母 `195/60/46/20/69`、门槛 `85/100/90/95/80`、旧分数和评估语料均未修改；本点完成不等于 A12 达标或 M4 退出。
 
 ### 9.1 已归档的 v2 审查历史（被 v3 取代，仅供追溯）
