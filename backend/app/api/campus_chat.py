@@ -107,6 +107,7 @@ async def create_chat_turn(
                 message=payload.message,
                 conversation_id=conversation_uuid,
                 permissions=principal.permissions,
+                school_names=principal.school_names,
             ):
                 yield format_sse(agent_event.type.value, agent_event.payload)
         except (GeneratorExit, asyncio.CancelledError):

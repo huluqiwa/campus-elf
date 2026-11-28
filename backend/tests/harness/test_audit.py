@@ -97,6 +97,9 @@ def test_redact_mapping_is_recursive_and_value_aware() -> None:
             "spaced": "138 0013 8000",
             "ref": "110101199001011234",
             "old_id": "110101900101123",
+            "prompt": "sensitive inline prompt",
+            "prompt_hash": "a" * 64,
+            "router_prompt_hash": "not-a-digest",
         }
     )
     assert result["api_key"] == "***"
@@ -108,3 +111,33 @@ def test_redact_mapping_is_recursive_and_value_aware() -> None:
     assert result["spaced"] == "***"
     assert result["ref"] == "***"
     assert result["old_id"] == "***"
+    assert result["prompt"] == "***"
+    assert result["prompt_hash"] == "a" * 64
+    assert result["router_prompt_hash"] == "***"
+
+
+def test_redact_mapping_preserves_only_safe_router_telemetry_metadata() -> None:
+    """路由 metadata 只放行固定格式的名称、版本、摘要和计数，拦截伪装的正文。"""
+
+    result = redact_mapping(
+        {
+            "router_prompt_name": "route",
+            "router_prompt_version": "v3",
+            "router_tokens_in": 19,
+            "router_tokens_out": 7,
+            "unsafe_prompt_name": "route",
+            "prompt_name": "用户原始提示词",
+            "router_prompt_version_extra": "v3",
+            "router_tokens_in_text": "19",
+        }
+    )
+    assert result == {
+        "router_prompt_name": "route",
+        "router_prompt_version": "v3",
+        "router_tokens_in": 19,
+        "router_tokens_out": 7,
+        "unsafe_prompt_name": "***",
+        "prompt_name": "***",
+        "router_prompt_version_extra": "***",
+        "router_tokens_in_text": "***",
+    }

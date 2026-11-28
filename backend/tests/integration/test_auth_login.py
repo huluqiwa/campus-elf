@@ -360,10 +360,12 @@ async def test_principal_uses_realm_specific_connection(
 
     tenant_principal = await get_current_principal(_request(), f"Bearer {tenant_token}")
     assert tenant_principal.realm == "tenant"
+    assert tenant_principal.school_names == frozenset({"认证测试中学", "SCH-AUTHTEST1"})
     assert captured[-1] == {"tenant_id": tenant_id}
 
     platform_principal = await get_current_principal(_request(), f"Bearer {platform_token}")
     assert platform_principal.realm == "platform"
+    assert platform_principal.school_names == frozenset()
     assert captured[-1] == {"platform": True}
 
 

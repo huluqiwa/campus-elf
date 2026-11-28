@@ -172,6 +172,21 @@ class TraceSpan(BaseModel):
     status: Literal["ok", "error"] = "ok"
 
 
+class LlmCallUsage(BaseModel):
+    """一次中间 LLM 调用的可观测元数据（不含输入输出正文）。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str = ""
+    model: str = ""
+    prompt_name: str = ""
+    prompt_version: str = ""
+    prompt_hash: str = ""
+    tokens_in: int = Field(default=0, ge=0)
+    tokens_out: int = Field(default=0, ge=0)
+    latency_ms: int = Field(default=0, ge=0)
+
+
 class TraceRecord(BaseModel):
     """一次对话回合的本地 trace。"""
 

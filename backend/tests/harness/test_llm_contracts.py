@@ -86,6 +86,16 @@ def test_llm_request_rejects_non_positive_timeout_override() -> None:
         LlmRequest(messages=[message()], timeout_override_s=0)
 
 
+def test_llm_request_reasoning_effort_is_closed_set() -> None:
+    """范围守卫关闭额外思考；只接受供应商标准的稳定枚举。"""
+
+    request = LlmRequest(messages=[message()], reasoning_effort="none", temperature=0)
+    assert request.reasoning_effort == "none"
+    with pytest.raises(ValidationError):
+        LlmRequest.model_validate(
+            {"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "ultra"}
+        )
+
 def test_llm_request_tool_specs_passthrough() -> None:
     """tool_specs 为 OpenAI tools 形态的只读透传（本点不解析，TD-P3）。"""
 

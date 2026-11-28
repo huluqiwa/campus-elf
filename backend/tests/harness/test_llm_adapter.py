@@ -451,6 +451,7 @@ async def test_request_body_carries_overrides_and_tools() -> None:
             messages=[{"role": "user", "content": "你好"}],
             model="override-model",
             temperature=0.3,
+            reasoning_effort="low",
             max_tokens=128,
             tool_specs=(
                 {
@@ -463,6 +464,7 @@ async def test_request_body_carries_overrides_and_tools() -> None:
     body = json.loads(scripted.calls[0].content.decode("utf-8"))
     assert body["model"] == "override-model"
     assert body["temperature"] == 0.3
+    assert body["reasoning_effort"] == "low"
     assert body["max_tokens"] == 128
     assert body["tools"][0]["function"]["name"] == "kb.search"
 

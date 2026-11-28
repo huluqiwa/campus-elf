@@ -6,7 +6,7 @@ Principal 走 ASGI 流：SSE 编码/事件序（零命中兜底，离线确定�
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -14,7 +14,9 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.api.campus_chat import ChatTurnRequest
 from app.auth.principal import Principal, get_current_principal
+from app.harness.contracts import AgentEvent, AgentEventType
 from app.harness.loop import CAPABILITY_FALLBACK_TEXT, FastPathLoop
 from app.harness.prompt_loading import build_default_registry
 from app.harness.trace import InMemoryTraceSink
@@ -59,19 +61,46 @@ class _StubAudit:
         return 0
 
 
-def make_loop() -> FastPathLoop:
+class _CaptureLoop:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] = {}
+
+    async def run(self, **kwargs: Any) -> Any:
+        self.kwargs = kwargs
+        yield AgentEvent(type=AgentEventType.DONE, payload={"stop_reason": "FINAL_ANSWER"})
+
+
+class _FastPathAsChatLoop:
+    """适配器：编排器专有参数（school_names）对 FastPathLoop 无意义，就地丢弃。"""
+
+    def __init__(self, loop: FastPathLoop) -> None:
+        self._loop = loop
+
+    async def run(self, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        kwargs.pop("school_names", None)
+        async for event in self._loop.run(**kwargs):
+            yield event
+
+
+def make_loop() -> _FastPathAsChatLoop:
     """零命中 Loop（事件序/编码离线可断言）。"""
 
-    return FastPathLoop(
-        llm_port=FakeLlm(),
-        retriever=EndpointStubRetriever(),
-        prompt_registry=build_default_registry(),
-        trace_sink=InMemoryTraceSink(),
-        audit_sink=_StubAudit(),
+    return _FastPathAsChatLoop(
+        FastPathLoop(
+            llm_port=FakeLlm(),
+            retriever=EndpointStubRetriever(),
+            prompt_registry=build_default_registry(),
+            trace_sink=InMemoryTraceSink(),
+            audit_sink=_StubAudit(),
+        )
     )
 
 
-def make_principal(tenant_id: Any) -> Principal:
+def make_principal(
+    tenant_id: Any,
+    *,
+    school_names: frozenset[str] = frozenset(),
+) -> Principal:
     """构造端点依赖用的 Principal（绕过 JWT 依赖——RBAC 矩阵真实栈另行覆盖）。"""
 
     return Principal(
@@ -84,15 +113,24 @@ def make_principal(tenant_id: Any) -> Principal:
         must_change_password=False,
         roles=frozenset({"student"}),
         permissions=frozenset({"campus.chat.use"}),
+        school_names=school_names,
     )
 
 
-def build_app(loop: FastPathLoop, *, tenant_id: Any) -> Any:
+def build_app(
+    loop: Any,
+    *,
+    tenant_id: Any,
+    school_names: frozenset[str] = frozenset(),
+) -> Any:
     """构造应用 + Principal 依赖覆盖（RBAC 矩阵路径的离线替身）。"""
 
     app = create_app(chat_loop=loop)
     # 覆盖子依赖 get_current_principal（实证有效）：_dependency 的 realm/权限判定保持真实
-    app.dependency_overrides[get_current_principal] = lambda: make_principal(tenant_id)
+    app.dependency_overrides[get_current_principal] = lambda: make_principal(
+        tenant_id,
+        school_names=school_names,
+    )
     return app
 
 
@@ -194,3 +232,39 @@ async def test_chat_loop_missing_is_explicit_error() -> None:
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/api/v1/campus/chat/turns", json={"message": "校历"})
     assert response.status_code >= 500
+
+
+def test_forged_identity_fields_are_not_part_of_chat_request_contract() -> None:
+    """请求体 tenant_id/role/permission 不进入内部模型，身份只取认证 Principal。"""
+
+    request = ChatTurnRequest.model_validate(
+        {
+            "message": "本校差旅报销怎么办理？",
+            "tenant_id": str(uuid4()),
+            "role": "platform_super_admin",
+            "permissions": ["*"],
+            "school_names": ["北京大学"],
+        }
+    )
+
+    assert request.model_dump() == {
+        "message": "本校差旅报销怎么办理？",
+        "conversation_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_authenticated_school_names_are_passed_to_chat_loop() -> None:
+    loop = _CaptureLoop()
+    schools = frozenset({"认证测试中学", "SCH-KB-A"})
+    app = build_app(loop, tenant_id=uuid4(), school_names=schools)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/campus/chat/turns",
+            json={"message": "本校校历怎么查", "school_names": ["北京大学"]},
+        )
+
+    assert response.status_code == 200
+    assert loop.kwargs["school_names"] == schools
