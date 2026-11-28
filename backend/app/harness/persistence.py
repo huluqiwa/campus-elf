@@ -240,10 +240,7 @@ async def get_context_messages(
             .limit(limit)
         )
         rows = (await session.execute(stmt)).scalars().all()
-        return [
-            {"role": row.role, "content": row.content}
-            for row in reversed(rows)
-        ]
+        return [{"role": row.role, "content": row.content} for row in reversed(rows)]
 
 
 async def clear_messages_in_session(
@@ -475,6 +472,7 @@ class TenantScopePersister:
         stop_reason: StopReason = StopReason.REFUSAL,
         scope_mode: str = "block",
         call_usage: LlmCallUsage | None = None,
+        extra_guard_results: tuple[Any, ...] = (),
     ) -> None:
         """单事务提交纯拒绝的 guard/trace/span/usage。
 
@@ -525,6 +523,15 @@ class TenantScopePersister:
                 trace_id=trace_id,
                 result=guard_result,
             )
+            # 同一回合可能同时命中多条规则（如安全终止 + 外校取数）：全部在
+            # 同一事务落库，避免只留安全 guard 而丢掉范围审计（TD-363 审查 M4）。
+            for extra in extra_guard_results:
+                _add_guard_event_in_session(
+                    session,
+                    tenant_id=tenant_id,
+                    trace_id=trace_id,
+                    result=extra,
+                )
             _add_trace_rows_in_session(session, tenant_id=tenant_id, record=record)
             await session.commit()
 

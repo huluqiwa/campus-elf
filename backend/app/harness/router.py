@@ -1,8 +1,8 @@
-"""LLM 路由器（M4-AI01c；TD-361 v3：语义范围路由）。
+"""LLM 路由器（M4-AI01c；TD-361 v3 范围，TD-363 v4 安全计划）。
 
-route_v3 用一次模型调用同时返回租户范围结论与本校意图。范围结论只有稳定枚举；
-混合请求只可返回原消息中逐字存在的 safety fragments。JSON/字段冲突时退化为
-旧式单 kb_qa 降级，由编排器在存在外校证据时 fail-closed。
+route_v4 用一次模型调用同时返回租户范围结论、本校意图与服务端安全处置计划。
+安全字段使用闭集枚举；结构、分类或动作冲突时整体不可用，由编排器在首个可见
+事件之前 fail-closed。显式选择 route_v1/v2/v3 的实例仍保留原有回滚能力。
 """
 
 import json
@@ -19,12 +19,14 @@ from app.harness.prompts import PromptRegistry
 logger = logging.getLogger(__name__)
 
 PROMPT_NAME = "route"
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 
 KNOWN_INTENTS: tuple[str, ...] = ("kb_qa", "navigate")
 _DEFAULT_CONFIDENCE = 0.5
 _JSON_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 _V3_RESPONSE_FIELDS = frozenset({"scope", "blocked_count", "safe_fragments", "intents"})
+_V4_RESPONSE_FIELDS = _V3_RESPONSE_FIELDS | {"safety"}
+_SAFETY_FIELDS = frozenset({"action", "category"})
 _INTENT_FIELDS = frozenset({"name", "query", "confidence"})
 
 
@@ -40,7 +42,7 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
 
 
 class ScopeDecision(StrEnum):
-    """route_v3 的租户范围结论。"""
+    """route_v3/v4 的租户范围结论。"""
 
     ALLOW = "allow"
     BLOCK = "block"
@@ -49,13 +51,64 @@ class ScopeDecision(StrEnum):
     IDENTITY_CLAIM = "identity_claim"
 
 
+class SafetyAction(StrEnum):
+    """服务端可执行的敏感内容处置动作。"""
+
+    ALLOW = "allow"
+    SUPPORT = "support"
+    REFUSE = "refuse"
+
+
+class SafetyCategory(StrEnum):
+    """敏感内容的安全类别闭集。"""
+
+    NONE = "none"
+    SELF_HARM = "self_harm"
+    MENTAL_HEALTH = "mental_health"
+    VIOLENCE = "violence"
+    ILLEGAL = "illegal"
+    PRIVACY = "privacy"
+    HARASSMENT = "harassment"
+    ABUSIVE_CONTENT = "abusive_content"
+    MAJOR_DECISION = "major_decision"
+
+
+@dataclass(frozen=True)
+class SafetyPlan:
+    """模型给出的结构化安全决定；最终可见话术由服务端模板选择。"""
+
+    action: SafetyAction
+    category: SafetyCategory
+
+
+VALID_SAFETY_PLANS: frozenset[SafetyPlan] = frozenset(
+    {
+        SafetyPlan(SafetyAction.ALLOW, SafetyCategory.NONE),
+        SafetyPlan(SafetyAction.SUPPORT, SafetyCategory.SELF_HARM),
+        SafetyPlan(SafetyAction.SUPPORT, SafetyCategory.MENTAL_HEALTH),
+        SafetyPlan(SafetyAction.SUPPORT, SafetyCategory.VIOLENCE),
+        SafetyPlan(SafetyAction.SUPPORT, SafetyCategory.ILLEGAL),
+        SafetyPlan(SafetyAction.SUPPORT, SafetyCategory.PRIVACY),
+        SafetyPlan(SafetyAction.SUPPORT, SafetyCategory.HARASSMENT),
+        SafetyPlan(SafetyAction.SUPPORT, SafetyCategory.MAJOR_DECISION),
+        SafetyPlan(SafetyAction.REFUSE, SafetyCategory.SELF_HARM),
+        SafetyPlan(SafetyAction.REFUSE, SafetyCategory.VIOLENCE),
+        SafetyPlan(SafetyAction.REFUSE, SafetyCategory.ILLEGAL),
+        SafetyPlan(SafetyAction.REFUSE, SafetyCategory.PRIVACY),
+        SafetyPlan(SafetyAction.REFUSE, SafetyCategory.HARASSMENT),
+        SafetyPlan(SafetyAction.REFUSE, SafetyCategory.ABUSIVE_CONTENT),
+    }
+)
+
+
 @dataclass(frozen=True)
 class RouterOutcome:
-    """范围结论与本校区路由结果。
+    """范围结论、本校路由与敏感内容安全计划。
 
     ``scope is None`` 只有两种合法解释：``unavailable=False`` 是回滚期间完整的
     intent-only 旧响应；``unavailable=True`` 是超时、非法 JSON 或 schema 冲突。
-    后者不能把原消息交给检索链。
+    route_v4 的失败同时设置 ``safety_required=True``，编排器必须按安全判断不可用
+    保守终止，不能把原消息交给检索链。
     """
 
     route: RouteResult | None
@@ -66,6 +119,8 @@ class RouterOutcome:
     safe_fragments: tuple[str, ...] = ()
     blocked_count: int = 0
     usage: LlmCallUsage | None = None
+    safety: SafetyPlan | None = None
+    safety_required: bool = False
 
     @property
     def terminal_scope(self) -> bool:
@@ -81,9 +136,25 @@ class RouterOutcome:
 
         return self.scope is None and self.unavailable
 
+    @property
+    def safety_unavailable(self) -> bool:
+        """route_v4 是否因结构失败而没有可信安全结论。"""
+
+        return self.safety_required and self.safety is None and self.unavailable
+
+    @property
+    def terminal_safety(self) -> bool:
+        """当前回合是否必须由安全计划终止普通问答。"""
+
+        return (
+            self.safety in VALID_SAFETY_PLANS
+            and self.safety is not None
+            and self.safety.action is not SafetyAction.ALLOW
+        )
+
 
 class LlmRouter:
-    """scope-aware LLM 路由器（use-site 构造；端口注入对齐既有纪律）。"""
+    """scope/safety-aware LLM 路由器（use-site 构造；端口注入对齐既有纪律）。"""
 
     def __init__(
         self,
@@ -95,6 +166,12 @@ class LlmRouter:
         self._llm_port = llm_port
         self._registry = prompt_registry
         self._prompt_version = prompt_version
+
+    @property
+    def requires_safety(self) -> bool:
+        """当前路由版本是否要求完整 route_v4 安全计划。"""
+
+        return self._prompt_version == "v4"
 
     async def route(self, message: str) -> RouterOutcome:
         """分类用户消息；网络/结构失败不抛，保留降级与用量标记。"""
@@ -117,7 +194,7 @@ class LlmRouter:
                 )
             )
         except LlmError as exc:
-            logger.warning("路由 LLM 失败（降级单意图）：%s", exc.code.value)
+            logger.warning("路由 LLM 失败（fail-closed）：%s", exc.code.value)
             usage = self._usage(
                 spec=spec,
                 response=None,
@@ -132,7 +209,8 @@ class LlmRouter:
         outcome = self._parse(
             response.text,
             fallback_message=message,
-            require_scope=self._prompt_version == "v3",
+            require_scope=self._prompt_version in {"v3", "v4"},
+            require_safety=self._prompt_version == "v4",
             usage=usage,
         )
         if outcome is None:
@@ -168,9 +246,10 @@ class LlmRouter:
         *,
         fallback_message: str,
         require_scope: bool,
+        require_safety: bool,
         usage: LlmCallUsage,
     ) -> RouterOutcome | None:
-        """解析范围结论与意图；缺字段、重复键或任何结构冲突返回 None。"""
+        """解析范围、意图与安全计划；任何字段冲突返回 None。"""
 
         match = _JSON_PATTERN.search(text)
         if match is None:
@@ -196,7 +275,8 @@ class LlmRouter:
                 return None
             scope = None
         elif isinstance(raw_scope, str):
-            if set(payload) != _V3_RESPONSE_FIELDS:
+            expected_fields = _V4_RESPONSE_FIELDS if require_safety else _V3_RESPONSE_FIELDS
+            if set(payload) != expected_fields:
                 return None
             try:
                 scope = ScopeDecision(raw_scope)
@@ -204,6 +284,24 @@ class LlmRouter:
                 return None
         else:
             return None
+
+        safety: SafetyPlan | None = None
+        if require_safety:
+            raw_safety = payload.get("safety")
+            if not isinstance(raw_safety, dict) or set(raw_safety) != _SAFETY_FIELDS:
+                return None
+            raw_action = raw_safety.get("action")
+            raw_category = raw_safety.get("category")
+            if not isinstance(raw_action, str) or not isinstance(raw_category, str):
+                return None
+            try:
+                action = SafetyAction(raw_action)
+                category = SafetyCategory(raw_category)
+            except ValueError:
+                return None
+            safety = SafetyPlan(action=action, category=category)
+            if safety not in VALID_SAFETY_PLANS:
+                return None
 
         raw_fragments = payload.get("safe_fragments", [])
         if not isinstance(raw_fragments, list) or any(
@@ -213,10 +311,16 @@ class LlmRouter:
             return None
         safe_fragments = tuple(raw_fragments)
 
-        raw_blocked_count = payload.get("blocked_count", 1 if scope in {
-            ScopeDecision.BLOCK,
-            ScopeDecision.MIXED,
-        } else 0)
+        raw_blocked_count = payload.get(
+            "blocked_count",
+            1
+            if scope
+            in {
+                ScopeDecision.BLOCK,
+                ScopeDecision.MIXED,
+            }
+            else 0,
+        )
         if (
             not isinstance(raw_blocked_count, int)
             or isinstance(raw_blocked_count, bool)
@@ -229,18 +333,24 @@ class LlmRouter:
         raw_intents = payload.get("intents", [])
         if not isinstance(raw_intents, list):
             return None
-        if scope in {
+        safety_terminal = safety is not None and safety.action is not SafetyAction.ALLOW
+        scope_terminal = scope in {
             ScopeDecision.BLOCK,
             ScopeDecision.RESTRICTION,
             ScopeDecision.IDENTITY_CLAIM,
-        }:
-            if raw_intents or safe_fragments:
+        }
+        if scope_terminal or safety_terminal:
+            if raw_intents:
+                return None
+            if safe_fragments:
                 return None
             return RouterOutcome(
                 route=None,
                 simple=False,
                 scope=scope,
                 blocked_count=raw_blocked_count,
+                safety=safety,
+                safety_required=require_safety,
                 usage=usage,
             )
         if scope is ScopeDecision.MIXED and not safe_fragments:
@@ -266,7 +376,10 @@ class LlmRouter:
                 return None
             if not isinstance(query, str) or not query or query not in fallback_message:
                 return None
-            confidence = item.get("confidence", _DEFAULT_CONFIDENCE if legacy_response else None)
+            confidence = item.get(
+                "confidence",
+                _DEFAULT_CONFIDENCE if legacy_response else None,
+            )
             if (
                 not isinstance(confidence, (int, float))
                 or isinstance(confidence, bool)
@@ -296,6 +409,8 @@ class LlmRouter:
             safe_fragments=safe_fragments,
             blocked_count=raw_blocked_count,
             usage=usage,
+            safety=safety,
+            safety_required=require_safety,
         )
 
     def _fallback(
@@ -305,7 +420,7 @@ class LlmRouter:
         degraded: bool,
         usage: LlmCallUsage | None = None,
     ) -> RouterOutcome:
-        """单 kb_qa 路由兜底；scope=None 由调用方按证据决定是否放行。"""
+        """单 kb_qa 路由兜底；v4 由编排器按安全判断不可用终止。"""
 
         return RouterOutcome(
             route=RouteResult(
@@ -322,4 +437,5 @@ class LlmRouter:
             degraded=degraded,
             unavailable=degraded,
             usage=usage,
+            safety_required=self._prompt_version == "v4",
         )

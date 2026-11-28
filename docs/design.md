@@ -917,6 +917,7 @@ navigate 结果作为入口证据并入 citations。ctx 权限从 principal 派�
   +GUARD_BLOCK 终止（M3 偏离 D5「放行检索」——安全优先登记 §10.4）；
   输入护栏在 orchestrator 层路由之前执行。
 - **M4-A12-CT / TD-361 v3（2026-11-27 用户确认）**：跨租请求采用双层边界。高置信、显式外校取数请求由确定性证据在模型前终止；其余带外校证据的消息只调用一次 scope-aware `route_v3`，在检索、工具、citation 和答案生成之前返回 `allow/block/mixed/restriction/identity_claim`。`block` 固定拒绝；`mixed` 只允许把原文逐字存在、可独立回答且不含外校证据的本校片段送入路由与检索；非法/冲突输出、片段不可追溯或 provider 异常且有外校证据时 fail-closed。安全事件在首个可见事件前写本租户，路由等待期间取消也不进入数据面。`route_v1/v2` 保留用于回滚；认证 Principal、RLS、Qdrant alias 与工具证据白名单仍是独立硬边界。
+- **M4-A12-SC / TD-363（2026-11-28 用户确认）**：默认语义路由升级为 `route_v4`，一次模型调用同时返回租户范围与敏感内容安全计划。安全动作只允许 `allow/support/refuse`，类别使用闭集并与动作做组合校验；`support/refuse` 不携带普通 intents，非法结构整体 fail-closed。终态话术由版本化服务端模板生成，在首个可见 SSE 事件前落脱敏 guard/trace/span/usage，并跳过检索、工具、citation 与普通答案生成；安全回合以 `partial` 保存，普通历史可见但不进入后续模型上下文。确定性护栏保留为最后防线，`route_v1/v2/v3` 保留显式回滚。
 - 引用校验：chunk_id 存在、属于当前租户/版本、与答案相关；失败修复或降级。**M4-AI04 落地**：存在性/归属=RETRIEVE 证据回查；超范围=哨兵剔除；语义相关=citation 前嵌入余弦校验（阈值 0.7 探针校准），失效引用从 citation 事件剔除 + guard_events 留痕；全部失效时正文保留、citation 面为空。
 
 ### 6.6 观测 / Langfuse

@@ -80,12 +80,12 @@ class FakeLlm:
             yield item
 
 
-_ROUTE_V3_PROMPT_MARKER = "你是「校园陪伴精灵」的租户范围语义路由器。"
+_ROUTE_V4_PROMPT_MARKER = "你是「校园陪伴精灵」的统一安全与租户范围路由器。"
 _ROUTE_MESSAGE_MARKER = "用户消息：\n"
 
 
-def route_v3_allow_response(message: str) -> LlmResponse:
-    """为一条原文消息构造合法的 route_v3 放行响应。"""
+def route_v4_allow_response(message: str) -> LlmResponse:
+    """为一条原文消息构造合法的 route_v4 放行响应。"""
 
     return LlmResponse(
         text=json.dumps(
@@ -93,9 +93,8 @@ def route_v3_allow_response(message: str) -> LlmResponse:
                 "scope": "allow",
                 "blocked_count": 0,
                 "safe_fragments": [],
-                "intents": [
-                    {"name": "kb_qa", "query": message, "confidence": 0.9}
-                ],
+                "intents": [{"name": "kb_qa", "query": message, "confidence": 0.9}],
+                "safety": {"action": "allow", "category": "none"},
             },
             ensure_ascii=False,
         ),
@@ -104,7 +103,7 @@ def route_v3_allow_response(message: str) -> LlmResponse:
 
 
 class AllowRouteFakeLlm(FakeLlm):
-    """从 Git 版本化 route_v3 prompt 提取用户原文并返回合法放行结论。
+    """从 Git 版本化 route_v4 prompt 提取用户原文并返回合法放行结论。
 
     只用于不验证路由器本身的业务链路测试；router 契约的严格失败路径由
     ``tests/harness/test_router.py`` 使用脚本化 FakeLlm 单独覆盖。
@@ -113,9 +112,9 @@ class AllowRouteFakeLlm(FakeLlm):
     async def complete(self, request: LlmRequest) -> LlmResponse:
         self.requests.append(request)
         prompt = request.messages[-1].content
-        if prompt.count(_ROUTE_V3_PROMPT_MARKER) != 1:
-            raise RuntimeError("AllowRouteFakeLlm 只接受 route_v3 prompt")
+        if prompt.count(_ROUTE_V4_PROMPT_MARKER) != 1:
+            raise RuntimeError("AllowRouteFakeLlm 只接受 route_v4 prompt")
         message = prompt.rsplit(_ROUTE_MESSAGE_MARKER, 1)[1].strip()
         if not message:
-            raise RuntimeError("route_v3 prompt 缺少用户消息")
-        return route_v3_allow_response(message)
+            raise RuntimeError("route_v4 prompt 缺少用户消息")
+        return route_v4_allow_response(message)

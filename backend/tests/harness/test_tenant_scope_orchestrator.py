@@ -28,13 +28,11 @@ from app.harness.guards.tenant_scope import (
 from app.harness.llm import LlmError, LlmErrorCode, LlmResponse
 from app.harness.orchestrator import (
     ROUTER_UNAVAILABLE_CODE,
-    ROUTER_UNAVAILABLE_TEXT,
     SCOPE_PERSISTENCE_ERROR_TEXT,
     ChatOrchestrator,
 )
 from app.harness.prompt_loading import build_default_registry
 from app.harness.router import LlmRouter, RouterOutcome, ScopeDecision
-from app.harness.trace import InMemoryTraceSink
 from tests.support.llm import FakeLlm
 
 
@@ -148,7 +146,9 @@ def _patch_persistence(
         saved.append(kwargs)
         return uuid4()
 
-    monkeypatch.setattr(orchestrator_module, "get_or_create_conversation", get_or_create_conversation)
+    monkeypatch.setattr(
+        orchestrator_module, "get_or_create_conversation", get_or_create_conversation
+    )
     monkeypatch.setattr(orchestrator_module, "get_context_messages", get_context_messages)
     monkeypatch.setattr(orchestrator_module, "save_message", save_message)
     return saved
@@ -177,13 +177,19 @@ def _outcome(
     fragments: tuple[str, ...] = (),
     blocked_count: int | None = None,
 ) -> RouterOutcome:
-    terminal = scope in {ScopeDecision.BLOCK, ScopeDecision.RESTRICTION, ScopeDecision.IDENTITY_CLAIM}
+    terminal = scope in {
+        ScopeDecision.BLOCK,
+        ScopeDecision.RESTRICTION,
+        ScopeDecision.IDENTITY_CLAIM,
+    }
     return RouterOutcome(
         route=None if terminal else _route(query),
         simple=not terminal,
         scope=scope,
         safe_fragments=fragments,
-        blocked_count=(1 if scope is ScopeDecision.BLOCK else 0) if blocked_count is None else blocked_count,
+        blocked_count=(1 if scope is ScopeDecision.BLOCK else 0)
+        if blocked_count is None
+        else blocked_count,
     )
 
 
@@ -243,7 +249,9 @@ async def test_explicit_external_request_blocks_before_router_and_loops(
 
 
 @pytest.mark.asyncio
-async def test_semantic_block_happens_before_retrieval_or_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_semantic_block_happens_before_retrieval_or_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_persistence(monkeypatch)
     router = _OutcomeRouter(_outcome(ScopeDecision.BLOCK))
     fast_loop = _NoLoop()
@@ -343,10 +351,7 @@ async def test_public_comparison_prefix_cannot_mask_external_access(
         persister=persister,
     )
 
-    events = [
-        event
-        async for event in orch.run(**_common(), message=message, persist=True)
-    ]
+    events = [event async for event in orch.run(**_common(), message=message, persist=True)]
 
     assert [event.type for event in events] == [
         AgentEventType.META,
@@ -380,7 +385,7 @@ async def test_public_comparison_within_one_clause_still_routes_normally() -> No
 
 
 @pytest.mark.asyncio
-async def test_router_unavailable_on_local_question_never_enters_data_plane() -> None:
+async def test_route_v4_unavailable_never_enters_data_plane() -> None:
     scripts: list[LlmResponse | Exception] = [
         LlmError(LlmErrorCode.TIMEOUT, retryable=True),
         LlmResponse(text="not-json"),
@@ -417,28 +422,27 @@ async def test_router_unavailable_on_local_question_never_enters_data_plane() ->
         assert [event.type for event in events] == [
             AgentEventType.META,
             AgentEventType.STEP,
-            AgentEventType.ERROR,
+            AgentEventType.DELTA,
+            AgentEventType.DONE,
         ]
-        assert events[-1].payload["code"] == ROUTER_UNAVAILABLE_CODE
-        assert events[-1].payload["message"] == ROUTER_UNAVAILABLE_TEXT
-        assert "本校校历" not in json.dumps(events[-1].payload, ensure_ascii=False)
+        assert events[-1].payload["stop_reason"] == StopReason.GUARD_BLOCK.value
+        assert "无法安全处理" in events[2].payload["text"]
+        assert "本校校历怎么查" not in json.dumps(events[2].payload, ensure_ascii=False)
         assert fast_loop.messages == []
         assert react_loop.messages == []
 
 
 @pytest.mark.asyncio
-async def test_router_unavailable_failure_is_not_replayed_as_model_history(
+async def test_route_v4_unavailable_failure_is_not_replayed_as_model_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     saved = _patch_persistence(monkeypatch)
-    sink = InMemoryTraceSink()
+    persister = _RecordingScopePersister()
     router = LlmRouter(
-        llm_port=FakeLlm(
-            complete_scripts=[LlmError(LlmErrorCode.TIMEOUT, retryable=True)]
-        ),
+        llm_port=FakeLlm(complete_scripts=[LlmError(LlmErrorCode.TIMEOUT, retryable=True)]),
         prompt_registry=build_default_registry(),
     )
-    orch = _orchestrator(router=router, trace_sink=sink)
+    orch = _orchestrator(router=router, persister=persister)
 
     events = [
         event
@@ -449,19 +453,17 @@ async def test_router_unavailable_failure_is_not_replayed_as_model_history(
         )
     ]
 
-    assert events[-1].type is AgentEventType.ERROR
+    assert events[-1].type is AgentEventType.DONE
+    assert events[-1].payload["stop_reason"] == StopReason.GUARD_BLOCK.value
     assert [(item["role"], item["status"]) for item in saved] == [
         ("user", "partial"),
-        ("assistant", "failed"),
+        ("assistant", "partial"),
     ]
-    trace = sink.turns[-1]
-    assert trace.route_path == "guard"
-    assert trace.error_code == ROUTER_UNAVAILABLE_CODE
-    assert trace.provider == "fake"
-    assert trace.model == "fake-model"
-    assert trace.prompt_name == "route"
-    assert trace.prompt_version == "v3"
-    assert trace.prompt_hash
+    call = persister.refusal_calls[0]
+    assert call["guard_result"].rule == "input.safety_unavailable"
+    assert call["call_usage"].provider == "fake"
+    assert call["call_usage"].prompt_version == "v4"
+    assert call["call_usage"].prompt_hash
 
 
 @pytest.mark.asyncio
@@ -628,13 +630,12 @@ async def test_input_guard_trace_carries_router_usage() -> None:
             usage=usage,
         )
     )
-    sink = InMemoryTraceSink()
+    persister = _RecordingScopePersister()
     loop = _RecordingLoop()
     orch = _orchestrator(
         router=router,
         fast_loop=loop,
-        persister=_RecordingScopePersister(),
-        trace_sink=sink,
+        persister=persister,
     )
 
     _events = [
@@ -647,15 +648,13 @@ async def test_input_guard_trace_carries_router_usage() -> None:
     ]
 
     assert loop.messages == []
-    trace = sink.turns[-1]
-    assert trace.route_path == "guard"
-    assert trace.stop_reason is StopReason.GUARD_BLOCK
-    assert trace.provider == usage.provider
-    assert trace.model == usage.model
-    assert trace.prompt_hash == usage.prompt_hash
-    assert trace.tokens_in == usage.tokens_in
-    assert trace.tokens_out == usage.tokens_out
-    assert trace.latency_ms == usage.latency_ms
+    # 输入护栏回合的 trace/usage 现在走 persist_refusal 单事务端口（TD-363 M4），
+    # 不再写内存 trace_sink；这里断言该端口收到 router usage 与 GUARD_BLOCK。
+    call = persister.refusal_calls[-1]
+    assert call["stop_reason"] is StopReason.GUARD_BLOCK
+    assert call["scope_mode"] == "input_guard"
+    assert call["rule_codes"] == ("input.injection",)
+    assert call["call_usage"] is usage
 
 
 class _BlockingRouter:
@@ -725,14 +724,16 @@ async def test_restriction_emits_fixed_ack_and_never_retrieves() -> None:
     assert router.messages == ["能不能不给我其他学校名单"]
     assert fast_loop.messages == []
     assert react_loop.messages == []
-    assert [event.payload.get("text") for event in events if event.type is AgentEventType.DELTA] == [
-        TENANT_SCOPE_RESTRICTION_ACK
-    ]
+    assert [
+        event.payload.get("text") for event in events if event.type is AgentEventType.DELTA
+    ] == [TENANT_SCOPE_RESTRICTION_ACK]
     assert events[-1].payload["stop_reason"] == StopReason.FINAL_ANSWER.value
 
 
 @pytest.mark.asyncio
-async def test_identity_claim_is_terminal_and_strips_content_from_router(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_identity_claim_is_terminal_and_strips_content_from_router(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_persistence(monkeypatch)
     router = _NoRouter()
     orch = _orchestrator(router=router, persister=_RecordingScopePersister())
@@ -827,10 +828,7 @@ async def test_mixed_external_person_fragment_without_self_scope_is_rejected(
     )
     message = f"比较本校和其他学校公开排名；{fragment}"
 
-    events = [
-        event
-        async for event in orch.run(**_common(), message=message, persist=True)
-    ]
+    events = [event async for event in orch.run(**_common(), message=message, persist=True)]
 
     assert events[-1].payload["stop_reason"] == StopReason.REFUSAL.value
     assert fast_loop.messages == []
@@ -839,7 +837,9 @@ async def test_mixed_external_person_fragment_without_self_scope_is_rejected(
 
 
 @pytest.mark.asyncio
-async def test_mixed_query_not_verbatim_is_replaced_before_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_mixed_query_not_verbatim_is_replaced_before_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_persistence(monkeypatch)
     fragment = "本校校历怎么查"
     router = _OutcomeRouter(
@@ -867,7 +867,9 @@ async def test_mixed_query_not_verbatim_is_replaced_before_loop(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_invalid_router_json_fails_closed_before_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_invalid_router_json_fails_closed_before_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_persistence(monkeypatch)
     fake = FakeLlm(complete_scripts=[LlmResponse(text="not-json")])
     router = LlmRouter(llm_port=fake, prompt_registry=build_default_registry())
@@ -888,10 +890,11 @@ async def test_invalid_router_json_fails_closed_before_retrieval(monkeypatch: py
     ]
 
     assert events[0].type is AgentEventType.META
-    assert events[-1].payload["stop_reason"] == StopReason.REFUSAL.value
+    assert events[-1].payload["stop_reason"] == StopReason.GUARD_BLOCK.value
     assert fast_loop.messages == []
     assert react_loop.messages == []
     assert len(persister.refusal_calls) == 1
+    assert persister.refusal_calls[0]["guard_result"].rule == "input.safety_unavailable"
 
 
 @pytest.mark.asyncio
@@ -901,7 +904,9 @@ async def test_provider_error_and_malformed_router_output_fail_closed() -> None:
         _OutcomeRouter(cast(Any, object())),
     ):
         fast_loop = _NoLoop()
-        orch = _orchestrator(router=router, fast_loop=fast_loop, persister=_RecordingScopePersister())
+        orch = _orchestrator(
+            router=router, fast_loop=fast_loop, persister=_RecordingScopePersister()
+        )
         events = [
             event
             async for event in orch.run(
@@ -943,10 +948,7 @@ async def test_prompt_injection_cannot_override_blocked_scope() -> None:
     router = _NoRouter()
     fast_loop = _NoLoop()
     orch = _orchestrator(router=router, fast_loop=fast_loop, persister=_RecordingScopePersister())
-    events = [
-        event
-        async for event in orch.run(**_common(), message=message, persist=True)
-    ]
+    events = [event async for event in orch.run(**_common(), message=message, persist=True)]
     assert router.messages == []
     assert fast_loop.messages == []
     assert events[-1].payload["stop_reason"] == StopReason.REFUSAL.value
@@ -955,14 +957,16 @@ async def test_prompt_injection_cannot_override_blocked_scope() -> None:
 @pytest.mark.asyncio
 async def test_malformed_v3_never_enters_data_plane_when_evidence_is_indirect() -> None:
     fake = FakeLlm(
-        complete_scripts=[
-            LlmResponse(text='{"intents":[{"name":"kb_qa","query":"友校新生名册"}]}')
-        ]
+        complete_scripts=[LlmResponse(text='{"intents":[{"name":"kb_qa","query":"友校新生名册"}]}')]
     )
     fast_loop = _NoLoop()
     react_loop = _NoLoop()
     orch = _orchestrator(
-        router=LlmRouter(llm_port=fake, prompt_registry=build_default_registry()),
+        router=LlmRouter(
+            llm_port=fake,
+            prompt_registry=build_default_registry(),
+            prompt_version="v3",
+        ),
         fast_loop=fast_loop,
         react_loop=react_loop,
         persister=_RecordingScopePersister(),
