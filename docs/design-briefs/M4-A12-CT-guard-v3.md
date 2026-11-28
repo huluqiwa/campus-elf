@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 日期 / ID | 2026-11-27 / M4-A12-CT / TD-361 |
-| 当前阶段 | **用户已确认；v3 实现完成，首轮 0B/3M、二次复审 0B/2M/1m 与最终复审 0B/1M 均已修复并通过本地门禁，最终独立复核 0B/0M PASS；PR #109 final code-head CI 全绿（backend run 46067099625 / security run 46067099758），等待用户明确合并授权** |
+| 当前阶段 | **已完成并合并**：用户已确认；三轮审查修复与独立复核 0B/0M PASS；PR #109 squash 合并为 `c4b12fa`，final 文档 head `13eb3a3` 与 merge 后 main push CI 全绿；A12 不达标、M4 不退出 |
 | 替代关系 | 替代已否决的 `v2：豁免判定结构化（默认拦截 + 结构化正则豁免）` |
 | 上游 | `docs/design-briefs/M4-A12-CT.md` CT-A1–A8；`docs/spec.md`；`docs/design.md`；`docs/tech-debt.md` TD-361/TD-390/TD-394–TD-400 |
 
@@ -233,4 +233,4 @@ ScopeRouteResult
 - 公开比较豁免必须同时满足真实比较结构、公开信息类别、本校参照或“仅用已知信息”限定，且不含敏感对象、取数动作、外校访问或提示注入；任一外校分句不可证明为公开比较时，整条消息只能使用经原文校验的 `mixed` 安全片段，否则拒绝。
 - 二次复审又发现 2 Major / 1 Minor：路由不可用与 MIXED 生成失败原先把用户原文落成 `completed`；router usage 漏记 ALLOW、输入护栏、路由不可用及部分拒绝分支；router span 属性与真实断言不足。修复后只有已确认安全的 ALLOW 失败保留 `completed`，其余失败落 `partial`；guard path 带 `LLM_ROUTER_UNAVAILABLE` 和 usage，ALLOW 单独写 `scope_router` span，输入护栏在 `meta` 前完成并记录 usage。审计脱敏只精确放行固定格式的路由名称/版本、SHA-256 摘要和 token 计数，真实 prompt 与非法伪摘要继续遮蔽。
 - 开发校准最终为 **87/87 matched / 0 fragment failures**，实际路径分布为显式证据早拒 27、scope-aware 模型 53、本地普通放行 7；这是开发证据，不冒充线上 P95 或 A12 评估结果。
-- 最终复审修复后的本地生产代码门禁：完整 `tests/harness` **306 passed**；真实 PG/Qdrant/SSE 目标批次 **47 passed / 9 skipped，302.46 秒**；租户范围数据库专项 **13 passed，178.53 秒**（重置测试库后以 `--timeout=300` 运行）；临时模型校准 **87/87 matched / 0 fragment failures**（早拒 27、模型 53、本地 7）；Ruff、Mypy（`app tests` 340 个源文件 + `scripts` 3 个源文件）、Bandit、测试库 Alembic check（No new upgrade operations detected）与 `git diff --check` 全部通过。首轮 0B/3M、二次复审 0B/2M/1m 与最终复审 0B/1M 均已修复；最终 Major 是引述净化成功回合被后续语义计划覆盖而误存 `completed`，现由不可变 `quote_redacted` 标志封住，并补内存、真实 PostgreSQL 状态与上下文断言。最终独立复核为 0 Blocker / 0 Major，PASS；最终测试夹具修复后，本地完整 `tests/harness` 为 **307 passed**、三条受影响业务/集成文件为 **18 passed**。代码提交 `79b84ab` 的 PR #109 final code-head CI 全绿（backend run `46067099625`：**1530 passed / 19 skipped**；security run `46067099758`），等待用户明确合并授权；A12 分母 `195/60/46/20/69`、门槛 `85/100/90/95/80`、旧分数和评估语料未修改，M4 仍未达到退出条件。
+- 最终复审修复后的本地生产代码门禁：完整 `tests/harness` **306 passed**；真实 PG/Qdrant/SSE 目标批次 **47 passed / 9 skipped，302.46 秒**；租户范围数据库专项 **13 passed，178.53 秒**（重置测试库后以 `--timeout=300` 运行）；临时模型校准 **87/87 matched / 0 fragment failures**（早拒 27、模型 53、本地 7）；Ruff、Mypy（`app tests` 340 个源文件 + `scripts` 3 个源文件）、Bandit、测试库 Alembic check（No new upgrade operations detected）与 `git diff --check` 全部通过。首轮 0B/3M、二次复审 0B/2M/1m 与最终复审 0B/1M 均已修复；最终 Major 是引述净化成功回合被后续语义计划覆盖而误存 `completed`，现由不可变 `quote_redacted` 标志封住，并补内存、真实 PostgreSQL 状态与上下文断言。最终独立复核为 0 Blocker / 0 Major，PASS；最终测试夹具修复后，本地完整 `tests/harness` 为 **307 passed**、三条受影响业务/集成文件为 **18 passed**。PR #109 已 squash 合并为 `c4b12fa`；合并后 main push backend run `46118562649` 通过 **1530 passed / 19 skipped**（测试 34m23s，总分支覆盖率 90%），security run `46118562658` 成功；A12 分母 `195/60/46/20/69`、门槛 `85/100/90/95/80`、旧分数和评估语料未修改，M4 仍未达到退出条件。

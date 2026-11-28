@@ -65,7 +65,7 @@
 
 ### M4-A12-CT / TD-361 跨租请求策略与真实边界（十三轮 v2 + v3 独立审查）
 
-- 日期：2026-11-27；分支 `feature/td-361-a12-cross-tenant`；草稿 PR #109；简报 `docs/design-briefs/M4-A12-CT.md`（CT-A1–A8 用户已确认）。
+- 日期：2026-11-27；分支 `feature/td-361-a12-cross-tenant`；PR #109 已于 2026-11-28 squash 合并为 `c4b12fa`；简报 `docs/design-briefs/M4-A12-CT.md`（CT-A1–A8 用户已确认）。
 - 范围：新增 `backend/app/harness/guards/tenant_scope.py`（纯函数范围计划）；改动 `backend/app/harness/orchestrator.py`（前置/路由后复核 + 范围事件落库 + 历史裁剪）、`backend/app/harness/persistence.py`、`backend/app/harness/chat_assembly.py`、`backend/app/harness/router.py`、`backend/app/harness/prompt_loading.py` + `prompt_files/route_v2.md`、`backend/app/auth/principal.py`、`backend/app/api/campus_chat.py`、`backend/app/main.py`；测试新增 `backend/tests/harness/test_tenant_scope.py`、`test_tenant_scope_orchestrator.py`、`backend/tests/integration/test_tenant_scope_refusal_db.py`，改动 `backend/tests/business/test_bs_m4_04_guards.py`、`test_chat_tools.py`、`test_router.py`、`test_auth_login.py`、`test_kb_chat_retrieval.py`、`test_chat_turns_sse.py`。
 - 交付边界：本条覆盖“实现 → 十一轮独立审查 → 修复 → 复测”全过程；A12 历史分母（195/60/46/20/69）、门槛（85/100/90/95/80）与旧分数**未修改**；commit/push/PR 在本条之后单独执行，**合并仍需用户再次明确授权**。
 - **第一轮：1 Blocker / 3 Major / 4 Minor。** Blocker：编排器协议 `ChatTurnRunner` 缺 `school_names`，端点 SSE 用例无法按认证租户判定校名。Major：请求礼貌语前缀（请问/帮我/查询…）被当成外校名（“帮我查学校的校历”误拒）；校名实体缺“附中/附小/初中/职中/职高/技校/职教”与全大写拉丁缩写变体；安全事件落库失败日志用 `logger.exception` 打印异常 repr（可能带出审计哈希密钥）。Minor：危险引述净化后放行缺 `redact` 审计事件与指标；安全片段要求命中意图词白名单导致整段丢弃；平台身份声称与绕过指令被放行进模型上下文；路由提示词版本未钉住。既有 `logger.exception` 与提示词版本未进 `chat_traces` 分别登记 TD-374、TD-375。
@@ -231,6 +231,8 @@
 - **测试夹具独立窄范围复审（2026-11-28）**：首轮 **0 Blocker / 0 Major / 1 Minor**。Minor 为 `AllowRouteFakeLlm` 只检查旧/新 prompt 共有的消息 marker，误接 route_v2 时也可能通过；已改为校验 v3 独有的首行标志，并新增 `route_v2` 必须拒绝的 harness 回归。修复后无新增 Blocker/Major，依赖既有“Minor 不触发复审”门禁。
 - **final code-head CI 回填（2026-11-28）**：代码提交 79b84ab 的 backend run 46067099625 成功，1530 passed / 19 skipped（2743.18 秒，总分支覆盖率 90%）；security run 46067099758 成功。夹具修复后的本地复测见下一条。
 - **夹具修复后复测**：三条受影响文件 **18 passed / 1 warning（64.46 秒）**；完整 `tests/harness` **307 passed**；Ruff、Mypy（`app tests` 340 文件）、Bandit（app）、测试库 Alembic check（No new upgrade operations detected）与 diff check 全绿。未重算 A12 分母、门槛、历史分数或评估语料，M4 仍未退出。
+- **合并与 main push CI（2026-11-28）**：用户明确授权合并；PR #109 final 文档 head 13eb3a32431cb0e683764b2205adb266bafded79 的 backend/security CI 全绿，随后 squash 合并为 c4b12fad7129b4b24e9f806811f94ae112e1a4d7 并删除交付分支。合并后 main push backend run 46118562649 成功：1530 passed / 19 skipped / 1 warning，测试 34m23s，总分支覆盖率 90%，四包门槛全部通过；security run 46118562658 成功。A12 分母、门槛、历史分数与评估语料未改，M4 仍未退出。
+- **TD-361 合并状态纯文档回填独立审查（2026-11-28）**：独立只读审查六份 staged 文档，核对 PR #109 合并哈希、final-head CI、merge 后 main push backend/security、实际测试与覆盖率读数、状态文字及 A12/M4 边界。结论 **0 Blocker / 0 Major / 0 Minor，PASS，可提交**。
 
 
 ## 记录模板
