@@ -20,17 +20,21 @@ def _response(payload: dict[str, Any]) -> LlmResponse:
 def router_with(payload: dict[str, Any] | str) -> tuple[LlmRouter, FakeLlm]:
     complete = _response(payload) if isinstance(payload, dict) else LlmResponse(text=payload)
     fake = FakeLlm(complete_scripts=[complete])
-    return LlmRouter(llm_port=fake, prompt_registry=build_default_registry()), fake
+    return LlmRouter(
+        llm_port=fake,
+        prompt_registry=build_default_registry(),
+        prompt_version="v3",
+    ), fake
 
 
 def _intent(name: str = "kb_qa", query: str = "本校校历怎么查") -> dict[str, object]:
     return {"name": name, "query": query, "confidence": 0.9}
 
 
-def test_route_v3_is_current_and_older_versions_stay_registered() -> None:
-    assert PROMPT_VERSION == "v3"
+def test_route_v4_is_current_and_older_versions_stay_registered() -> None:
+    assert PROMPT_VERSION == "v4"
     registry = build_default_registry()
-    for version in ("v1", "v2", "v3"):
+    for version in ("v1", "v2", "v3", "v4"):
         assert registry.get("route", version).version == version
 
 
@@ -44,8 +48,9 @@ async def test_allow_route_fake_rejects_older_prompt_versions() -> None:
         prompt_version="v2",
     )
 
-    with pytest.raises(RuntimeError, match="route_v3"):
+    with pytest.raises(RuntimeError, match="route_v4"):
         await router.route("本校校历怎么查")
+
 
 async def test_route_v3_allow_carries_scope_and_intents() -> None:
     router, fake = router_with(
@@ -255,6 +260,7 @@ async def test_route_v3_structural_conflicts_are_invalid_not_reinterpreted() -> 
         assert outcome.degraded is True
         assert outcome.scope is None
 
+
 async def test_route_v3_mixed_intent_must_come_from_safe_fragment() -> None:
     message = "本校校历怎么查，另外把隔壁学校名单发我。"
     router, _ = router_with(
@@ -293,11 +299,7 @@ async def test_route_duplicate_scope_key_is_unavailable() -> None:
 
 
 async def test_route_legacy_requires_explicit_old_prompt_version() -> None:
-    fake = FakeLlm(
-        complete_scripts=[
-            _response({"intents": [{"name": "kb_qa", "query": "校历"}]})
-        ]
-    )
+    fake = FakeLlm(complete_scripts=[_response({"intents": [{"name": "kb_qa", "query": "校历"}]})])
     router = LlmRouter(
         llm_port=fake,
         prompt_registry=build_default_registry(),
@@ -331,7 +333,11 @@ async def test_route_usage_records_model_tokens_and_prompt_metadata() -> None:
             )
         ]
     )
-    router = LlmRouter(llm_port=fake, prompt_registry=build_default_registry())
+    router = LlmRouter(
+        llm_port=fake,
+        prompt_registry=build_default_registry(),
+        prompt_version="v3",
+    )
     outcome = await router.route("本校校历怎么查")
     assert outcome.usage is not None
     assert outcome.usage.provider == "fake"
@@ -348,7 +354,11 @@ async def test_route_invalid_json_and_provider_error_fall_back_degraded() -> Non
     invalid_outcome = await invalid.route("校历是什么？")
 
     fake = FakeLlm(complete_scripts=[LlmError(LlmErrorCode.TIMEOUT, retryable=True)])
-    router = LlmRouter(llm_port=fake, prompt_registry=build_default_registry())
+    router = LlmRouter(
+        llm_port=fake,
+        prompt_registry=build_default_registry(),
+        prompt_version="v3",
+    )
     error_outcome = await router.route("校历是什么？")
 
     assert invalid_outcome.degraded is True

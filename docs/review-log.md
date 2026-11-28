@@ -6,6 +6,17 @@
 
 ## 当前评审状态
 
+### M4-A12-SC / TD-363 敏感内容安全计划（两轮独立审查 + 复审 0B/0M，可提交）
+
+- 日期：2026-11-28；分支 `feature/td-363-sensitive-content`；基线 `main`=`2ecd9fb`；简报 `docs/design-briefs/M4-A12-SC.md`。审查对象为 24 个文件的完整 diff（含本审查条目），实现提交 `e5bfcb8`、PR #111。
+- **首轮独立审查：1 Blocker / 4 Major / 2 Minor，全部有效。** Blocker：自伤等敏感 user 原文以明文写入 `conversation_messages`。Major：自伤裸词误伤“制度/培训/预防”政策咨询；违法规则既误拦“责任/处分”咨询又漏拦购买渠道；确定性输入护栏审计晚于首个 SSE 且落库失败仍返回话术；安全终止/路由故障与外校取数叠加时丢失 `tenant.external_scope` 审计。Minor：话术矩阵只测服务端模板却易被误读为验证模型分类；14 个 Python 文件 `ruff format --check` 不过。
+- **首轮修复**：新增 `SENSITIVE_HISTORY_PLACEHOLDER=「【敏感消息已脱敏】」`，安全终止与确定性输入护栏落库历史时用户侧写占位（助手固定话术保留）；重写自伤/违法模式并钉住政策咨询负例与实施/购买正例；新增 `_commit_input_guard` 在 `meta/step` 前经 `persist_refusal` 单事务写 guard/trace/span，失败只发脱敏错误；`persist_refusal` 增 `extra_guard_results`、`_commit_safety_event` 增 `supplementary_scope_plan`，安全+外校/路由故障+外校证据同事务写两类审计；话术矩阵加说明并统一 `ruff format`。
+- **第二轮独立审查（针对修复）：0 Blocker / 2 Major。** Major：`route_v4.md` 把“告诉我怎么制作炸弹”标为 `refuse / violence`，与 `illegal` 类别定义及“责任咨询→allow”边界冲突，安全终态会先于确定性护栏并返回暴力话术；购买规则只覆盖“怎么/哪里+买”，漏“我想买毒品/我要购买枪支/where can I buy drugs/how to buy drugs”等直接购买意图。
+- **第二轮修复**：提示词改 `refuse / illegal` 并新增提示词一致性回归；购买规则扩展中英文直接购买/获取/下单意图，用负向前瞻排除“购买渠道的管理规定/法律责任/学校处置”等政策咨询，并补正负例。
+- **复审：0 Blocker / 0 Major，可提交。** 确认两处 Major 已解决、无新增误伤/漏判与正则回溯风险。
+- **复测**：完整 `tests/harness` **408 passed**；真实 PostgreSQL/Qdrant/SSE `test_bs_m4_04_guards.py` **18 passed**（新增“敏感支持+外校取数两类审计”“provider 失败+外校证据保留范围审计”）；sensitive 20 条 SSE 与 DB 结构各 20/20；严格 5 重复语义 judge 16/20（失败为 judge 签名不稳定，归 TD-362/365）；`ruff check`、`mypy`（344 app/tests + 3 scripts）、`bandit`、`alembic check`、`git diff --check` 通过。
+- **证据边界**：不宣称 A12/M4 达标；历史 A12 分母/门槛/语料/报告不改；TD-361 87/87 无法在当前仓库复现（回归文件仅 55 行）已登记 TD-414；本功能点 PR 合并需用户授权，本轮审查不授予合并授权。
+
 ### M4-A12-EVAL / TD-362 离线实现（严格重复协议已实现；代码复审通过；EVAL-A8 未通过）
 
 - 日期：2026-11-26；HEAD=`37d8904`。首轮独立审查对象为 22 个 staged 文件；最终复审检查修复后的完整 staged diff。

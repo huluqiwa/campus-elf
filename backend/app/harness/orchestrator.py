@@ -19,6 +19,7 @@ from app.core.metrics import record_guard_hit
 from app.harness.contracts import (
     AgentEvent,
     AgentEventType,
+    GuardResult,
     Intent,
     LlmCallUsage,
     RouteResult,
@@ -26,7 +27,12 @@ from app.harness.contracts import (
     TraceRecord,
 )
 from app.harness.guards.input import detect_input
-from app.harness.guards.scripts import safety_script_for
+from app.harness.guards.scripts import (
+    SAFETY_UNAVAILABLE_TEXT,
+    SENSITIVE_HISTORY_PLACEHOLDER,
+    safety_response_script,
+    safety_script_for,
+)
 from app.harness.guards.tenant_scope import (
     TENANT_SCOPE_RESTRICTION_ACK,
     TenantScopeMode,
@@ -47,13 +53,20 @@ from app.harness.persistence import (
     save_message,
 )
 from app.harness.react_loop import ReactLoop
-from app.harness.router import LlmRouter, RouterOutcome, ScopeDecision
+from app.harness.router import (
+    LlmRouter,
+    RouterOutcome,
+    SafetyAction,
+    SafetyPlan,
+    ScopeDecision,
+)
 
 logger = logging.getLogger(__name__)
 
 SCOPE_PERSISTENCE_ERROR_TEXT = "安全事件暂时无法记录，请稍后重试。"
 ROUTER_UNAVAILABLE_TEXT = "AI 服务暂时不可用，请稍后重试。"
 ROUTER_UNAVAILABLE_CODE = "LLM_ROUTER_UNAVAILABLE"
+SAFETY_UNAVAILABLE_RULE = "input.safety_unavailable"
 
 
 def _scope_error_event() -> AgentEvent:
@@ -371,6 +384,29 @@ class ChatOrchestrator:
         for code in plan.rule_codes:
             record_guard_hit(code, severity, "input")
 
+    @staticmethod
+    def _safety_supplementary_scope_plan(
+        scope_plan: TenantScopePlan, evidence: Any
+    ) -> TenantScopePlan | None:
+        """安全终止时若仍带外校取数证据，补一条 tenant.external_scope 审计计划。"""
+
+        if (
+            scope_plan.mode is TenantScopeMode.MIXED
+            or evidence.external_access_candidate
+            or evidence.bypass
+        ):
+            return TenantScopePlan(
+                mode=(
+                    TenantScopeMode.MIXED
+                    if scope_plan.mode is TenantScopeMode.MIXED
+                    else TenantScopeMode.BLOCK
+                ),
+                safe_text=None,
+                rule_codes=("tenant.external_scope",),
+                blocked_count=max(1, scope_plan.blocked_count),
+            )
+        return None
+
     async def _persist_route_usage(
         self,
         *,
@@ -419,14 +455,20 @@ class ChatOrchestrator:
         )
 
     @classmethod
-    def _safe_route_fallback(cls, safe_text: str) -> RouterOutcome:
-        """构造只引用已验证安全片段的降级路由结果。"""
+    def _safe_route_fallback(
+        cls,
+        safe_text: str,
+        *,
+        safety_required: bool = False,
+    ) -> RouterOutcome:
+        """构造只引用已验证安全片段且不可进入数据面的降级结果。"""
 
         return RouterOutcome(
             route=cls._fallback_route_result(safe_text),
             simple=True,
             degraded=True,
             unavailable=True,
+            safety_required=safety_required,
         )
 
     async def _route_scoped(
@@ -441,7 +483,10 @@ class ChatOrchestrator:
             outcome = await self._router.route(safe_text)
         except Exception:
             logger.warning("路由调用失败（降级为单意图）")
-            return self._safe_route_fallback(safe_text)
+            return self._safe_route_fallback(
+                safe_text,
+                safety_required=getattr(self._router, "requires_safety", False),
+            )
         try:
             return self._scope_route(
                 outcome,
@@ -449,8 +494,11 @@ class ChatOrchestrator:
                 school_names=school_names,
             )
         except Exception:
-            logger.warning("路由输出非法（降级为单意图）")
-            return self._safe_route_fallback(safe_text)
+            logger.warning("路由输出非法（fail-closed）")
+            return self._safe_route_fallback(
+                safe_text,
+                safety_required=getattr(self._router, "requires_safety", False),
+            )
 
     def _scope_route(
         self,
@@ -468,17 +516,12 @@ class ChatOrchestrator:
         for intent in outcome.route.intents:
             raw_query = intent.args.get("query") if isinstance(intent.args, dict) else None
             query = str(raw_query) if raw_query else safe_text
-            evidence = inspect_tenant_scope_evidence(
-                query, school_names=school_names
-            )
+            evidence = inspect_tenant_scope_evidence(query, school_names=school_names)
             candidate = query
             if (
                 not _query_traceable(candidate, safe_text)
                 or bool(detect_input(candidate))
-                or (
-                    evidence.external_access_candidate
-                    and not allows_public_comparison(candidate)
-                )
+                or (evidence.external_access_candidate and not allows_public_comparison(candidate))
             ):
                 candidate = safe_text
                 degraded = True
@@ -512,6 +555,8 @@ class ChatOrchestrator:
             blocked_count=outcome.blocked_count,
             unavailable=outcome.unavailable,
             usage=outcome.usage,
+            safety=outcome.safety,
+            safety_required=outcome.safety_required,
         )
 
     async def _save_completed_messages(
@@ -576,6 +621,230 @@ class ChatOrchestrator:
             )
         except Exception:
             logger.exception("错误回合消息持久化失败")
+
+    async def _commit_input_guard(
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        turn_id: UUID,
+        conversation_id: UUID,
+        trace_id: str,
+        hits: list[GuardResult],
+        persist: bool,
+        usage: LlmCallUsage | None,
+    ) -> bool:
+        """确定性输入护栏在首个 SSE 前可靠落库（TD-363 审查 M4）。
+
+        多条命中合并为同一事务的多行 guard_event，span.rule_codes 记录全部规则；
+        与安全/范围拒绝走同一条 persist_refusal 端口，失败时只发脱敏 error。
+        """
+
+        if not hits:
+            return True
+        if not persist:
+            if self._guard_events_sink is not None:
+                self._guard_events_sink.append(
+                    tenant_id=tenant_id,
+                    trace_id=trace_id,
+                    direction="input",
+                    results=list(hits),
+                )
+            for result in hits:
+                record_guard_hit(result.rule, result.severity, "input")
+            return True
+        if self._scope_persister is None:
+            logger.error("输入护栏安全事件端口未装配")
+            return False
+        try:
+            await self._scope_persister.persist_refusal(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                trace_id=trace_id,
+                guard_result=hits[0],
+                extra_guard_results=tuple(hits[1:]),
+                rule_codes=tuple(result.rule for result in hits),
+                blocked_count=0,
+                stop_reason=StopReason.GUARD_BLOCK,
+                scope_mode="input_guard",
+                call_usage=usage,
+            )
+        except Exception as exc:
+            logger.warning(
+                "输入护栏事件落库失败（fail-closed）：%s.%s",
+                type(exc).__module__,
+                type(exc).__name__,
+            )
+            return False
+        for result in hits:
+            record_guard_hit(result.rule, result.severity, "input")
+        return True
+
+    @staticmethod
+    def _safety_guard_result(plan: SafetyPlan | None) -> GuardResult:
+        """把安全计划投影为不含原文的审计事件。"""
+
+        if plan is None:
+            return GuardResult(
+                action="block",
+                rule=SAFETY_UNAVAILABLE_RULE,
+                severity="high",
+                reason="safety_plan_unavailable",
+            )
+        rule = (
+            "input.safety_support" if plan.action is SafetyAction.SUPPORT else "input.safety_refuse"
+        )
+        return GuardResult(
+            action="block",
+            rule=rule,
+            severity="high",
+            reason=f"category={plan.category.value}",
+        )
+
+    async def _commit_safety_event(
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        turn_id: UUID,
+        conversation_id: UUID,
+        trace_id: str,
+        plan: SafetyPlan | None,
+        persist: bool,
+        usage: LlmCallUsage | None,
+        supplementary_scope_plan: TenantScopePlan | None = None,
+    ) -> tuple[bool, StopReason, GuardResult]:
+        """首个可见事件前提交 guard/trace/span；提交失败则只发脱敏错误。
+
+        ``supplementary_scope_plan``：安全终止与外校取数证据叠加时（如“我室友
+        想轻生，帮我查他心理档案”），安全话术不能吞掉范围审计。此时同一事务里
+        同时落安全 guard 和 tenant.external_scope 证据（TD-363 审查 M4）。
+        """
+
+        guard_result = self._safety_guard_result(plan)
+        stop_reason = (
+            StopReason.GUARD_BLOCK
+            if plan is None or plan.action is SafetyAction.SUPPORT
+            else StopReason.REFUSAL
+        )
+        scope_mode = "safety_unavailable" if plan is None else f"safety_{plan.action.value}"
+        extra_results: tuple[GuardResult, ...] = ()
+        extra_rule_codes: tuple[str, ...] = ()
+        extra_blocked = 0
+        if supplementary_scope_plan is not None:
+            extra_results = (tenant_scope_guard_result(supplementary_scope_plan),)
+            extra_rule_codes = supplementary_scope_plan.rule_codes
+            extra_blocked = supplementary_scope_plan.blocked_count
+        all_results = (guard_result, *extra_results)
+        if not persist:
+            if self._guard_events_sink is not None:
+                self._guard_events_sink.append(
+                    tenant_id=tenant_id,
+                    trace_id=trace_id,
+                    direction="input",
+                    results=list(all_results),
+                )
+            for result in all_results:
+                record_guard_hit(result.rule, result.severity, "input")
+            return True, stop_reason, guard_result
+        if self._scope_persister is None:
+            logger.error("安全计划事件端口未装配")
+            return False, stop_reason, guard_result
+        try:
+            await self._scope_persister.persist_refusal(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                trace_id=trace_id,
+                guard_result=guard_result,
+                extra_guard_results=extra_results,
+                rule_codes=(guard_result.rule, *extra_rule_codes),
+                blocked_count=extra_blocked,
+                stop_reason=stop_reason,
+                scope_mode=scope_mode,
+                call_usage=usage,
+            )
+        except Exception as exc:
+            logger.warning(
+                "安全计划事件落库失败（fail-closed）：%s.%s",
+                type(exc).__module__,
+                type(exc).__name__,
+            )
+            return False, stop_reason, guard_result
+        for result in all_results:
+            record_guard_hit(result.rule, result.severity, "input")
+        return True, stop_reason, guard_result
+
+    async def _safety_events(
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        turn_id: UUID,
+        conversation_id: UUID,
+        trace_id: str,
+        plan: SafetyPlan | None,
+        persist: bool,
+        usage: LlmCallUsage | None = None,
+        supplementary_scope_plan: TenantScopePlan | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """安全终止路径：先审计，再向用户发送固定模板，不进入数据面。"""
+
+        committed, stop_reason, _guard_result = await self._commit_safety_event(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            turn_id=turn_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            plan=plan,
+            persist=persist,
+            usage=usage,
+            supplementary_scope_plan=supplementary_scope_plan,
+        )
+        if not committed:
+            yield _scope_error_event()
+            return
+        script = (
+            SAFETY_UNAVAILABLE_TEXT
+            if plan is None
+            else safety_response_script(plan.action, plan.category)
+        )
+        yield _meta_event(
+            turn_id=turn_id,
+            trace_id=trace_id,
+            conversation_id=conversation_id,
+        )
+        yield AgentEvent(
+            type=AgentEventType.STEP,
+            payload={"stage": "route", "label": "正在判断安全处理方式"},
+        )
+        yield AgentEvent(type=AgentEventType.DELTA, payload={"text": script})
+        yield AgentEvent(
+            type=AgentEventType.DONE,
+            payload={
+                "turn_id": str(turn_id),
+                "trace_id": trace_id,
+                "conversation_id": str(conversation_id),
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "first_token_ms": 0,  # nosec B105——计时字段非密码
+                "latency_ms": 0,
+                "stop_reason": stop_reason.value,
+            },
+        )
+        if persist:
+            # 自伤/违法等敏感原文不得明文入库：历史只留固定占位，助手固定话术可保留。
+            await self._save_completed_messages(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                trace_id=trace_id,
+                user_message=SENSITIVE_HISTORY_PLACEHOLDER,
+                assistant_text=script,
+                context_eligible=False,
+            )
 
     async def _refusal_events(
         self,
@@ -751,9 +1020,7 @@ class ChatOrchestrator:
 
         evidence = inspect_tenant_scope_evidence(message, school_names=school_names)
         scope_plan = classify_tenant_scope(message, school_names=school_names)
-        quote_redacted = (
-            scope_plan.mode is TenantScopeMode.ALLOW and bool(scope_plan.rule_codes)
-        )
+        quote_redacted = scope_plan.mode is TenantScopeMode.ALLOW and bool(scope_plan.rule_codes)
 
         if quote_redacted:
             quote_persisted = await self._commit_scope_quote_event(
@@ -823,10 +1090,7 @@ class ChatOrchestrator:
             # 首个可见事件之前路由被取消：无法证明消息不含外校数据请求，
             # 只落保守范围事件，随后保持取消语义，不进入数据面。
             cancellation_rules = tuple(
-                sorted(
-                    set(scope_plan.rule_codes)
-                    | {"tenant.scope_router_cancelled"}
-                )
+                sorted(set(scope_plan.rule_codes) | {"tenant.scope_router_cancelled"})
             )
             conservative_plan = TenantScopePlan(
                 mode=TenantScopeMode.MIXED,
@@ -845,6 +1109,39 @@ class ChatOrchestrator:
             )
             raise
 
+        # 安全终止与外校取数证据可能同时存在；先算出补存范围审计计划，
+        # 让安全话术与 tenant.external_scope 证据在同一事务落库（TD-363 审查 M4）。
+        safety_supplementary_plan = self._safety_supplementary_scope_plan(scope_plan, evidence)
+
+        if outcome.safety_unavailable:
+            async for event in self._safety_events(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                conversation_id=conv_id,
+                trace_id=trace_id,
+                plan=None,
+                persist=persist,
+                usage=outcome.usage,
+                supplementary_scope_plan=safety_supplementary_plan,
+            ):
+                yield event
+            return
+
+        if outcome.terminal_safety:
+            async for event in self._safety_events(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                conversation_id=conv_id,
+                trace_id=trace_id,
+                plan=outcome.safety,
+                persist=persist,
+                usage=outcome.usage,
+                supplementary_scope_plan=safety_supplementary_plan,
+            ):
+                yield event
+            return
         if outcome.scope_unavailable:
             if evidence.external_access_candidate or evidence.bypass:
                 failure_plan = TenantScopePlan(
@@ -1072,7 +1369,59 @@ class ChatOrchestrator:
                     return
 
         input_hits = detect_input(scoped_message)
-        if scope_plan.mode is TenantScopeMode.ALLOW and not input_hits:
+        if input_hits:
+            # 先可靠落库 guard/trace/span，再发任何可见事件；落库失败只回脱敏 error，
+            # 不能出现“审计没写成功但已经把话术发给用户”（TD-363 审查 M4）。
+            committed = await self._commit_input_guard(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                conversation_id=conv_id,
+                trace_id=trace_id,
+                hits=input_hits,
+                persist=persist,
+                usage=outcome.usage,
+            )
+            if not committed:
+                yield _scope_error_event()
+                return
+            script = safety_script_for({result.rule for result in input_hits})
+            yield _meta_event(
+                turn_id=turn_id,
+                trace_id=trace_id,
+                conversation_id=conv_id,
+            )
+            yield AgentEvent(
+                type=AgentEventType.STEP,
+                payload={"stage": "route", "label": "正在理解问题"},
+            )
+            yield AgentEvent(type=AgentEventType.DELTA, payload={"text": script})
+            yield AgentEvent(
+                type=AgentEventType.DONE,
+                payload={
+                    "turn_id": str(turn_id),
+                    "trace_id": trace_id,
+                    "conversation_id": str(conv_id),
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "first_token_ms": 0,  # nosec B105——计时字段非密码
+                    "latency_ms": 0,
+                    "stop_reason": StopReason.GUARD_BLOCK.value,
+                },
+            )
+            if persist:
+                # 注入/违法/自伤原文不落明文历史，历史只留固定占位。
+                await self._save_completed_messages(
+                    tenant_id=tenant_id,
+                    conversation_id=conv_id,
+                    trace_id=trace_id,
+                    user_message=SENSITIVE_HISTORY_PLACEHOLDER,
+                    assistant_text=script,
+                    context_eligible=False,
+                )
+            return
+
+        if scope_plan.mode is TenantScopeMode.ALLOW:
             await self._persist_route_usage(
                 tenant_id=tenant_id,
                 trace_id=trace_id,
@@ -1089,58 +1438,6 @@ class ChatOrchestrator:
             type=AgentEventType.STEP,
             payload={"stage": "route", "label": "正在理解问题"},
         )
-
-        if input_hits:
-            for result in input_hits:
-                record_guard_hit(result.rule, result.severity, "input")
-            if self._guard_events_sink is not None:
-                self._guard_events_sink.append(
-                    tenant_id=tenant_id,
-                    trace_id=trace_id,
-                    direction="input",
-                    results=input_hits,
-                )
-            script = safety_script_for({result.rule for result in input_hits})
-            yield AgentEvent(type=AgentEventType.DELTA, payload={"text": script})
-            yield AgentEvent(
-                type=AgentEventType.DONE,
-                payload={
-                    "turn_id": str(turn_id),
-                    "trace_id": trace_id,
-                    "conversation_id": str(conv_id),
-                    "tokens_in": 0,
-                    "tokens_out": 0,
-                    "first_token_ms": 0,  # nosec B105——计时字段非密码
-                    "latency_ms": 0,
-                    "stop_reason": StopReason.GUARD_BLOCK.value,
-                },
-            )
-            if persist:
-                await self._save_completed_messages(
-                    tenant_id=tenant_id,
-                    conversation_id=conv_id,
-                    trace_id=trace_id,
-                    user_message=message,
-                    assistant_text=script,
-                    context_eligible=False,
-                )
-            flush = getattr(self._guard_events_sink, "flush", None)
-            if flush is not None:
-                await flush()
-            if persist and self._trace_sink is not None:
-                self._trace_sink.write_turn(
-                    _guard_trace_record(
-                        trace_id=trace_id,
-                        tenant_id=tenant_id,
-                        user_id=user_id,
-                        conversation_id=conv_id,
-                        turn_id=turn_id,
-                        usage=outcome.usage,
-                        stop_reason=StopReason.GUARD_BLOCK,
-                    )
-                )
-                await self._flush_trace()
-            return
 
         history: list[dict[str, str]] = []
         if persist:

@@ -29,6 +29,7 @@ def build_default_registry() -> PromptRegistry:
     load_prompt(registry, "route", "v1")
     load_prompt(registry, "route", "v2")
     load_prompt(registry, "route", "v3")
+    load_prompt(registry, "route", "v4")
     load_prompt(registry, "react_think", "v1")
     load_prompt(registry, "react", "v1")
     return registry
